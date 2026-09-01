@@ -1686,7 +1686,7 @@ class SignalAuditTracker:
     def load_records(self) -> list:
         if os.path.exists(self.csv_path):
             try:
-                df = pd.read_csv(self.csv_path)
+                df = pd.read_csv(self.csv_path, keep_default_na=False).fillna("")
                 return df.to_dict(orient='records')
             except Exception:
                 return []
@@ -1695,13 +1695,13 @@ class SignalAuditTracker:
     def save_records(self):
         try:
             if self.records:
-                df = pd.DataFrame(self.records)
+                df = pd.DataFrame(self.records).fillna("")
                 # Primary detailed audit CSV (Spreadsheet compatible)
                 df.to_csv(self.csv_path, index=False)
                 
                 # Performance Summary KPI CSV for easy spreadsheet viewing
                 summary_data = self.build_kpi_summary()
-                df_sum = pd.DataFrame([summary_data])
+                df_sum = pd.DataFrame([summary_data]).fillna("")
                 df_sum.to_csv(self.summary_csv_path, index=False)
         except Exception as e:
             print(f"[SIGNAL TRACKER ERROR] Failed saving CSV: {e}")
@@ -1727,15 +1727,19 @@ class SignalAuditTracker:
         a_lost = sum(1 for r in a_recs if "LOST" in str(r.get('outcome_label', '')))
         a_wr = round((a_won / max(1, a_won + a_lost)) * 100.0, 2) if (a_won + a_lost) > 0 else 0.0
 
-        # Calculate Average Return
+        # Calculate Average & Cumulative Return safely (ignoring pending/empty/NaN values)
         returns = []
         for r in self.records:
             ret_raw = r.get('realized_return_pct')
-            if ret_raw is not None and str(ret_raw) != "":
-                try:
-                    returns.append(float(str(ret_raw).replace('%', '').replace('+', '')))
-                except Exception:
-                    pass
+            if ret_raw is not None:
+                ret_str = str(ret_raw).replace('%', '').replace('+', '').strip()
+                if ret_str != "" and ret_str.lower() not in ["nan", "none", "null"]:
+                    try:
+                        val = float(ret_str)
+                        if not (math.isnan(val) or math.isinf(val)):
+                            returns.append(val)
+                    except Exception:
+                        pass
         avg_ret = round(float(np.mean(returns)), 2) if returns else 0.0
         total_ret = round(float(np.sum(returns)), 2) if returns else 0.0
 
@@ -1851,16 +1855,29 @@ class SignalAuditTracker:
             high_p = max(curr_p, raw_h)
             low_p = min(curr_p, raw_l)
 
-            entry_p = float(r['entry_price'])
-            tp1_p = float(r.get('tp1_price', entry_p))
-            tp2_p = float(r.get('tp2_price', entry_p))
-            tp3_p = float(r.get('tp3_price', entry_p))
-            sl_p = float(r['sl_price'])
-            direction = r['direction']
+            try:
+                entry_p = float(r.get('entry_price', curr_p))
+            except Exception:
+                entry_p = curr_p
 
-            # Update intra-trade extremes
-            r['peak_price_seen'] = max(float(r.get('peak_price_seen', high_p)), high_p)
-            r['trough_price_seen'] = min(float(r.get('trough_price_seen', low_p)), low_p)
+            tp1_p = float(r.get('tp1_price') or entry_p)
+            tp2_p = float(r.get('tp2_price') or entry_p)
+            tp3_p = float(r.get('tp3_price') or entry_p)
+            sl_p = float(r.get('sl_price') or entry_p)
+            direction = r.get('direction', 'LONG')
+
+            # Update intra-trade extremes safely
+            try:
+                prev_peak = float(r.get('peak_price_seen') or high_p)
+            except Exception:
+                prev_peak = high_p
+            try:
+                prev_trough = float(r.get('trough_price_seen') or low_p)
+            except Exception:
+                prev_trough = low_p
+
+            r['peak_price_seen'] = max(prev_peak, high_p)
+            r['trough_price_seen'] = min(prev_trough, low_p)
 
             max_gain = ((r['peak_price_seen'] - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - r['trough_price_seen']) / entry_p) * 100.0
             r['max_potential_gain_pct'] = round(max_gain, 2)
