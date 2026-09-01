@@ -1,0 +1,73 @@
+# Python Virtual Environments
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# C extensions
+*.pyd
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+.eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Machine Learning Models & Checkpoints
+models_export_*/
+*.h5
+*.keras
+*.joblib
+*.pkl
+*.model
+*.cbm
+
+# Export App Data & Live Cache
+export_app_data/
+*.csv
+*.json
+!package.json
+!tsconfig.json
+
+# Logs & Databases
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.directory
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
