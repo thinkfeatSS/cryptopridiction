@@ -13,13 +13,26 @@ import sys
 import subprocess
 
 def install_dependencies():
-    packages = ["ccxt", "xgboost", "catboost", "lightgbm", "tabulate", "scikit-learn", "pandas", "numpy", "joblib", "scipy", "requests"]
-    for pkg in packages:
+    packages = [
+        ("ccxt", "ccxt"),
+        ("xgboost", "xgboost"),
+        ("catboost", "catboost"),
+        ("lightgbm", "lightgbm"),
+        ("tabulate", "tabulate"),
+        ("sklearn", "scikit-learn"),
+        ("pandas", "pandas"),
+        ("numpy", "numpy"),
+        ("joblib", "joblib"),
+        ("scipy", "scipy"),
+        ("requests", "requests"),
+        ("tensorflow", "tensorflow")
+    ]
+    for import_name, pip_pkg in packages:
         try:
-            __import__(pkg)
+            __import__(import_name)
         except ImportError:
-            print(f"[SETUP] Installing {pkg}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--quiet"])
+            print(f"[SETUP] Installing {pip_pkg}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pip_pkg])
 
 install_dependencies()
 
