@@ -1703,6 +1703,13 @@ class SignalAuditTracker:
                 summary_data = self.build_kpi_summary()
                 df_sum = pd.DataFrame([summary_data]).fillna("")
                 df_sum.to_csv(self.summary_csv_path, index=False)
+
+                # Sync into MySQL / Database automatically
+                try:
+                    from app.services.db_sync import migrate_files_to_db
+                    migrate_files_to_db()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[SIGNAL TRACKER ERROR] Failed saving CSV: {e}")
 
@@ -1711,7 +1718,7 @@ class SignalAuditTracker:
         won = sum(1 for r in self.records if "WON" in str(r.get('outcome_label', '')))
         lost = sum(1 for r in self.records if "LOST" in str(r.get('outcome_label', '')))
         expired = sum(1 for r in self.records if "EXPIRED" in str(r.get('outcome_label', '')))
-        pending = sum(1 for r in self.records if r.get('status') == "PENDING_EVALUATION")
+        pending = sum(1 for r in self.records if r.get('status') in ["PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"])
         decisive = won + lost
         win_rate = round((won / max(1, decisive)) * 100.0, 2) if decisive > 0 else 0.0
 
@@ -1803,6 +1810,9 @@ class SignalAuditTracker:
                 "tp2_price": round(tp2_p, 6),
                 "tp3_price": round(tp3_p, 6),
                 "sl_price": round(sl_p, 6),
+                "sl_original": round(sl_p, 6),
+                "is_tp1_locked": False,
+                "is_tp2_locked": False,
                 "risk_reward_ratio": "1:2.0",
                 "expected_return_pct": round(float(sig.get('exp_return', 0.0)) * 100.0, 2),
                 "decision": sig.get('decision', 'EXECUTE'),
@@ -1832,7 +1842,14 @@ class SignalAuditTracker:
         pass
 
     def evaluate_signals(self, live_prices: dict, live_highs: dict = None, live_lows: dict = None):
-        """Checks pending signals in real-time to see if TP1, TP2, TP3, SL, or Expiry has been reached."""
+        """
+        Checks pending signals in real-time with Break-Even (BE) Protection & Trailing Stop logic:
+        - When TP1 is touched: Locks 50% profit and shifts SL to Entry Price (Break-Even).
+        - When TP2 is touched: Locks 30% profit and shifts SL to TP1 floor (Trailing).
+        - When TP3 is touched: Full target reached (WON TP3).
+        - If price pulls back after TP1: Exits at Break-Even with 50% locked profit (WON TP1+BE).
+        - If original SL is touched before TP1: Mark as LOST (SL HIT).
+        """
         if not self.records:
             return
 
@@ -1842,7 +1859,8 @@ class SignalAuditTracker:
         resolved_count = 0
 
         for r in self.records:
-            if r.get('status') != "PENDING_EVALUATION":
+            status = r.get('status', 'PENDING_EVALUATION')
+            if status not in ["PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
                 continue
 
             sym = r['symbol']
@@ -1865,6 +1883,8 @@ class SignalAuditTracker:
             tp3_p = float(r.get('tp3_price') or entry_p)
             sl_p = float(r.get('sl_price') or entry_p)
             direction = r.get('direction', 'LONG')
+            is_tp1_locked = bool(r.get('is_tp1_locked', False) or status in ['TP1_LOCKED_BREAKEVEN', 'TP2_LOCKED_TRAIL'])
+            is_tp2_locked = bool(r.get('is_tp2_locked', False) or status == 'TP2_LOCKED_TRAIL')
 
             # Update intra-trade extremes safely
             try:
@@ -1899,6 +1919,7 @@ class SignalAuditTracker:
             except Exception:
                 pass
 
+            # 1. TP3 Full Target Reached
             if is_hit_tp3:
                 r['status'] = "WON_TP3"
                 r['exit_price'] = round(tp3_p, 6)
@@ -1908,39 +1929,69 @@ class SignalAuditTracker:
                 r['evaluated_at_utc'] = now_str
                 updated = True
                 resolved_count += 1
-            elif is_hit_tp2:
-                r['status'] = "WON_TP2"
-                r['exit_price'] = round(tp2_p, 6)
-                ret_pct = ((tp2_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp2_p) / entry_p) * 100.0
-                r['realized_return_pct'] = f"{ret_pct:+.2f}%"
-                r['outcome_label'] = "🟢 WON (TP2 HIT)"
-                r['evaluated_at_utc'] = now_str
+
+            # 2. TP2 Hit (Lock 30% and Trail SL to TP1)
+            elif is_hit_tp2 and not is_tp2_locked:
+                r['status'] = "TP2_LOCKED_TRAIL"
+                r['is_tp2_locked'] = True
+                r['is_tp1_locked'] = True
+                r['sl_price'] = round(tp1_p, 6)  # Trailing SL Floor at TP1
+                r['outcome_label'] = "🟢 TP2 HIT (TRAILING SL @ TP1)"
                 updated = True
-                resolved_count += 1
-            elif is_hit_tp1:
-                r['status'] = "WON_TP1"
-                r['exit_price'] = round(tp1_p, 6)
-                ret_pct = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
-                r['realized_return_pct'] = f"{ret_pct:+.2f}%"
-                r['outcome_label'] = "🟢 WON (TP1 HIT)"
-                r['evaluated_at_utc'] = now_str
+
+            # 3. TP1 Hit (Lock 50% and Trail SL to Entry Price / Break-Even)
+            elif is_hit_tp1 and not is_tp1_locked and not is_hit_sl:
+                r['status'] = "TP1_LOCKED_BREAKEVEN"
+                r['is_tp1_locked'] = True
+                r['sl_price'] = round(entry_p, 6)  # Break-Even SL
+                r['outcome_label'] = "🟢 TP1 HIT (SL @ BREAKEVEN)"
                 updated = True
-                resolved_count += 1
+
+            # 4. Stop Loss Triggered (Either Original SL or Trailed BE / TP1 Stop)
             elif is_hit_sl:
-                r['status'] = "LOST_SL"
-                r['exit_price'] = round(sl_p, 6)
-                ret_pct = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
-                r['realized_return_pct'] = f"{ret_pct:+.2f}%"
-                r['outcome_label'] = "🔴 LOST (SL HIT)"
+                if is_tp2_locked:
+                    # Trailed Stop hit at TP1 floor (Locked 50% TP1 + 30% TP2 + 20% TP1 runner)
+                    ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                    ret_tp2 = ((tp2_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp2_p) / entry_p) * 100.0
+                    blended_ret = (0.50 * ret_tp1) + (0.30 * ret_tp2) + (0.20 * ret_tp1)
+                    r['status'] = "WON_TP2_TRAIL"
+                    r['exit_price'] = round(tp1_p, 6)
+                    r['realized_return_pct'] = f"{blended_ret:+.2f}%"
+                    r['outcome_label'] = "🟢 WON (TP2 + TRAILING RUNNER)"
+                elif is_tp1_locked:
+                    # Break-Even Stop hit at Entry Price (Locked 50% TP1 + 50% Breakeven)
+                    ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                    blended_ret = 0.50 * ret_tp1
+                    r['status'] = "WON_TP1_BE"
+                    r['exit_price'] = round(entry_p, 6)
+                    r['realized_return_pct'] = f"{blended_ret:+.2f}%"
+                    r['outcome_label'] = "🟢 WON (TP1 + BE RUNNER)"
+                else:
+                    # Original Stop Loss hit without reaching TP1
+                    r['status'] = "LOST_SL"
+                    r['exit_price'] = round(sl_p, 6)
+                    ret_pct = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                    r['realized_return_pct'] = f"{ret_pct:+.2f}%"
+                    r['outcome_label'] = "🔴 LOST (SL HIT)"
                 r['evaluated_at_utc'] = now_str
                 updated = True
                 resolved_count += 1
+
+            # 5. Expiry Resolution
             elif is_expired:
-                ret_pct = ((curr_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - curr_p) / entry_p) * 100.0
-                r['status'] = "EXPIRED_PROFIT" if ret_pct > 0 else ("EXPIRED_LOSS" if ret_pct < 0 else "EXPIRED_FLAT")
-                r['exit_price'] = round(curr_p, 6)
-                r['realized_return_pct'] = f"{ret_pct:+.2f}%"
-                r['outcome_label'] = f"{'🟢' if ret_pct>=0 else '🔴'} EXPIRED ({ret_pct:+.2f}%)"
+                ret_current = ((curr_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - curr_p) / entry_p) * 100.0
+                if is_tp1_locked:
+                    ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                    blended_ret = (0.50 * ret_tp1) + (0.50 * max(0.0, ret_current))
+                    r['status'] = "WON_TP1_EXP"
+                    r['exit_price'] = round(curr_p, 6)
+                    r['realized_return_pct'] = f"{blended_ret:+.2f}%"
+                    r['outcome_label'] = f"🟢 WON (TP1 + EXP {blended_ret:+.2f}%)"
+                else:
+                    r['status'] = "EXPIRED_PROFIT" if ret_current > 0 else ("EXPIRED_LOSS" if ret_current < 0 else "EXPIRED_FLAT")
+                    r['exit_price'] = round(curr_p, 6)
+                    r['realized_return_pct'] = f"{ret_current:+.2f}%"
+                    r['outcome_label'] = f"{'🟢' if ret_current>=0 else '🔴'} EXPIRED ({ret_current:+.2f}%)"
                 r['evaluated_at_utc'] = now_str
                 updated = True
                 resolved_count += 1
@@ -1984,6 +2035,9 @@ class HybridQuantEngine:
         self.labeler = TripleBarrierLabeler()
         self.btc_cache = {}
         self.model_cache = {}
+        self.btc_shield_active = False
+        self.btc_shield_reason = "NORMAL (Market Stable)"
+        self.signal_cooldown_tracker = {}
         self.ledger = PaperTradingLedger(config)
         self.signal_tracker = SignalAuditTracker(config.get('app_export_dir', './export_app_data'))
         os.makedirs(self.config['models_export_dir'], exist_ok=True)
@@ -1997,6 +2051,37 @@ class HybridQuantEngine:
                 self.btc_cache[tf] = df_btc
             except Exception as e:
                 print(f"[WARNING] BTC reference fetch note for {tf}: {e}")
+
+        # 🛡️ GLOBAL BTC MARKET BETA SHIELD (MARKET CIRCUIT BREAKER)
+        # Protects altcoins from correlated stop-outs during BTC flash drops / severe flushes
+        self.btc_shield_active = False
+        self.btc_shield_reason = "NORMAL (Market Stable)"
+        try:
+            if '15m' in self.btc_cache and len(self.btc_cache['15m']) >= 3:
+                df_15m = self.btc_cache['15m']
+                c_now = float(df_15m['close'].iloc[-1])
+                c_prev = float(df_15m['close'].iloc[-2])
+                c_prev2 = float(df_15m['close'].iloc[-3])
+                ret_15m_1 = (c_now - c_prev) / c_prev
+                ret_15m_2 = (c_now - c_prev2) / c_prev2
+
+                if ret_15m_1 <= -0.012 or ret_15m_2 <= -0.018:
+                    self.btc_shield_active = True
+                    self.btc_shield_reason = f"BTC 15M Flash Dump ({ret_15m_1*100:.2f}%)"
+
+            if not self.btc_shield_active and '1h' in self.btc_cache and len(self.btc_cache['1h']) >= 2:
+                df_1h = self.btc_cache['1h']
+                ret_1h = (float(df_1h['close'].iloc[-1]) - float(df_1h['close'].iloc[-2])) / float(df_1h['close'].iloc[-2])
+                if ret_1h <= -0.022:
+                    self.btc_shield_active = True
+                    self.btc_shield_reason = f"BTC 1H Severe Selloff ({ret_1h*100:.2f}%)"
+        except Exception as e:
+            pass
+
+        if self.btc_shield_active:
+            print(f"\n[SHIELD 🛡️] ⚠️ BTC MARKET BETA SHIELD ACTIVATED: {self.btc_shield_reason} | Altcoin Longs Paused to Prevent Correlated Stop-Outs.\n")
+        else:
+            print(f"[SHIELD 🛡️] Market Beta Status: {self.btc_shield_reason}")
 
     def evaluate_single_horizon(self, symbol: str, horizon_key: str, h_cfg: dict, raw_dfs: dict, tf_features: dict, d1_macro_bull: bool, funding_info: dict = None) -> dict:
         anchor_tf = h_cfg['anchor_tf']
@@ -2591,7 +2676,13 @@ class HybridQuantEngine:
         print("=" * 175 + "\n")
 
     def render_top_round_signals(self, scanner_results: list, deep_dive_result: dict = None) -> list:
-        """Dynamically detects, grades (A+/A/B+), and displays top-tier signals based on true market edge."""
+        """
+        Dynamically detects, grades (A+/A/B+), throttles duplicates, and applies BTC Beta Shield:
+        - 💎 Grade A+ (Elite Institutional): Multi-scale trend aligned + Volume/Order flow + High conviction (>=75%) + RS vs BTC >= 0.
+        - 🟢 Grade A (High Conviction): Standard directional edge (>=65%).
+        - 🛡️ BTC Beta Shield: Blocks Altcoin Longs if BTC is undergoing a flash dump.
+        - ⏱️ Cooldown Throttling: Prevents fee drag and duplicate spam on identical timeframes.
+        """
         def fmt_p(p):
             if p is None:
                 return "N/A"
@@ -2628,6 +2719,13 @@ class HybridQuantEngine:
         active_paper_symbols = {p['symbol'] for p in self.ledger.data.get('open_positions', [])}
         all_signals = []
         seen_pairs = set()
+        now_ts = time.time()
+
+        cooldown_map = {
+            'scalp': 1800,   # 30 mins
+            'swing': 5400,   # 90 mins
+            'macro': 14400   # 4 hours
+        }
 
         for r in source_results:
             sym = r['symbol']
@@ -2646,28 +2744,55 @@ class HybridQuantEngine:
                 prio = h.get('priority', 3)
                 conv = float(h.get('conviction', 50.0))
                 decision = h.get('decision', 'WATCH')
-                rs_val = max(0.0, float(h.get('rs_btc', 0.0)))
+                direction = h.get('direction', 'BULLISH')
+                rs_val = float(h.get('rs_btc', 0.0))
+                elite_prec = float(h.get('elite_precision', 0.50))
                 triple_bonus = 25.0 if is_triple else 0.0
                 exec_bonus = 20.0 if ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision) else 0.0
-                composite_score = conv + (rs_val * 4.0) + triple_bonus + exec_bonus + (abs(h.get('exp_return', 0.0)) * 100.0)
+                composite_score = conv + (max(0.0, rs_val) * 4.0) + triple_bonus + exec_bonus + (abs(h.get('exp_return', 0.0)) * 100.0)
 
-                # Quantitative Grade Classification
-                if (conv >= a_plus_cutoff or (is_triple and conv >= 68.0)) and ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision):
+                # 🛡️ BTC MARKET BETA SHIELD CHECK
+                is_shield_blocked = False
+                if self.btc_shield_active and sym != "BTC/USDT" and direction == "BULLISH":
+                    is_shield_blocked = True
+                    decision = f"🛡️ PAUSED (BTC BETA SHIELD: {self.btc_shield_reason})"
+                    prio = 4
+
+                # ⏱️ SIGNAL COOLDOWN CHECK
+                last_sig_time = self.signal_cooldown_tracker.get(pair_key, 0)
+                is_in_cooldown = (now_ts - last_sig_time) < cooldown_map.get(h_key, 1800)
+
+                # 💎 SHARPENED QUANTITATIVE GRADE CLASSIFICATION (Targeting >= 65% WR on Elite Grade A+)
+                # Strict Grade A+ Requirements:
+                # 1. Conviction >= 75% (or >= 70% with Triple Confluence)
+                # 2. Executable setup (EXECUTE, DIP-BUY, RALLY-SELL)
+                # 3. Not blocked by BTC Beta Shield
+                # 4. Relative Strength confirmation (RS >= 0 for Longs, RS <= 0 for Shorts)
+                # 5. Elite historical model precision >= 0.55
+                is_a_plus_candidate = (
+                    (conv >= a_plus_cutoff or (is_triple and conv >= 70.0)) and
+                    ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision) and
+                    not is_shield_blocked and
+                    (rs_val >= 0.0 if direction == "BULLISH" else rs_val <= 0.2) and
+                    elite_prec >= 0.55
+                )
+
+                if is_a_plus_candidate:
                     grade = "💎 Grade A+"
                     grade_tier = 1
                     tier_label = "ELITE CONFLUENCE"
-                elif (conv >= a_cutoff and prio <= 2) or ("EXECUTE" in decision or "DIP-BUY" in decision):
+                elif (conv >= a_cutoff and prio <= 2 and not is_shield_blocked) or (("EXECUTE" in decision or "DIP-BUY" in decision) and not is_shield_blocked):
                     grade = "🟢 Grade A"
                     grade_tier = 2
                     tier_label = "HIGH CONVICTION"
-                elif conv >= b_cutoff and prio <= 3:
+                elif conv >= b_cutoff and prio <= 3 and not is_shield_blocked:
                     grade = "🟡 Grade B+"
                     grade_tier = 3
                     tier_label = "ACTIONABLE MOMENTUM"
                 else:
                     grade = "⚪ Grade C"
                     grade_tier = 4
-                    tier_label = "WATCHLIST / CHOP"
+                    tier_label = "WATCHLIST / DEFENSIVE"
 
                 paper_status = "🟢 ACTIVE (PAPER TRADED)" if sym in active_paper_symbols else "📡 LIVE SCAN SIGNAL"
 
@@ -2681,7 +2806,7 @@ class HybridQuantEngine:
                     "grade_tier": grade_tier,
                     "tier_label": tier_label,
                     "composite_score": composite_score,
-                    "direction": h.get('direction', 'BULLISH'),
+                    "direction": direction,
                     "decision": decision,
                     "current_price": h.get('current_price', r.get('current_price', 0.0)),
                     "entry_price": h.get('current_price', r.get('current_price', 0.0)),
@@ -2692,10 +2817,12 @@ class HybridQuantEngine:
                     "sl_price": h.get('sl_price', 0.0),
                     "exp_return": h.get('exp_return', 0.0),
                     "projected_target": h.get('projected_target', h.get('tp_price', 0.0)),
-                    "elite_precision": h.get('elite_precision', 0.5),
+                    "elite_precision": elite_prec,
                     "duration_label": h.get('duration_label', 'N/A'),
                     "predicted_window_str": h.get('predicted_window_str', 'N/A'),
                     "is_triple_confluence": is_triple,
+                    "is_in_cooldown": is_in_cooldown,
+                    "is_shield_blocked": is_shield_blocked,
                     "paper_trading_status": paper_status,
                     "card": h.get('pro_signal_text', ''),
                     "tf_summary": tf_summary
@@ -2704,22 +2831,32 @@ class HybridQuantEngine:
         # Sort candidate setups: Grade Tier first, Priority second, Composite score third, Conviction fourth
         all_signals.sort(key=lambda x: (x['grade_tier'], x['priority'], -x['composite_score'], -x['conviction']))
 
+        # Filter candidates taking into account Cooldown Throttling (favor fresh non-cooldown or Grade A+ breakouts)
+        fresh_signals = [s for s in all_signals if not s['is_in_cooldown'] or s['grade_tier'] == 1]
+        pool_for_selection = fresh_signals if len(fresh_signals) >= min_sig else all_signals
+
         # Dynamic Elastic Selection (Grade A+/A with minimum fallback & maximum cap)
         if is_dynamic:
-            grade_a_signals = [s for s in all_signals if s['grade_tier'] <= 2]
+            grade_a_signals = [s for s in pool_for_selection if s['grade_tier'] <= 2]
             if len(grade_a_signals) >= min_sig:
                 selected_signals = grade_a_signals[:max_sig]
             else:
-                selected_signals = all_signals[:min_sig]
+                selected_signals = pool_for_selection[:min_sig]
         else:
-            selected_signals = all_signals[:3]
+            selected_signals = pool_for_selection[:3]
 
-        # Market Regime Diagnostic
+        # Update Cooldown Timestamps for Dispatched Signals
+        for sig in selected_signals:
+            self.signal_cooldown_tracker[(sig['symbol'], sig['horizon_key'])] = now_ts
+
+        # Market Regime Diagnostic & Beta Shield Banner
         count_a_plus = sum(1 for s in all_signals if s['grade_tier'] == 1)
         count_a = sum(1 for s in all_signals if s['grade_tier'] == 2)
         count_b = sum(1 for s in all_signals if s['grade_tier'] == 3)
         
-        if count_a_plus >= 2 or (count_a_plus + count_a) >= 4:
+        if self.btc_shield_active:
+            regime_tag = f"🛡️ BTC BETA SHIELD ACTIVE ({self.btc_shield_reason} - Altcoin Longs Suppressed)"
+        elif count_a_plus >= 2 or (count_a_plus + count_a) >= 4:
             regime_tag = "🚀 HIGH-CONVICTION TREND EXPANSION (Multiple Grade A+/A Setups Firing)"
         elif (count_a_plus + count_a) >= 1:
             regime_tag = "⚡ SELECTIVE OPPORTUNITY REGIME (Targeted Institutional Edge Active)"
@@ -2730,6 +2867,8 @@ class HybridQuantEngine:
         print(f" 🎯 DYNAMIC QUANTITATIVE SIGNAL ENGINE ({len(selected_signals)} SIGNALS DETECTED THIS ROUND)")
         print(f" Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Scanned: {len(source_results)} Pairs across 15M, 1H & 24H")
         print(f" Market Radar: 💎 {count_a_plus} Grade A+ | 🟢 {count_a} Grade A | 🟡 {count_b} Grade B+ | Regime: {regime_tag}")
+        if self.btc_shield_active:
+            print(f" ⚠️  CIRCUIT BREAKER: {self.btc_shield_reason} -> Prioritizing Shorts & BTC Hedges.")
         print("=" * 145)
 
         rank_medals = ["🥇 TOP PICK (#1)", "🥈 RUNNER UP (#2)", "🥉 BRONZE (#3)", "🎯 PICK (#4)", "🎯 PICK (#5)"]
@@ -2769,9 +2908,10 @@ class HybridQuantEngine:
 
             invalidation_side = "below" if sig['direction'] == "BULLISH" else "above"
             sl_fmt = fmt_p(sig['sl_price'])
-            print(f"\n⚠️ KEY INVALIDATION CONDITION:")
-            print(f"• A sustained 1H/4H candle close {invalidation_side} {sl_fmt} invalidates this setup structure immediately.")
-            print(f"• Risk Management: Strict 1–2% portfolio risk per trade. Move SL to Breakeven after TP1.")
+            print(f"\n⚠️ KEY INVALIDATION & TRADE MANAGEMENT RULES:")
+            print(f"• Invalidation: A sustained 1H/4H candle close {invalidation_side} {sl_fmt} invalidates this setup structure.")
+            print(f"• Dynamic Break-Even: Move Stop-Loss to Breakeven (${fmt_p(sig['entry_price'])}) immediately upon touching TP1.")
+            print(f"• Risk Management: Strict 1–2% portfolio risk per trade.")
             print(f"• Paper Trading State: {sig['paper_trading_status']}")
             print("-" * 115)
         print("=" * 145 + "\n")
@@ -2830,7 +2970,11 @@ class HybridQuantEngine:
     def export_web_app_json(self, scanner_results: list, deep_dive_result: dict, top_signals: list = None):
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "strategy": "Multi-Horizon Quantitative Engine (V15.0)",
+            "strategy": "Multi-Horizon Quantitative Engine (V16.0)",
+            "btc_market_shield": {
+                "active": self.btc_shield_active,
+                "reason": self.btc_shield_reason
+            },
             "top_round_signals": top_signals or [],
             "scanner_leaderboard": scanner_results,
             "deep_dive": deep_dive_result,
