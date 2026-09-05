@@ -1078,6 +1078,7 @@ class PaperTradingLedger:
         # Effective fee per trade leg (e.g. 0.075% BNB discount + 0.02% slippage = 0.095%)
         self.effective_fee_rate = (self.base_fee_rate * (0.75 if self.use_bnb_discount else 1.0)) + self.slippage_rate
         self.fee_tier_label = f"Binance Spot ({'0.075% BNB Discount' if self.use_bnb_discount else '0.10% Standard'}) + {self.slippage_rate*100:.2f}% Slippage"
+        self.cooldown_tracker = {}  # {symbol: datetime_of_last_breakeven_or_loss}
         self.data = self.load_or_initialize()
 
     def load_or_initialize(self) -> dict:
@@ -1217,14 +1218,6 @@ class PaperTradingLedger:
             min_dur_secs = 10 * 60 if pos.get('horizon') == 'scalp' else (60 * 60 if pos.get('horizon') == 'swing' else 12 * 3600)
             is_expired = (now_dt >= expiry_dt) and (dur_secs >= min_dur_secs)
 
-            # Stagnation "Dead-Money" Early Exit: Free capital if price flatlines after >= 65% of predicted window
-            total_window_secs = max(1, int((expiry_dt - opened_dt).total_seconds()))
-            is_stagnated = False
-            if (dur_secs / total_window_secs >= 0.65) and stage == 'OPEN' and dur_secs >= min_dur_secs:
-                raw_pnl_pct = ((curr_p - entry_p) / entry_p) * 100.0 if direction == "BULLISH" else ((entry_p - curr_p) / entry_p) * 100.0
-                if -0.30 <= raw_pnl_pct <= 0.35:
-                    is_stagnated = True
-
             # 1. PARTIAL TP1 SCALE (50% locked + Trail SL to Breakeven)
             if is_hit_tp1 and stage == 'OPEN' and not is_hit_sl:
                 scale_nominal = init_size * 0.50
@@ -1275,8 +1268,8 @@ class PaperTradingLedger:
                 still_open.append(pos)
                 continue
 
-            # 3. FINAL FULL EXIT (Chandelier SL, Protection SL, Stagnation, or Expiry)
-            is_final_close = is_hit_sl or is_expired or is_stagnated
+            # 3. FINAL FULL EXIT (Chandelier SL, Protection SL, or Full Duration Expiry)
+            is_final_close = is_hit_sl or is_expired
             if is_final_close:
                 final_rem_size = pos.get('remaining_position_size_usd', rem_size)
                 if is_hit_sl:
@@ -1288,10 +1281,6 @@ class PaperTradingLedger:
                         exit_reason = "🏃 CHANDELIER_RUNNER_PROFIT_CLOSE"
                     else:
                         exit_reason = "🛑 STOP_LOSS_HIT"
-                elif is_stagnated:
-                    raw_ret = (curr_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - curr_p) / entry_p
-                    exit_p = curr_p
-                    exit_reason = "⏳ STAGNATION_DEAD_MONEY_EXIT"
                 else:
                     raw_ret = (curr_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - curr_p) / entry_p
                     exit_p = curr_p
@@ -1323,6 +1312,10 @@ class PaperTradingLedger:
                     outcome = "BREAKEVEN"
                     is_win = False
                     exit_reason = "⏳ BREAKEVEN_FEE_CLOSE"
+
+                # Track Cooldown for Breakeven or Lost assets to prevent immediate re-entry loop
+                if outcome in ["BREAKEVEN", "LOST"]:
+                    self.cooldown_tracker[sym] = now_dt
 
                 # Update Ledger Balances & Metrics
                 self.data['current_balance_usd'] = round(self.data['current_balance_usd'] + final_net_pnl, 2)
@@ -1440,9 +1433,32 @@ class PaperTradingLedger:
         if direction == "BEARISH" and (tp_p >= entry_p or sl_p <= entry_p):
             return
 
-        # Check if already open on this symbol and horizon
+        # 1. Cooldown Guard on Choppy/Breakeven Coins (45 min cooldown)
+        now_utc = datetime.now(timezone.utc)
+        last_closed = self.cooldown_tracker.get(sym)
+        if last_closed:
+            elapsed_cd = (now_utc - last_closed).total_seconds()
+            if elapsed_cd < 2700:  # 45 minutes cooldown
+                return
+
+        # 2. Strict Single-Asset Lockout: Maximum 1 position per asset across ALL horizons
         for pos in self.data['open_positions']:
-            if pos['symbol'] == sym and pos.get('horizon') == horizon_key:
+            if pos['symbol'] == sym:
+                return
+
+        # 3. Horizon Quota Allocation (Reserve slots for high-profit Macro & Swing setups)
+        horizon_counts = {
+            'scalp': sum(1 for p in self.data['open_positions'] if p.get('horizon') == 'scalp'),
+            'swing': sum(1 for p in self.data['open_positions'] if p.get('horizon') == 'swing'),
+            'macro': sum(1 for p in self.data['open_positions'] if p.get('horizon') == 'macro'),
+        }
+        horizon_max_limits = {'scalp': 2, 'swing': 2, 'macro': 2}
+        if horizon_counts.get(horizon_key, 0) >= horizon_max_limits.get(horizon_key, 2):
+            return
+
+        # 4. Scalp Minimum Quality Guard: Scalps must have high conviction (>= 68%) and >= 0.45% expected move
+        if horizon_key == 'scalp':
+            if result.get('conviction', 0.0) < 68.0 or abs(result.get('exp_return', 0.0)) < 0.0045:
                 return
 
         if len(self.data['open_positions']) >= self.config['max_concurrent_positions']:
@@ -2717,8 +2733,13 @@ class HybridQuantEngine:
                     if h['priority'] <= 2 or "EXECUTE" in h['decision'] or "DIP-BUY" in h['decision']:
                         all_candidates.append((h, h_key))
 
-            # Rank candidates: Best Priority first, Relative Strength vs BTC + Conviction first
-            all_candidates.sort(key=lambda x: (x[0]['priority'], -(x[0]['conviction'] + 4.0 * max(0.0, x[0].get('rs_btc', 0.0)))))
+            # Rank candidates: Prioritize Grade A+, High-Margin Macro (24H) & Swing (1H), and Conviction/Alpha edge
+            horizon_tier = {'macro': 3, 'swing': 2, 'scalp': 1}
+            all_candidates.sort(key=lambda x: (
+                x[0]['priority'],
+                -horizon_tier.get(x[1], 1),
+                -(x[0]['conviction'] * abs(x[0].get('exp_return', 0.01)) + 5.0 * max(0.0, x[0].get('rs_btc', 0.0)))
+            ))
 
             # Route top ranked signals into Order Execution Manager
             self.ledger.admit_ranked_candidates(all_candidates)
