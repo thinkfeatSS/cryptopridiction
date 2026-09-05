@@ -2235,118 +2235,127 @@ class HybridQuantEngine:
         y_r = clean_df['Target_Return'].values
 
         n = len(X)
-        n_train = max(5, int(n * self.config['train_split']))
-        X_train, y_p_train, y_r_train = X[:n_train], y_p[:n_train].copy(), y_r[:n_train]
-        X_test, y_p_test = X[n_train:], y_p[n_train:]
-
-        # Prevent CatBoost / XGBoost "Target contains only one unique value" crash
-        unique_classes = np.unique(y_p_train)
-        if len(unique_classes) < 2 and len(y_p_train) > 1:
-            y_p_train[0] = 1 - y_p_train[-1]
-
-        # Fast-Boot Model Checkpoint & Memory Cache (6 Hour Expiry)
-        cache_key = f"{symbol.replace('/', '_')}_{horizon_key}"
-        now_ts = time.time()
-
-        if cache_key in self.model_cache and (now_ts - self.model_cache[cache_key]['ts'] < 21600):
-            cached = self.model_cache[cache_key]
-            scaler = cached['scaler']
-            cat = cached['cat']
-            xgb_m = cached['xgb_m']
-            lgb_m = cached.get('lgb_m')
-            et = cached['et']
-            w_cat, w_xgb, w_lgb, w_et = cached.get('weights', (0.35, 0.35, 0.20, 0.10))
-            elite_acc = cached['elite_acc']
-            X_live_scaled = np.nan_to_num(scaler.transform(live_candle[feature_cols].values), nan=0.0)
-            
-            p_cat_live = float(cat.predict_proba(X_live_scaled)[0, 1]) if cat else 0.50
-            p_xgb_live = float(xgb_m.predict_proba(X_live_scaled)[0, 1]) if xgb_m else 0.50
-            p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1]) if lgb_m else p_xgb_live
-            p_et_live = float(et.predict_proba(X_live_scaled)[0, 1]) if et else 0.50
+        if n < 10 or len(feature_cols) == 0:
+            # Low historical data fallback (e.g. newly listed or illiquid pair)
+            p_cat_live = 0.55 if d1_macro_bull else 0.45
+            p_xgb_live = 0.55 if d1_macro_bull else 0.45
+            p_lgb_live = 0.55 if d1_macro_bull else 0.45
+            p_et_live = 0.55 if d1_macro_bull else 0.45
+            w_cat, w_xgb, w_lgb, w_et = (0.25, 0.25, 0.25, 0.25)
+            elite_acc = 0.60
         else:
-            scaler = RobustScaler()
-            X_train_scaled = np.nan_to_num(scaler.fit_transform(X_train), nan=0.0)
-            X_test_scaled = np.nan_to_num(scaler.transform(X_test), nan=0.0)
-            X_live_scaled = np.nan_to_num(scaler.transform(live_candle[feature_cols].values), nan=0.0)
+            n_train = max(5, int(n * self.config['train_split']))
+            X_train, y_p_train, y_r_train = X[:n_train], y_p[:n_train].copy(), y_r[:n_train]
+            X_test, y_p_test = X[n_train:], y_p[n_train:]
 
-            # 1. CatBoost Classifier
-            try:
-                cat = QuantModelFactory.build_primary_catboost(self.config['catboost'])
-                cat.fit(X_train_scaled, y_p_train, verbose=False)
-                p_cat_live = float(cat.predict_proba(X_live_scaled)[0, 1])
-                p_test_cat = cat.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_cat_live])
-            except Exception:
-                cat = None
-                p_cat_live = 0.55 if d1_macro_bull else 0.45
-                p_test_cat = np.array([p_cat_live] * max(1, len(X_test_scaled)))
+            # Prevent CatBoost / XGBoost "Target contains only one unique value" crash
+            unique_classes = np.unique(y_p_train)
+            if len(unique_classes) < 2 and len(y_p_train) > 1:
+                y_p_train[0] = 1 - y_p_train[-1]
 
-            # 2. XGBoost Classifier
-            try:
-                xgb_m = QuantModelFactory.build_primary_xgboost(self.config['xgb_clf'])
-                xgb_m.fit(X_train_scaled, y_p_train, verbose=False)
-                p_xgb_live = float(xgb_m.predict_proba(X_live_scaled)[0, 1])
-                p_test_xgb = xgb_m.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_xgb_live])
-            except Exception:
-                xgb_m = None
-                p_xgb_live = 0.55 if d1_macro_bull else 0.45
-                p_test_xgb = np.array([p_xgb_live] * max(1, len(X_test_scaled)))
+            # Fast-Boot Model Checkpoint & Memory Cache (6 Hour Expiry)
+            cache_key = f"{symbol.replace('/', '_')}_{horizon_key}"
+            now_ts = time.time()
 
-            # 3. LightGBM Classifier
-            try:
-                lgb_m = QuantModelFactory.build_primary_lightgbm(self.config['lgb_clf'])
-                if lgb_m:
-                    lgb_m.fit(X_train_scaled, y_p_train)
-                    p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1])
-                    p_test_lgb = lgb_m.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_lgb_live])
-                else:
+            if cache_key in self.model_cache and (now_ts - self.model_cache[cache_key]['ts'] < 21600):
+                cached = self.model_cache[cache_key]
+                scaler = cached['scaler']
+                cat = cached['cat']
+                xgb_m = cached['xgb_m']
+                lgb_m = cached.get('lgb_m')
+                et = cached['et']
+                w_cat, w_xgb, w_lgb, w_et = cached.get('weights', (0.35, 0.35, 0.20, 0.10))
+                elite_acc = cached['elite_acc']
+                X_live_scaled = np.nan_to_num(scaler.transform(live_candle[feature_cols].values), nan=0.0)
+                
+                p_cat_live = float(cat.predict_proba(X_live_scaled)[0, 1]) if cat else 0.50
+                p_xgb_live = float(xgb_m.predict_proba(X_live_scaled)[0, 1]) if xgb_m else 0.50
+                p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1]) if lgb_m else p_xgb_live
+                p_et_live = float(et.predict_proba(X_live_scaled)[0, 1]) if et else 0.50
+            else:
+                scaler = RobustScaler()
+                X_train_scaled = np.nan_to_num(scaler.fit_transform(X_train), nan=0.0)
+                X_test_scaled = np.nan_to_num(scaler.transform(X_test), nan=0.0)
+                X_live_scaled = np.nan_to_num(scaler.transform(live_candle[feature_cols].values), nan=0.0)
+
+                # 1. CatBoost Classifier
+                try:
+                    cat = QuantModelFactory.build_primary_catboost(self.config['catboost'])
+                    cat.fit(X_train_scaled, y_p_train, verbose=False)
+                    p_cat_live = float(cat.predict_proba(X_live_scaled)[0, 1])
+                    p_test_cat = cat.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_cat_live])
+                except Exception:
+                    cat = None
+                    p_cat_live = 0.55 if d1_macro_bull else 0.45
+                    p_test_cat = np.array([p_cat_live] * max(1, len(X_test_scaled)))
+
+                # 2. XGBoost Classifier
+                try:
+                    xgb_m = QuantModelFactory.build_primary_xgboost(self.config['xgb_clf'])
+                    xgb_m.fit(X_train_scaled, y_p_train, verbose=False)
+                    p_xgb_live = float(xgb_m.predict_proba(X_live_scaled)[0, 1])
+                    p_test_xgb = xgb_m.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_xgb_live])
+                except Exception:
+                    xgb_m = None
+                    p_xgb_live = 0.55 if d1_macro_bull else 0.45
+                    p_test_xgb = np.array([p_xgb_live] * max(1, len(X_test_scaled)))
+
+                # 3. LightGBM Classifier
+                try:
+                    lgb_m = QuantModelFactory.build_primary_lightgbm(self.config['lgb_clf'])
+                    if lgb_m:
+                        lgb_m.fit(X_train_scaled, y_p_train)
+                        p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1])
+                        p_test_lgb = lgb_m.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_lgb_live])
+                    else:
+                        lgb_m = None
+                        p_lgb_live = p_xgb_live
+                        p_test_lgb = p_test_xgb
+                except Exception:
                     lgb_m = None
                     p_lgb_live = p_xgb_live
                     p_test_lgb = p_test_xgb
-            except Exception:
-                lgb_m = None
-                p_lgb_live = p_xgb_live
-                p_test_lgb = p_test_xgb
 
-            # 4. ExtraTrees Classifier
-            try:
-                et = QuantModelFactory.build_primary_extra_trees(self.config['extra_trees'])
-                et.fit(X_train_scaled, y_p_train)
-                p_et_live = float(et.predict_proba(X_live_scaled)[0, 1])
-                p_test_et = et.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_et_live])
-            except Exception:
-                et = None
-                p_et_live = 0.55 if d1_macro_bull else 0.45
-                p_test_et = np.array([p_et_live] * max(1, len(X_test_scaled)))
+                # 4. ExtraTrees Classifier
+                try:
+                    et = QuantModelFactory.build_primary_extra_trees(self.config['extra_trees'])
+                    et.fit(X_train_scaled, y_p_train)
+                    p_et_live = float(et.predict_proba(X_live_scaled)[0, 1])
+                    p_test_et = et.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_et_live])
+                except Exception:
+                    et = None
+                    p_et_live = 0.55 if d1_macro_bull else 0.45
+                    p_test_et = np.array([p_et_live] * max(1, len(X_test_scaled)))
 
-            # Dynamic Validation-Loss Weighted Stacking
-            losses = []
-            for p_test in [p_test_cat, p_test_xgb, p_test_lgb, p_test_et]:
-                if len(y_p_test) >= 4:
-                    p_c = np.clip(p_test, 1e-5, 1.0 - 1e-5)
-                    loss = -np.mean(y_p_test * np.log(p_c) + (1 - y_p_test) * np.log(1 - p_c))
-                    losses.append(max(0.01, float(loss)))
-                else:
-                    losses.append(0.5)
+                # Dynamic Validation-Loss Weighted Stacking
+                losses = []
+                for p_test in [p_test_cat, p_test_xgb, p_test_lgb, p_test_et]:
+                    if len(y_p_test) >= 4:
+                        p_c = np.clip(p_test, 1e-5, 1.0 - 1e-5)
+                        loss = -np.mean(y_p_test * np.log(p_c) + (1 - y_p_test) * np.log(1 - p_c))
+                        losses.append(max(0.01, float(loss)))
+                    else:
+                        losses.append(0.5)
 
-            inv_losses = [1.0 / l for l in losses]
-            sum_inv = sum(inv_losses)
-            w_cat, w_xgb, w_lgb, w_et = [w / sum_inv for w in inv_losses]
+                inv_losses = [1.0 / l for l in losses]
+                sum_inv = sum(inv_losses)
+                w_cat, w_xgb, w_lgb, w_et = [w / sum_inv for w in inv_losses]
 
-            p_test_ens = (p_test_cat * w_cat) + (p_test_xgb * w_xgb) + (p_test_lgb * w_lgb) + (p_test_et * w_et)
-            elite_mask = (p_test_ens >= self.config['elite_conviction_threshold']) | (p_test_ens <= (1.0 - self.config['elite_conviction_threshold']))
-            elite_acc = accuracy_score(y_p_test[elite_mask], (p_test_ens[elite_mask] >= 0.5).astype(int)) if (len(y_p_test) > 0 and np.sum(elite_mask) >= 5) else 0.88
+                p_test_ens = (p_test_cat * w_cat) + (p_test_xgb * w_xgb) + (p_test_lgb * w_lgb) + (p_test_et * w_et)
+                elite_mask = (p_test_ens >= self.config['elite_conviction_threshold']) | (p_test_ens <= (1.0 - self.config['elite_conviction_threshold']))
+                elite_acc = accuracy_score(y_p_test[elite_mask], (p_test_ens[elite_mask] >= 0.5).astype(int)) if (len(y_p_test) > 0 and np.sum(elite_mask) >= 5) else 0.88
 
-            if cat and xgb_m and et:
-                self.model_cache[cache_key] = {
-                    'scaler': scaler,
-                    'cat': cat,
-                    'xgb_m': xgb_m,
-                    'lgb_m': lgb_m,
-                    'et': et,
-                    'weights': (w_cat, w_xgb, w_lgb, w_et),
-                    'elite_acc': elite_acc,
-                    'ts': now_ts
-                }
+                if cat and xgb_m and et:
+                    self.model_cache[cache_key] = {
+                        'scaler': scaler,
+                        'cat': cat,
+                        'xgb_m': xgb_m,
+                        'lgb_m': lgb_m,
+                        'et': et,
+                        'weights': (w_cat, w_xgb, w_lgb, w_et),
+                        'elite_acc': elite_acc,
+                        'ts': now_ts
+                    }
 
         # 1. Base ML Direction & Calibrated Probability
         h_prob = (p_cat_live * w_cat) + (p_xgb_live * w_xgb) + (p_lgb_live * w_lgb) + (p_et_live * w_et)
@@ -2523,6 +2532,9 @@ class HybridQuantEngine:
         for tf_str in timeframes:
             limit = self.config['history_limit_per_tf'].get(tf_str, 2000)
             df = self.loader.fetch_ohlcv_extended(symbol, tf_str, total_candles=limit)
+            if len(df) < 20:
+                # Insufficient candle history for newly listed or illiquid coin
+                return None
             raw_dfs[tf_str] = df
             tf_feat = self.fe.build_timeframe_features(df, prefix=tf_str)
             tf_features[tf_str] = tf_feat
