@@ -66,6 +66,10 @@ export interface EngineStatus {
   current_time_utc: string;
   next_scan_utc: string;
   seconds_to_next_scan: number;
+  btc_market_shield?: {
+    active: boolean;
+    reason: string;
+  };
 }
 
 export interface OpenPosition {
@@ -121,6 +125,10 @@ export interface PortfolioData {
 export interface ForecastData {
   timestamp: string;
   strategy: string;
+  btc_market_shield?: {
+    active: boolean;
+    reason: string;
+  };
   top_round_signals: any[];
   scanner_leaderboard: any[];
   deep_dive: any;

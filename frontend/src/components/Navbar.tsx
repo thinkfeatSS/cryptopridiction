@@ -91,11 +91,34 @@ export default function Navbar() {
           })}
         </nav>
 
-        {/* Right: Live UTC Clock & 15-Minute Scan Countdown */}
-        <div className="flex items-center gap-3">
+        {/* Right: Market Beta Shield, 15-Minute Scan Countdown, and Live Daemon */}
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* 🛡️ Market Beta Status Badge */}
+          <div
+            className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs shadow-sm transition-all ${
+              status?.btc_market_shield?.active
+                ? "border-amber-500/60 bg-amber-950/40 text-amber-300 shadow-amber-500/20 animate-pulse"
+                : "border-cyan-500/30 bg-cyan-950/30 text-cyan-300 shadow-cyan-500/10"
+            }`}
+          >
+            {status?.btc_market_shield?.active ? (
+              <ShieldCheck className="h-4 w-4 text-amber-400 animate-bounce shrink-0" />
+            ) : (
+              <ShieldCheck className="h-4 w-4 text-cyan-400 shrink-0" />
+            )}
+            <div className="flex flex-col">
+              <span className="text-[9px] uppercase tracking-wider font-bold text-slate-400">
+                [SHIELD 🛡️] Market Beta
+              </span>
+              <span className="font-mono text-[11px] font-bold truncate max-w-[140px] sm:max-w-[180px]">
+                {status?.btc_market_shield?.reason || "NORMAL (Market Stable)"}
+              </span>
+            </div>
+          </div>
+
           {/* 15-min Countdown Ring / Badge */}
-          <div className="flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-950/40 px-3 py-1.5 text-xs shadow-sm shadow-indigo-500/10">
-            <Radio className="h-3.5 w-3.5 animate-pulse text-indigo-400" />
+          <div className="hidden lg:flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-950/40 px-3 py-1.5 text-xs shadow-sm shadow-indigo-500/10">
+            <Radio className="h-3.5 w-3.5 animate-pulse text-indigo-400 shrink-0" />
             <div className="flex flex-col">
               <span className="text-[9px] uppercase tracking-wider text-indigo-300/80 font-bold">
                 Next 15M Scan In
@@ -107,7 +130,7 @@ export default function Navbar() {
           </div>
 
           {/* Bot State Indicator */}
-          <div className="hidden sm:flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-3 py-1.5 text-xs text-emerald-400">
+          <div className="hidden xl:flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-3 py-1.5 text-xs text-emerald-400">
             <span className="relative flex h-2 w-2">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>

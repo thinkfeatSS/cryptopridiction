@@ -3,8 +3,11 @@ from sqlalchemy import func, or_, desc
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 import math
+import os
+import json
 import numpy as np
 
+from app.config import settings
 from app.models import SignalAudit, PaperPosition, ClosedTrade, MarketForecast
 
 class SignalService:
@@ -213,16 +216,27 @@ class SignalService:
         latest = db.query(MarketForecast).order_by(desc(MarketForecast.id)).first()
         if latest:
             return latest.to_dict()
+        
+        # Fallback to direct file read if available
+        try:
+            forecast_path = os.path.join(settings.EXPORT_DIR, "live_market_forecast.json")
+            if os.path.exists(forecast_path):
+                with open(forecast_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "strategy": "Multi-Horizon Quantitative Engine",
+            "btc_market_shield": {"active": False, "reason": "NORMAL (Market Stable)"},
             "top_round_signals": [],
             "scanner_leaderboard": [],
             "deep_dive": {},
         }
 
     def get_engine_status(self) -> Dict[str, Any]:
-        """Calculates 15-minute countdown and server state."""
+        """Calculates 15-minute countdown, market shield status, and server state."""
         now = datetime.now(timezone.utc)
         current_minute = now.minute
         current_second = now.second
@@ -234,12 +248,24 @@ class SignalService:
 
         next_scan_time = (now + timedelta(seconds=secs_remaining)).strftime("%H:%M:%S UTC")
 
+        shield_status = {"active": False, "reason": "NORMAL (Market Stable)"}
+        try:
+            forecast_path = os.path.join(settings.EXPORT_DIR, "live_market_forecast.json")
+            if os.path.exists(forecast_path):
+                with open(forecast_path, "r", encoding="utf-8") as f:
+                    f_data = json.load(f)
+                    if "btc_market_shield" in f_data:
+                        shield_status = f_data["btc_market_shield"]
+        except Exception:
+            pass
+
         return {
             "status": "HEALTHY",
             "is_engine_active": True,
             "current_time_utc": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "next_scan_utc": next_scan_time,
             "seconds_to_next_scan": secs_remaining,
+            "btc_market_shield": shield_status,
         }
 
 signal_service = SignalService()

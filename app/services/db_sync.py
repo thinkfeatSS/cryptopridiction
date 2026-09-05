@@ -186,6 +186,7 @@ def migrate_files_to_db():
                         top_round_signals_json=json.dumps(f_data.get("top_round_signals", [])),
                         scanner_leaderboard_json=json.dumps(f_data.get("scanner_leaderboard", [])),
                         deep_dive_json=json.dumps(f_data.get("deep_dive", {})),
+                        btc_market_shield_json=json.dumps(f_data.get("btc_market_shield", {"active": False, "reason": "NORMAL (Market Stable)"})),
                     )
                     db.add(mf)
                     db.commit()

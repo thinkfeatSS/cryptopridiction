@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import KpiMetrics from "@/components/KpiMetrics";
+import MarketShieldBanner from "@/components/MarketShieldBanner";
 import AssetPredictionMatrix from "@/components/AssetPredictionMatrix";
 import DailySignalsView from "@/components/DailySignalsView";
 import SignalCard from "@/components/SignalCard";
@@ -19,6 +20,11 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8">
+      {/* 0. Real-time Market Beta Shield Status Banner */}
+      <section>
+        <MarketShieldBanner />
+      </section>
+
       {/* 1. Executive KPI Summary Ribbon */}
       <section>
         <div className="flex items-center justify-between mb-3">

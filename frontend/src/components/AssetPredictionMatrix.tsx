@@ -63,8 +63,27 @@ export default function AssetPredictionMatrix() {
           </p>
         </div>
 
-        {/* Live Refresh Timer Ring */}
-        <div className="flex items-center gap-3">
+        {/* Live Refresh Timer Ring & Shield Status */}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Market Beta Shield Badge */}
+          <div
+            className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs shadow-md transition-all ${
+              (status?.btc_market_shield?.active || forecast?.btc_market_shield?.active)
+                ? "border-amber-500/50 bg-amber-950/40 text-amber-300 shadow-amber-500/10"
+                : "border-slate-800 bg-dark-900/90 text-slate-300 shadow-cyan-500/5"
+            }`}
+          >
+            <ShieldAlert className="h-4 w-4 text-cyan-400 shrink-0" />
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">
+                [SHIELD 🛡️] Market Beta Status
+              </span>
+              <span className="font-mono text-xs font-bold text-white">
+                {status?.btc_market_shield?.reason || forecast?.btc_market_shield?.reason || "NORMAL (Market Stable)"}
+              </span>
+            </div>
+          </div>
+
           <div className="flex items-center gap-2.5 rounded-xl border border-cyan-500/40 bg-cyan-950/40 px-3.5 py-2 text-xs shadow-lg shadow-cyan-500/10">
             <div className="relative flex h-3 w-3">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75"></span>

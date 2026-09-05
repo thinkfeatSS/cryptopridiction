@@ -12,6 +12,7 @@ class MarketForecast(Base):
     top_round_signals_json = Column(Text)
     scanner_leaderboard_json = Column(Text)
     deep_dive_json = Column(Text)
+    btc_market_shield_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
@@ -19,6 +20,7 @@ class MarketForecast(Base):
             "id": self.id,
             "timestamp": self.timestamp_utc,
             "strategy": self.strategy_name,
+            "btc_market_shield": json.loads(self.btc_market_shield_json) if self.btc_market_shield_json else {"active": False, "reason": "NORMAL (Market Stable)"},
             "top_round_signals": json.loads(self.top_round_signals_json) if self.top_round_signals_json else [],
             "scanner_leaderboard": json.loads(self.scanner_leaderboard_json) if self.scanner_leaderboard_json else [],
             "deep_dive": json.loads(self.deep_dive_json) if self.deep_dive_json else {},
