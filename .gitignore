@@ -1,3 +1,21 @@
+# ==============================================================================
+# Comprehensive .gitignore for Crypto Quantitative Trading System (Backend + Frontend)
+# ==============================================================================
+
+# Node / Next.js / Frontend
+node_modules/
+*/node_modules/
+.next/
+*/.next/
+out/
+build/
+dist/
+.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
 # Python Virtual Environments
 env/
 venv/
@@ -8,27 +26,17 @@ venv.bak/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
+*/__pycache__/
 *.py[cod]
 *$py.class
 *.so
-
-# C extensions
 *.pyd
 
-# Distribution / packaging
-build/
-dist/
-eggs/
-.eggs/
-parts/
-var/
-sdist/
-develop-eggs/
-.installed.cfg
-*.egg
-MANIFEST
+# CatBoost / ML Run artifacts
+catboost_info/
+*/catboost_info/
 
-# Machine Learning Models & Checkpoints
+# Machine Learning Models & Heavy Checkpoints (Export directories)
 models_export_*/
 *.h5
 *.keras
@@ -37,18 +45,14 @@ models_export_*/
 *.model
 *.cbm
 
-# Export App Data & Live Cache
-export_app_data/
-*.csv
-*.json
-!package.json
-!tsconfig.json
-
-# Logs & Databases
+# Temporary export data & database files
+export_app_data/*.csv
+export_app_data/*.json
 *.log
 *.sqlite
 *.sqlite3
 *.db
+user_pasted_signals.csv
 
 # IDE & Editor files
 .vscode/
@@ -70,4 +74,8 @@ Thumbs.db
 # Environment Variables & Secrets
 .env
 .env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 !.env.example

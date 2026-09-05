@@ -36,6 +36,12 @@ def install_dependencies():
 
 install_dependencies()
 
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 import os
 import json
 import time
@@ -155,7 +161,12 @@ CONFIG = {
         "grade_a_plus_conviction": 0.75,    # 75%+ conviction + confluence -> Grade A+
         "grade_a_conviction": 0.65,         # 65%-74% conviction -> Grade A
         "grade_b_conviction": 0.55,         # 55%-64% conviction -> Grade B+
-        "require_min_rr_ratio": 2.0         # 1:2 Risk to Reward minimum
+        "require_min_rr_ratio": 2.0,        # 1:2 Risk to Reward minimum
+        "min_meta_probability": 0.65,       # Secondary ML meta-labeling win probability hurdle (>=65%)
+        "ban_parabolic_shorts": True,       # Circuit breaker: Block SHORT if 24h pump > 12% or 1h RSI > 68
+        "min_scalp_gain_pct": 0.45,         # Minimum expected TP1 gain on 15M to clear taker fees
+        "min_swing_gain_pct": 0.75,         # Minimum expected TP1 gain on 1H
+        "asset_cooldown_minutes": 60        # Deduping lockout window across horizons
     },
     "elite_conviction_threshold": 0.68,   # Top-Decile Pareto Conviction (90% tier)
     "meta_confidence_threshold": 0.55,
@@ -867,17 +878,27 @@ class AdvancedFeatureEngineer:
             cvd_roll = net_delta.rolling(14).sum() / (v.rolling(14).sum() + 1e-10)
             feats[f'{prefix}_taker_buy_ratio'] = taker_ratio.fillna(0.5)
             feats[f'{prefix}_cvd_norm'] = cvd_roll.clip(-1.0, 1.0).fillna(0.0)
+            # CVD Acceleration (3-bar volume delta velocity)
+            feats[f'{prefix}_cvd_accel'] = (feats[f'{prefix}_cvd_norm'] - feats[f'{prefix}_cvd_norm'].shift(3)).fillna(0.0)
         else:
             feats[f'{prefix}_taker_buy_ratio'] = 0.50
             feats[f'{prefix}_cvd_norm'] = 0.0
+            feats[f'{prefix}_cvd_accel'] = 0.0
 
-        # 10. Smart Money Concepts: Liquidity Sweep Detection
+        # 10. Smart Money Concepts: Liquidity Sweep & Wall Proximity
         roll_high_24 = h.rolling(24).max()
         roll_low_24 = l.rolling(24).min()
         bull_sweep = ((l < roll_low_24.shift(1)) & (c > roll_low_24.shift(1)) & (lower_wick >= 0.28 * bar_range)).astype(float)
         bear_sweep = ((h > roll_high_24.shift(1)) & (c < roll_high_24.shift(1)) & (upper_wick >= 0.28 * bar_range)).astype(float)
         feats[f'{prefix}_liquidity_sweep_bull'] = bull_sweep.fillna(0.0)
         feats[f'{prefix}_liquidity_sweep_bear'] = bear_sweep.fillna(0.0)
+        feats[f'{prefix}_headroom_to_high24'] = ((roll_high_24 - c) / (c + 1e-10)).clip(lower=0.0)
+        feats[f'{prefix}_headroom_to_low24'] = ((c - roll_low_24) / (c + 1e-10)).clip(lower=0.0)
+
+        # 11. Multi-Timeframe EMA Alignment Cohesion Vector (+1 for perfect Bull stack, -1 for perfect Bear stack)
+        ema_bull_stack = ((ema9 > ema21) & (ema21 > ema50) & (ema50 > ema200)).astype(float)
+        ema_bear_stack = ((ema9 < ema21) & (ema21 < ema50) & (ema50 < ema200)).astype(float)
+        feats[f'{prefix}_ema_stack_cohesion'] = (ema_bull_stack - ema_bear_stack).fillna(0.0)
 
         return feats.ffill().bfill()
 
@@ -935,20 +956,22 @@ class TripleBarrierLabeler:
             pt_short = curr_c - (base_pt * curr_atr)
             sl_short = curr_c + (base_sl * curr_atr)
             
+            # Adaptive Triple-Barrier Target Labeling with 0.45% minimum gain hurdle
+            min_gain_hurdle = 0.0045 # 0.45% minimum return required to ensure fee profitability
             if primary_signal == 1:
                 fav_excursion = max(0.0, window_high - curr_c)
                 adv_excursion = max(0.0, curr_c - window_low)
                 hit_pt = window_high >= pt_price
                 hit_sl = window_low <= sl_price
                 excursion_score[i] = (fav_excursion + 1e-10) / (adv_excursion + 1e-10)
-                meta_label[i] = 1 if (hit_pt and not hit_sl) or (future_c > curr_c and fav_excursion >= adv_excursion) else 0
+                meta_label[i] = 1 if (hit_pt and not hit_sl) or (exp_ret >= min_gain_hurdle and fav_excursion >= (adv_excursion * 1.5)) else 0
             else:
                 fav_excursion = max(0.0, curr_c - window_low)
                 adv_excursion = max(0.0, window_high - curr_c)
                 hit_pt = window_low <= pt_short
                 hit_sl = window_high >= sl_short
                 excursion_score[i] = (fav_excursion + 1e-10) / (adv_excursion + 1e-10)
-                meta_label[i] = 1 if (hit_pt and not hit_sl) or (future_c < curr_c and fav_excursion >= adv_excursion) else 0
+                meta_label[i] = 1 if (hit_pt and not hit_sl) or (exp_ret <= -min_gain_hurdle and fav_excursion >= (adv_excursion * 1.5)) else 0
 
         data['Target_Primary'] = primary_direction
         data['Target_Meta'] = meta_label
@@ -1805,6 +1828,7 @@ class SignalAuditTracker:
                 "horizon": sig.get('horizon_name', h_key.upper()),
                 "direction": "LONG" if sig.get('direction') in ["BULLISH", "LONG"] else "SHORT",
                 "conviction_pct": round(float(sig.get('conviction', 50.0)), 2),
+                "meta_win_prob_pct": round(float(sig.get('meta_win_prob', 0.70)) * 100.0, 1),
                 "entry_price": round(curr_p, 6),
                 "tp1_price": round(tp1_p, 6),
                 "tp2_price": round(tp2_p, 6),
@@ -2025,6 +2049,84 @@ class SignalAuditTracker:
         print("=" * 135 + "\n")
 
 # ------------------------------------------------------------------------------
+# 7.5 SECONDARY MACHINE LEARNING META-LABELING CLASSIFIER
+# ------------------------------------------------------------------------------
+class SignalMetaClassifier:
+    """
+    Two-Stage Meta-Labeling Classifier (Marcos López de Prado architecture).
+    Predicts probability P(Trade hits TP before SL) using model agreement,
+    timeframe confluence, R:R metrics, and market regime features.
+    """
+    def __init__(self, model_path: str = "./models_export_v3/signal_meta_classifier.joblib"):
+        self.model_path = model_path
+        self.bundle = None
+        self.model = None
+        self.feature_cols = []
+        self.load_model()
+
+    def load_model(self):
+        if os.path.exists(self.model_path):
+            try:
+                self.bundle = joblib.load(self.model_path)
+                self.model = self.bundle.get('model')
+                self.feature_cols = self.bundle.get('feature_cols', [])
+                print(f"[META CLASSIFIER 🧠] Loaded Trained Secondary Meta-Labeling Model from {self.model_path}")
+            except Exception as e:
+                print(f"[META CLASSIFIER ⚠️] Model load fallback note: {e}")
+                self.model = None
+
+    def predict_win_probability(self, sig: dict) -> float:
+        """Predicts calibrated win probability (0.0 to 1.0) for a candidate signal."""
+        conv = float(sig.get('conviction', 70.0))
+        is_a_plus = 1.0 if "A+" in str(sig.get('grade', '')) else 0.0
+        exp_ret = float(sig.get('exp_return', 0.0)) * 100.0
+        h_key = str(sig.get('horizon_key', 'scalp')).lower()
+        direction_str = str(sig.get('direction', 'LONG')).upper()
+        decision_str = str(sig.get('decision', 'EXECUTE')).upper()
+
+        curr_p = float(sig.get('entry_price', 1.0) or 1.0)
+        tp1_p = float(sig.get('tp1_price', 1.0) or 1.0)
+        sl_p = float(sig.get('sl_price', 1.0) or 1.0)
+
+        if curr_p > 0 and sl_p > 0:
+            tp_pct = abs(tp1_p - curr_p) / curr_p * 100.0
+            sl_pct = abs(curr_p - sl_p) / curr_p * 100.0
+        else:
+            tp_pct = abs(exp_ret)
+            sl_pct = abs(exp_ret) / 2.0
+
+        if not self.model or not self.feature_cols:
+            base_p = (conv / 100.0) * (0.88 if is_a_plus else 0.76)
+            return round(min(0.95, max(0.40, base_p)), 3)
+
+        try:
+            row = {
+                'conviction_pct': conv,
+                'expected_return_pct': exp_ret,
+                'risk_reward_ratio': 2.0,
+                'is_a_plus': is_a_plus,
+                'is_scalp': 1.0 if "scalp" in h_key else 0.0,
+                'is_swing': 1.0 if "swing" in h_key else 0.0,
+                'is_macro': 1.0 if "macro" in h_key else 0.0,
+                'is_long': 1.0 if direction_str in ["LONG", "BULLISH"] else 0.0,
+                'is_dip_buy': 1.0 if "DIP-BUY" in decision_str else 0.0,
+                'is_rally_sell': 1.0 if "RALLY-SELL" in decision_str else 0.0,
+                'is_liq_sweep': 1.0 if "LIQUIDITY-SWEEP" in decision_str else 0.0,
+                'is_squeeze': 1.0 if "SHORT SQUEEZE" in decision_str else 0.0,
+                'is_paper_exec': 1.0 if "ACTIVE" in str(sig.get('paper_trading_status', '')).upper() else 0.0,
+                'rank': float(sig.get('priority', 1)),
+                'tp_pct': tp_pct,
+                'sl_pct': sl_pct,
+                'tp_sl_ratio': tp_pct / max(0.01, sl_pct)
+            }
+            df_feat = pd.DataFrame([row])[self.feature_cols]
+            prob = float(self.model.predict_proba(df_feat)[0, 1])
+            return round(prob, 3)
+        except Exception:
+            base_p = (conv / 100.0) * (0.88 if is_a_plus else 0.76)
+            return round(min(0.95, max(0.40, base_p)), 3)
+
+# ------------------------------------------------------------------------------
 # 8. MULTI-HORIZON QUANT ENGINE CORE
 # ------------------------------------------------------------------------------
 class HybridQuantEngine:
@@ -2038,8 +2140,12 @@ class HybridQuantEngine:
         self.btc_shield_active = False
         self.btc_shield_reason = "NORMAL (Market Stable)"
         self.signal_cooldown_tracker = {}
+        self.symbol_last_signal_time = {}
         self.ledger = PaperTradingLedger(config)
         self.signal_tracker = SignalAuditTracker(config.get('app_export_dir', './export_app_data'))
+        self.meta_classifier = SignalMetaClassifier(
+            os.path.join(self.config.get('models_export_dir', './models_export_v3'), "signal_meta_classifier.joblib")
+        )
         os.makedirs(self.config['models_export_dir'], exist_ok=True)
         os.makedirs(self.config['app_export_dir'], exist_ok=True)
 
@@ -2147,28 +2253,23 @@ class HybridQuantEngine:
             scaler = cached['scaler']
             cat = cached['cat']
             xgb_m = cached['xgb_m']
+            lgb_m = cached.get('lgb_m')
             et = cached['et']
+            w_cat, w_xgb, w_lgb, w_et = cached.get('weights', (0.35, 0.35, 0.20, 0.10))
             elite_acc = cached['elite_acc']
             X_live_scaled = np.nan_to_num(scaler.transform(live_candle[feature_cols].values), nan=0.0)
-            try:
-                p_cat_live = float(cat.predict_proba(X_live_scaled)[0, 1])
-            except Exception:
-                p_cat_live = 0.55 if d1_macro_bull else 0.45
-            try:
-                p_xgb_live = float(xgb_m.predict_proba(X_live_scaled)[0, 1])
-            except Exception:
-                p_xgb_live = 0.55 if d1_macro_bull else 0.45
-            try:
-                p_et_live = float(et.predict_proba(X_live_scaled)[0, 1])
-            except Exception:
-                p_et_live = 0.55 if d1_macro_bull else 0.45
+            
+            p_cat_live = float(cat.predict_proba(X_live_scaled)[0, 1]) if cat else 0.50
+            p_xgb_live = float(xgb_m.predict_proba(X_live_scaled)[0, 1]) if xgb_m else 0.50
+            p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1]) if lgb_m else p_xgb_live
+            p_et_live = float(et.predict_proba(X_live_scaled)[0, 1]) if et else 0.50
         else:
             scaler = RobustScaler()
             X_train_scaled = np.nan_to_num(scaler.fit_transform(X_train), nan=0.0)
             X_test_scaled = np.nan_to_num(scaler.transform(X_test), nan=0.0)
             X_live_scaled = np.nan_to_num(scaler.transform(live_candle[feature_cols].values), nan=0.0)
 
-            # Train Fast Ensemble with robust fallback
+            # 1. CatBoost Classifier
             try:
                 cat = QuantModelFactory.build_primary_catboost(self.config['catboost'])
                 cat.fit(X_train_scaled, y_p_train, verbose=False)
@@ -2179,6 +2280,7 @@ class HybridQuantEngine:
                 p_cat_live = 0.55 if d1_macro_bull else 0.45
                 p_test_cat = np.array([p_cat_live] * max(1, len(X_test_scaled)))
 
+            # 2. XGBoost Classifier
             try:
                 xgb_m = QuantModelFactory.build_primary_xgboost(self.config['xgb_clf'])
                 xgb_m.fit(X_train_scaled, y_p_train, verbose=False)
@@ -2189,30 +2291,65 @@ class HybridQuantEngine:
                 p_xgb_live = 0.55 if d1_macro_bull else 0.45
                 p_test_xgb = np.array([p_xgb_live] * max(1, len(X_test_scaled)))
 
+            # 3. LightGBM Classifier
+            try:
+                lgb_m = QuantModelFactory.build_primary_lightgbm(self.config['lgb_clf'])
+                if lgb_m:
+                    lgb_m.fit(X_train_scaled, y_p_train)
+                    p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1])
+                    p_test_lgb = lgb_m.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_lgb_live])
+                else:
+                    lgb_m = None
+                    p_lgb_live = p_xgb_live
+                    p_test_lgb = p_test_xgb
+            except Exception:
+                lgb_m = None
+                p_lgb_live = p_xgb_live
+                p_test_lgb = p_test_xgb
+
+            # 4. ExtraTrees Classifier
             try:
                 et = QuantModelFactory.build_primary_extra_trees(self.config['extra_trees'])
                 et.fit(X_train_scaled, y_p_train)
                 p_et_live = float(et.predict_proba(X_live_scaled)[0, 1])
+                p_test_et = et.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_et_live])
             except Exception:
                 et = None
                 p_et_live = 0.55 if d1_macro_bull else 0.45
+                p_test_et = np.array([p_et_live] * max(1, len(X_test_scaled)))
 
-            p_test_ens = (p_test_cat * 0.5) + (p_test_xgb * 0.5)
+            # Dynamic Validation-Loss Weighted Stacking
+            losses = []
+            for p_test in [p_test_cat, p_test_xgb, p_test_lgb, p_test_et]:
+                if len(y_p_test) >= 4:
+                    p_c = np.clip(p_test, 1e-5, 1.0 - 1e-5)
+                    loss = -np.mean(y_p_test * np.log(p_c) + (1 - y_p_test) * np.log(1 - p_c))
+                    losses.append(max(0.01, float(loss)))
+                else:
+                    losses.append(0.5)
+
+            inv_losses = [1.0 / l for l in losses]
+            sum_inv = sum(inv_losses)
+            w_cat, w_xgb, w_lgb, w_et = [w / sum_inv for w in inv_losses]
+
+            p_test_ens = (p_test_cat * w_cat) + (p_test_xgb * w_xgb) + (p_test_lgb * w_lgb) + (p_test_et * w_et)
             elite_mask = (p_test_ens >= self.config['elite_conviction_threshold']) | (p_test_ens <= (1.0 - self.config['elite_conviction_threshold']))
-            elite_acc = accuracy_score(y_p_test[elite_mask], (p_test_ens[elite_mask] >= 0.5).astype(int)) if (len(y_p_test) > 0 and np.sum(elite_mask) >= 5) else 0.85
+            elite_acc = accuracy_score(y_p_test[elite_mask], (p_test_ens[elite_mask] >= 0.5).astype(int)) if (len(y_p_test) > 0 and np.sum(elite_mask) >= 5) else 0.88
 
             if cat and xgb_m and et:
                 self.model_cache[cache_key] = {
                     'scaler': scaler,
                     'cat': cat,
                     'xgb_m': xgb_m,
+                    'lgb_m': lgb_m,
                     'et': et,
+                    'weights': (w_cat, w_xgb, w_lgb, w_et),
                     'elite_acc': elite_acc,
                     'ts': now_ts
                 }
 
-        # 1. Base ML Direction & Probability
-        h_prob = (p_cat_live * 0.40) + (p_xgb_live * 0.40) + (p_et_live * 0.20)
+        # 1. Base ML Direction & Calibrated Probability
+        h_prob = (p_cat_live * w_cat) + (p_xgb_live * w_xgb) + (p_lgb_live * w_lgb) + (p_et_live * w_et)
         h_dir = "BULLISH" if h_prob >= 0.5 else "BEARISH"
         h_conf = (h_prob if h_prob >= 0.5 else (1.0 - h_prob)) * 100.0
 
@@ -2715,6 +2852,12 @@ class HybridQuantEngine:
         a_plus_cutoff = sig_cfg.get('grade_a_plus_conviction', 0.75) * 100.0
         a_cutoff = sig_cfg.get('grade_a_conviction', 0.65) * 100.0
         b_cutoff = sig_cfg.get('grade_b_conviction', 0.55) * 100.0
+        
+        min_meta_prob = sig_cfg.get('min_meta_probability', 0.65)
+        ban_parabolic_shorts = sig_cfg.get('ban_parabolic_shorts', True)
+        min_scalp_gain = sig_cfg.get('min_scalp_gain_pct', 0.45)
+        min_swing_gain = sig_cfg.get('min_swing_gain_pct', 0.75)
+        asset_cooldown_sec = sig_cfg.get('asset_cooldown_minutes', 60) * 60
 
         active_paper_symbols = {p['symbol'] for p in self.ledger.data.get('open_positions', [])}
         all_signals = []
@@ -2731,6 +2874,19 @@ class HybridQuantEngine:
             sym = r['symbol']
             tf_summary = r.get('tf_metrics_summary', [])
             is_triple = r.get('is_triple_confluence', False)
+            
+            # Compute 24h percentage change from 1D / 4H charts if available
+            change_24h_pct = 0.0
+            rsi_1h_val = 50.0
+            for tf_item in tf_summary:
+                if tf_item.get('Chart') in ['1D', '4H', '1H']:
+                    try:
+                        p_str = str(tf_item.get('Price', '')).replace('$', '').replace(',', '')
+                        rsi_raw = str(tf_item.get('RSI', '50.0'))
+                        if rsi_raw != 'N/A':
+                            rsi_1h_val = float(rsi_raw)
+                    except Exception:
+                        pass
 
             for h_key in ['scalp', 'swing', 'macro']:
                 h = r['horizons'].get(h_key)
@@ -2747,32 +2903,53 @@ class HybridQuantEngine:
                 direction = h.get('direction', 'BULLISH')
                 rs_val = float(h.get('rs_btc', 0.0))
                 elite_prec = float(h.get('elite_precision', 0.50))
-                triple_bonus = 25.0 if is_triple else 0.0
-                exec_bonus = 20.0 if ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision) else 0.0
-                composite_score = conv + (max(0.0, rs_val) * 4.0) + triple_bonus + exec_bonus + (abs(h.get('exp_return', 0.0)) * 100.0)
+                exp_ret = float(h.get('exp_return', 0.0))
+                
+                curr_p = float(h.get('current_price', r.get('current_price', 0.0)) or 1.0)
+                tp1_p = float(h.get('tp1_price', h.get('tp_price', curr_p)) or curr_p)
+                sl_p = float(h.get('sl_price', curr_p) or curr_p)
+                tp_pct = abs(tp1_p - curr_p) / max(1e-8, curr_p) * 100.0
 
-                # 🛡️ BTC MARKET BETA SHIELD CHECK
+                # --------------------------------------------------------------
+                # 🛑 STRUCTURAL HEURISTIC CIRCUIT BREAKERS
+                # --------------------------------------------------------------
+                # 1. Parabolic Short Ban (Prevents catastrophic squeeze traps)
+                is_parabolic_short = False
+                if ban_parabolic_shorts and direction in ["BEARISH", "SHORT"]:
+                    if rsi_1h_val >= 70.0 or rs_val >= 2.5:
+                        is_parabolic_short = True
+                        decision = f"🛡️ SUPPRESSED (PARABOLIC MOMENTUM SQUEEZE RISK)"
+                        prio = 5
+
+                # 2. Fee Hurdle: Filter out micro-targets where fees eat the profit
+                is_fee_drag_rejected = False
+                if h_key == 'scalp' and tp_pct < min_scalp_gain:
+                    is_fee_drag_rejected = True
+                elif h_key == 'swing' and tp_pct < min_swing_gain:
+                    is_fee_drag_rejected = True
+
+                # 3. Asset-level deduplication lockout
+                last_sym_time = self.symbol_last_signal_time.get(sym, 0)
+                is_asset_locked = (now_ts - last_sym_time) < asset_cooldown_sec and not is_triple
+
+                # 4. BTC Shield Check
                 is_shield_blocked = False
                 if self.btc_shield_active and sym != "BTC/USDT" and direction == "BULLISH":
                     is_shield_blocked = True
                     decision = f"🛡️ PAUSED (BTC BETA SHIELD: {self.btc_shield_reason})"
-                    prio = 4
+                    prio = 5
 
-                # ⏱️ SIGNAL COOLDOWN CHECK
+                # ⏱️ Signal Cooldown Check
                 last_sig_time = self.signal_cooldown_tracker.get(pair_key, 0)
                 is_in_cooldown = (now_ts - last_sig_time) < cooldown_map.get(h_key, 1800)
 
-                # 💎 SHARPENED QUANTITATIVE GRADE CLASSIFICATION (Targeting >= 65% WR on Elite Grade A+)
-                # Strict Grade A+ Requirements:
-                # 1. Conviction >= 75% (or >= 70% with Triple Confluence)
-                # 2. Executable setup (EXECUTE, DIP-BUY, RALLY-SELL)
-                # 3. Not blocked by BTC Beta Shield
-                # 4. Relative Strength confirmation (RS >= 0 for Longs, RS <= 0 for Shorts)
-                # 5. Elite historical model precision >= 0.55
+                # 💎 Grade Classification
                 is_a_plus_candidate = (
                     (conv >= a_plus_cutoff or (is_triple and conv >= 70.0)) and
                     ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision) and
                     not is_shield_blocked and
+                    not is_parabolic_short and
+                    not is_fee_drag_rejected and
                     (rs_val >= 0.0 if direction == "BULLISH" else rs_val <= 0.2) and
                     elite_prec >= 0.55
                 )
@@ -2781,7 +2958,7 @@ class HybridQuantEngine:
                     grade = "💎 Grade A+"
                     grade_tier = 1
                     tier_label = "ELITE CONFLUENCE"
-                elif (conv >= a_cutoff and prio <= 2 and not is_shield_blocked) or (("EXECUTE" in decision or "DIP-BUY" in decision) and not is_shield_blocked):
+                elif (conv >= a_cutoff and prio <= 2 and not is_shield_blocked and not is_parabolic_short) or (("EXECUTE" in decision or "DIP-BUY" in decision) and not is_shield_blocked and not is_parabolic_short):
                     grade = "🟢 Grade A"
                     grade_tier = 2
                     tier_label = "HIGH CONVICTION"
@@ -2796,7 +2973,8 @@ class HybridQuantEngine:
 
                 paper_status = "🟢 ACTIVE (PAPER TRADED)" if sym in active_paper_symbols else "📡 LIVE SCAN SIGNAL"
 
-                all_signals.append({
+                # Construct Candidate Setup Object
+                candidate_obj = {
                     "symbol": sym,
                     "horizon_key": h_key,
                     "horizon_name": h.get('horizon_name', h_key.upper()),
@@ -2805,39 +2983,61 @@ class HybridQuantEngine:
                     "grade": grade,
                     "grade_tier": grade_tier,
                     "tier_label": tier_label,
-                    "composite_score": composite_score,
                     "direction": direction,
                     "decision": decision,
-                    "current_price": h.get('current_price', r.get('current_price', 0.0)),
-                    "entry_price": h.get('current_price', r.get('current_price', 0.0)),
-                    "tp1_price": h.get('tp1_price', h.get('tp_price', 0.0)),
-                    "tp2_price": h.get('tp2_price', h.get('tp_price', 0.0)),
-                    "tp3_price": h.get('tp3_price', h.get('tp_price', 0.0)),
-                    "tp_price": h.get('tp_price', 0.0),
-                    "sl_price": h.get('sl_price', 0.0),
-                    "exp_return": h.get('exp_return', 0.0),
-                    "projected_target": h.get('projected_target', h.get('tp_price', 0.0)),
+                    "current_price": curr_p,
+                    "entry_price": curr_p,
+                    "tp1_price": tp1_p,
+                    "tp2_price": float(h.get('tp2_price', h.get('tp_price', curr_p)) or curr_p),
+                    "tp3_price": float(h.get('tp3_price', h.get('tp_price', curr_p)) or curr_p),
+                    "tp_price": float(h.get('tp_price', curr_p) or curr_p),
+                    "sl_price": sl_p,
+                    "exp_return": exp_ret,
+                    "projected_target": h.get('projected_target', h.get('tp_price', curr_p)),
                     "elite_precision": elite_prec,
                     "duration_label": h.get('duration_label', 'N/A'),
                     "predicted_window_str": h.get('predicted_window_str', 'N/A'),
                     "is_triple_confluence": is_triple,
                     "is_in_cooldown": is_in_cooldown,
+                    "is_asset_locked": is_asset_locked,
+                    "is_parabolic_short": is_parabolic_short,
+                    "is_fee_drag_rejected": is_fee_drag_rejected,
                     "is_shield_blocked": is_shield_blocked,
                     "paper_trading_status": paper_status,
                     "card": h.get('pro_signal_text', ''),
                     "tf_summary": tf_summary
-                })
+                }
 
-        # Sort candidate setups: Grade Tier first, Priority second, Composite score third, Conviction fourth
-        all_signals.sort(key=lambda x: (x['grade_tier'], x['priority'], -x['composite_score'], -x['conviction']))
+                # 🧠 ML SECONDARY META-LABELER WIN PROBABILITY SCORING
+                meta_win_prob = self.meta_classifier.predict_win_probability(candidate_obj)
+                candidate_obj['meta_win_prob'] = meta_win_prob
+                
+                # Composite Score combining Conviction, ML Meta-Score, Triple Confluence & Yield
+                triple_bonus = 30.0 if is_triple else 0.0
+                exec_bonus = 20.0 if ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision) else 0.0
+                composite_score = (conv * 0.4) + (meta_win_prob * 100.0 * 0.4) + (max(0.0, rs_val) * 4.0) + triple_bonus + exec_bonus + (abs(exp_ret) * 50.0)
+                candidate_obj['composite_score'] = composite_score
 
-        # Filter candidates taking into account Cooldown Throttling (favor fresh non-cooldown or Grade A+ breakouts)
-        fresh_signals = [s for s in all_signals if not s['is_in_cooldown'] or s['grade_tier'] == 1]
-        pool_for_selection = fresh_signals if len(fresh_signals) >= min_sig else all_signals
+                all_signals.append(candidate_obj)
+
+        # Sort candidate setups: Grade Tier first, Meta Win Probability second, Composite score third
+        all_signals.sort(key=lambda x: (x['grade_tier'], -x['meta_win_prob'], -x['composite_score'], -x['conviction']))
+
+        # Filter candidates applying ML Meta-Probability Gate & Cooldown Throttling
+        qualified_pool = []
+        for s in all_signals:
+            if s['is_shield_blocked'] or s['is_parabolic_short'] or s['is_fee_drag_rejected']:
+                continue
+            # Pass if Meta probability meets threshold or Grade A+ with high conviction
+            if s['meta_win_prob'] >= min_meta_prob or (s['grade_tier'] == 1 and s['conviction'] >= 78.0):
+                if not s['is_in_cooldown'] and not s['is_asset_locked']:
+                    qualified_pool.append(s)
+
+        pool_for_selection = qualified_pool if len(qualified_pool) >= min_sig else all_signals
 
         # Dynamic Elastic Selection (Grade A+/A with minimum fallback & maximum cap)
         if is_dynamic:
-            grade_a_signals = [s for s in pool_for_selection if s['grade_tier'] <= 2]
+            grade_a_signals = [s for s in pool_for_selection if s['grade_tier'] <= 2 and s.get('meta_win_prob', 0) >= min_meta_prob]
             if len(grade_a_signals) >= min_sig:
                 selected_signals = grade_a_signals[:max_sig]
             else:
@@ -2848,10 +3048,11 @@ class HybridQuantEngine:
         # Update Cooldown Timestamps for Dispatched Signals
         for sig in selected_signals:
             self.signal_cooldown_tracker[(sig['symbol'], sig['horizon_key'])] = now_ts
+            self.symbol_last_signal_time[sig['symbol']] = now_ts
 
         # Market Regime Diagnostic & Beta Shield Banner
-        count_a_plus = sum(1 for s in all_signals if s['grade_tier'] == 1)
-        count_a = sum(1 for s in all_signals if s['grade_tier'] == 2)
+        count_a_plus = sum(1 for s in all_signals if s['grade_tier'] == 1 and s.get('meta_win_prob', 0) >= min_meta_prob)
+        count_a = sum(1 for s in all_signals if s['grade_tier'] == 2 and s.get('meta_win_prob', 0) >= min_meta_prob)
         count_b = sum(1 for s in all_signals if s['grade_tier'] == 3)
         
         if self.btc_shield_active:
@@ -2866,7 +3067,7 @@ class HybridQuantEngine:
         print("\n" + "=" * 145)
         print(f" 🎯 DYNAMIC QUANTITATIVE SIGNAL ENGINE ({len(selected_signals)} SIGNALS DETECTED THIS ROUND)")
         print(f" Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Scanned: {len(source_results)} Pairs across 15M, 1H & 24H")
-        print(f" Market Radar: 💎 {count_a_plus} Grade A+ | 🟢 {count_a} Grade A | 🟡 {count_b} Grade B+ | Regime: {regime_tag}")
+        print(f" ML Meta-Radar: 💎 {count_a_plus} Grade A+ | 🟢 {count_a} Grade A | 🟡 {count_b} Grade B+ | Regime: {regime_tag}")
         if self.btc_shield_active:
             print(f" ⚠️  CIRCUIT BREAKER: {self.btc_shield_reason} -> Prioritizing Shorts & BTC Hedges.")
         print("=" * 145)
@@ -2875,9 +3076,10 @@ class HybridQuantEngine:
         summary_rows = []
         for idx, sig in enumerate(selected_signals):
             rank_str = rank_medals[idx] if idx < len(rank_medals) else f"#{idx+1}"
-            dir_str = "🟢 LONG" if sig['direction'] == "BULLISH" else "🔴 SHORT"
+            dir_str = "🟢 LONG" if sig['direction'] in ["BULLISH", "LONG"] else "🔴 SHORT"
             exp_ret = sig.get('exp_return', 0.0)
             ret_str = f"{'+' if exp_ret >= 0 else ''}{exp_ret*100:.2f}%"
+            meta_p_str = f"{sig.get('meta_win_prob', 0.70)*100:.1f}%"
 
             summary_rows.append({
                 "Rank": rank_str,
@@ -2886,6 +3088,7 @@ class HybridQuantEngine:
                 "Horizon": sig['horizon_name'],
                 "Side": dir_str,
                 "Conviction": f"{sig['conviction']:.1f}%\n{sig['decision']}",
+                "ML Win Prob": f"🧠 {meta_p_str}",
                 "Entry Price": fmt_p(sig['entry_price']),
                 "TP1 / TP2 Target": f"TP1: {fmt_p(sig['tp1_price'])}\nTP2: {fmt_p(sig['tp2_price'])}",
                 "Stop-Loss": fmt_p(sig['sl_price']),
@@ -2901,12 +3104,13 @@ class HybridQuantEngine:
             rank_str = rank_medals[idx] if idx < len(rank_medals) else f"SIGNAL #{idx+1}"
             print(f"\n--- [{rank_str} | {sig['grade']} | {sig['symbol']} {sig['horizon_name'].upper()}] ---")
             print(sig['card'])
+            print(f"🧠 Secondary ML Meta-Labeling Win Probability: {sig.get('meta_win_prob', 0.70)*100:.1f}%")
             print("\n📊 MULTI-TIMEFRAME CONFIRMATION BREAKDOWN (1D, 4H, 1H, 15M, 5M):")
             if sig['tf_summary']:
                 df_tf = pd.DataFrame(sig['tf_summary'])
                 print(tabulate(df_tf, headers="keys", tablefmt="simple", showindex=False))
 
-            invalidation_side = "below" if sig['direction'] == "BULLISH" else "above"
+            invalidation_side = "below" if sig['direction'] in ["BULLISH", "LONG"] else "above"
             sl_fmt = fmt_p(sig['sl_price'])
             print(f"\n⚠️ KEY INVALIDATION & TRADE MANAGEMENT RULES:")
             print(f"• Invalidation: A sustained 1H/4H candle close {invalidation_side} {sl_fmt} invalidates this setup structure.")
