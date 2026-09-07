@@ -10,11 +10,12 @@ router = APIRouter(prefix="/api/signals", tags=["Signals"])
 
 @router.get("")
 def get_signals(
+    symbol: Optional[str] = Query(None, description="Filter by exact crypto symbol (e.g. BTC/USDT)"),
     search: Optional[str] = Query(None, description="Search symbol or signal ID"),
     date: Optional[str] = Query(None, description="Filter by date UTC (YYYY-MM-DD)"),
     outcome: Optional[str] = Query(None, description="Filter by outcome: WON, LOST, PENDING, EXPIRED"),
     grade: Optional[str] = Query(None, description="Filter by grade: A+, A, B+"),
-    horizon: Optional[str] = Query(None, description="Filter by horizon: SCALP, SWING, MACRO"),
+    horizon: Optional[str] = Query(None, description="Filter by horizon: SCALP, SWING, MACRO, 2-DAY, 3-DAY, WEEKLY, BIWEEKLY, MONTHLY"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -22,6 +23,7 @@ def get_signals(
     """Retrieve paginated, filterable signals from MySQL database."""
     return signal_service.get_signals_list(
         db=db,
+        symbol=symbol,
         search=search,
         date=date,
         outcome=outcome,
@@ -30,6 +32,11 @@ def get_signals(
         limit=limit,
         offset=offset,
     )
+
+@router.get("/by-symbol/{symbol_name:path}")
+def get_signals_by_symbol(symbol_name: str, limit: int = Query(100, ge=1, le=500), db: Session = Depends(get_db)):
+    """Retrieve all historical 15-minute signals generated for a specific cryptocurrency."""
+    return signal_service.get_signals_by_symbol(db, symbol=symbol_name, limit=limit)
 
 @router.get("/kpi")
 def get_kpi_summary(db: Session = Depends(get_db)):

@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { useForecastQuery, useStatusQuery } from "@/hooks/useCryptoData";
 import { formatPercent, formatUsd, formatTimeRemaining } from "@/lib/utils";
+import CoinSignalHistoryModal from "@/components/CoinSignalHistoryModal";
 import {
   Sparkles,
   Radio,
@@ -14,14 +15,21 @@ import {
   Zap,
   Target,
   ShieldAlert,
+  History,
+  CheckCircle2,
+  XCircle,
+  Hourglass,
 } from "lucide-react";
+
+type HorizonKey = "all" | "scalp" | "swing" | "macro" | "horizon_2d" | "horizon_3d" | "weekly" | "biweekly" | "monthly";
 
 export default function AssetPredictionMatrix() {
   const { data: forecast, isLoading } = useForecastQuery();
   const { data: status } = useStatusQuery();
-  const [selectedHorizon, setSelectedHorizon] = useState<"all" | "scalp" | "swing" | "macro">("all");
+  const [selectedHorizon, setSelectedHorizon] = useState<HorizonKey>("all");
   const [search, setSearch] = useState("");
   const [localSeconds, setLocalSeconds] = useState<number>(0);
+  const [selectedCoin, setSelectedCoin] = useState<{ symbol: string; price?: number } | null>(null);
 
   const leaderboard = forecast?.scanner_leaderboard || [];
 
@@ -44,22 +52,46 @@ export default function AssetPredictionMatrix() {
     return item.symbol.toLowerCase().includes(search.toLowerCase().trim());
   });
 
+  const horizonTabs: { key: HorizonKey; label: string }[] = [
+    { key: "all", label: "All Horizons" },
+    { key: "scalp", label: "⚡ Scalp (15M)" },
+    { key: "swing", label: "🌊 Swing (1H)" },
+    { key: "macro", label: "🚀 Macro (24H)" },
+    { key: "horizon_2d", label: "🔮 2-Day (48H)" },
+    { key: "horizon_3d", label: "🔭 3-Day (72H)" },
+    { key: "weekly", label: "🗓️ Weekly (7D)" },
+    { key: "biweekly", label: "🌕 Bi-Weekly (15D)" },
+    { key: "monthly", label: "🪐 Monthly (30D)" },
+  ];
+
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">
+      {/* Modal for 15-Minute Historical Signal Audit */}
+      {selectedCoin && (
+        <CoinSignalHistoryModal
+          symbol={selectedCoin.symbol}
+          currentPrice={selectedCoin.price}
+          onClose={() => setSelectedCoin(null)}
+        />
+      )}
+
       {/* Header with Live 15-Minute Scan Countdown */}
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between border-b border-slate-800/80 pb-5">
         <div>
           <div className="flex items-center gap-2.5">
             <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
               <Zap className="h-5 w-5 text-cyan-400" />
-              Complete 25-Asset Market Prediction Matrix
+              Complete Top 100-Asset Market Prediction Matrix
             </h2>
             <span className="rounded-md bg-dark-900 px-2 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50">
-              {leaderboard.length} Assets Scanned
+              {leaderboard.length || 100} Assets Scanned
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Multi-horizon AI predictions, entry prices, 1:2 R:R targets, and confluence grading across 25 crypto assets
+            Multi-horizon AI predictions, entry prices, 1:2 R:R targets, and confluence grading across Top 100 crypto assets.{" "}
+            <span className="text-cyan-400 font-semibold underline decoration-dotted cursor-pointer">
+              Click any coin to view its 15-minute historical signal records.
+            </span>
           </p>
         </div>
 
@@ -102,57 +134,30 @@ export default function AssetPredictionMatrix() {
       </div>
 
       {/* Controls & Horizon Tabs */}
-      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        {/* Horizon Filter Tabs */}
-        <div className="flex items-center gap-1 rounded-xl bg-dark-900/90 p-1 border border-slate-800">
-          <button
-            onClick={() => setSelectedHorizon("all")}
-            className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
-              selectedHorizon === "all"
-                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shadow-sm"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            All Horizons
-          </button>
-          <button
-            onClick={() => setSelectedHorizon("scalp")}
-            className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
-              selectedHorizon === "scalp"
-                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shadow-sm"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            ⚡ Scalp (15M)
-          </button>
-          <button
-            onClick={() => setSelectedHorizon("swing")}
-            className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
-              selectedHorizon === "swing"
-                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shadow-sm"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            🌊 Swing (1H)
-          </button>
-          <button
-            onClick={() => setSelectedHorizon("macro")}
-            className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
-              selectedHorizon === "macro"
-                ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shadow-sm"
-                : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            🚀 Macro (24H)
-          </button>
+      <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        {/* Horizon Filter Tabs (8 Horizons Spectrum) */}
+        <div className="flex items-center gap-1 rounded-xl bg-dark-900/90 p-1 border border-slate-800 overflow-x-auto max-w-full">
+          {horizonTabs.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setSelectedHorizon(tab.key)}
+              className={`whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all ${
+                selectedHorizon === tab.key
+                  ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shadow-sm"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
 
         {/* Search Bar */}
-        <div className="relative w-full sm:w-64">
+        <div className="relative w-full sm:w-64 shrink-0">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
           <input
             type="text"
-            placeholder="Search from 25 assets..."
+            placeholder="Search from 100 assets..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full rounded-xl bg-dark-900/90 pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 border border-slate-800 focus:border-cyan-500 focus:outline-none"
@@ -160,7 +165,7 @@ export default function AssetPredictionMatrix() {
         </div>
       </div>
 
-      {/* 25 Assets Full Prediction Table */}
+      {/* Top 100 Assets Full Prediction Table */}
       <div className="mt-4 overflow-x-auto rounded-xl border border-slate-800/80">
         <table className="w-full text-left text-xs text-slate-300 font-mono">
           <thead className="bg-dark-900/90 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
@@ -168,10 +173,12 @@ export default function AssetPredictionMatrix() {
               <th className="py-3 px-4"># / Asset & Live Price</th>
               {selectedHorizon === "all" ? (
                 <>
-                  <th className="py-3 px-4">⚡ Scalp (15M) Setup</th>
-                  <th className="py-3 px-4">🌊 Swing (1H) Setup</th>
-                  <th className="py-3 px-4">🚀 Macro (24H) Setup</th>
-                  <th className="py-3 px-4 text-right">Triple Alignment</th>
+                  <th className="py-3 px-4">⚡ Scalp (15M)</th>
+                  <th className="py-3 px-4">🌊 Swing (1H)</th>
+                  <th className="py-3 px-4">🚀 Macro (24H)</th>
+                  <th className="py-3 px-4">🗓️ Weekly (7D)</th>
+                  <th className="py-3 px-4">🪐 Monthly (30D)</th>
+                  <th className="py-3 px-4 text-right">Alignment & History</th>
                 </>
               ) : (
                 <>
@@ -188,13 +195,13 @@ export default function AssetPredictionMatrix() {
           <tbody className="divide-y divide-slate-800/60 bg-dark-950/40">
             {isLoading ? (
               <tr>
-                <td colSpan={6} className="py-12 text-center text-slate-500 font-sans">
-                  Loading 25 asset predictions from latest scan...
+                <td colSpan={selectedHorizon === "all" ? 7 : 6} className="py-12 text-center text-slate-500 font-sans">
+                  Loading Top 100 asset predictions from latest scan...
                 </td>
               </tr>
             ) : filteredAssets.length === 0 ? (
               <tr>
-                <td colSpan={6} className="py-12 text-center text-slate-500 font-sans">
+                <td colSpan={selectedHorizon === "all" ? 7 : 6} className="py-12 text-center text-slate-500 font-sans">
                   No assets match your search.
                 </td>
               </tr>
@@ -203,9 +210,11 @@ export default function AssetPredictionMatrix() {
                 const s = item.horizons?.scalp || {};
                 const w = item.horizons?.swing || {};
                 const m = item.horizons?.macro || {};
+                const h7d = item.horizons?.weekly || {};
+                const h30d = item.horizons?.monthly || {};
                 const isTriple = item.is_triple_confluence;
 
-                // Specific Horizon View
+                // Specific Horizon View (e.g. 15M, 1H, 24H, 2D, 3D, 7D, 15D, 30D)
                 if (selectedHorizon !== "all") {
                   const h = item.horizons?.[selectedHorizon] || {};
                   const isLong = h.direction === "BULLISH" || h.direction === "LONG";
@@ -213,13 +222,21 @@ export default function AssetPredictionMatrix() {
                   const expRet = h.exp_return ? h.exp_return * 100 : 0.0;
 
                   return (
-                    <tr key={item.symbol} className="hover:bg-slate-800/40 transition-colors">
+                    <tr
+                      key={item.symbol}
+                      onClick={() => setSelectedCoin({ symbol: item.symbol, price: item.current_price })}
+                      className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
+                      title="Click to view 15-minute historical signal records for this coin"
+                    >
                       {/* Asset & Price */}
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
                           <span className="text-slate-500 font-sans text-xs">#{idx + 1}</span>
                           <div>
-                            <span className="font-bold text-white text-sm font-sans">{item.symbol}</span>
+                            <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1.5">
+                              {item.symbol}
+                              <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            </span>
                             <p className="text-cyan-400 font-semibold">{formatUsd(item.current_price)}</p>
                           </div>
                         </div>
@@ -271,15 +288,23 @@ export default function AssetPredictionMatrix() {
                   );
                 }
 
-                // All-Horizon Combined Row
+                // All-Horizon Combined Overview Row
                 return (
-                  <tr key={item.symbol} className="hover:bg-slate-800/40 transition-colors">
+                  <tr
+                    key={item.symbol}
+                    onClick={() => setSelectedCoin({ symbol: item.symbol, price: item.current_price })}
+                    className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
+                    title="Click to view 15-minute historical signal records for this coin"
+                  >
                     {/* Asset & Price */}
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2">
                         <span className="text-slate-500 font-sans text-xs">#{idx + 1}</span>
                         <div>
-                          <span className="font-bold text-white text-sm font-sans">{item.symbol}</span>
+                          <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1.5">
+                            {item.symbol}
+                            <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </span>
                           <p className="text-cyan-400 font-semibold">{formatUsd(item.current_price)}</p>
                         </div>
                       </div>
@@ -292,7 +317,7 @@ export default function AssetPredictionMatrix() {
                           {s.direction === "BULLISH" ? "🟢 LONG" : "🔴 SHORT"} ({s.conviction?.toFixed(1)}%)
                         </span>
                         <span className="text-[10px] text-slate-400">
-                          TP: {formatUsd(s.tp_price)} | SL: {formatUsd(s.sl_price)}
+                          TP: {formatUsd(s.tp_price)}
                         </span>
                       </div>
                     </td>
@@ -304,7 +329,7 @@ export default function AssetPredictionMatrix() {
                           {w.direction === "BULLISH" ? "🟢 LONG" : "🔴 SHORT"} ({w.conviction?.toFixed(1)}%)
                         </span>
                         <span className="text-[10px] text-slate-400">
-                          TP: {formatUsd(w.tp_price)} | SL: {formatUsd(w.sl_price)}
+                          TP: {formatUsd(w.tp_price)}
                         </span>
                       </div>
                     </td>
@@ -316,20 +341,47 @@ export default function AssetPredictionMatrix() {
                           {m.direction === "BULLISH" ? "🟢 LONG" : "🔴 SHORT"} ({m.conviction?.toFixed(1)}%)
                         </span>
                         <span className="text-[10px] text-slate-400">
-                          TP: {formatUsd(m.tp_price)} | SL: {formatUsd(m.sl_price)}
+                          TP: {formatUsd(m.tp_price)}
                         </span>
                       </div>
                     </td>
 
-                    {/* Triple Confluence Badge */}
-                    <td className="py-3 px-4 text-right font-sans">
-                      {isTriple ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-cyan-950 px-2.5 py-1 text-[11px] font-black text-cyan-300 border border-cyan-500/50 shadow-sm shadow-cyan-500/20">
-                          <Sparkles className="h-3 w-3" /> TRIPLE BUY
+                    {/* Weekly (7D) */}
+                    <td className="py-3 px-4">
+                      <div className="flex flex-col text-xs">
+                        <span className={h7d.direction === "BULLISH" ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
+                          {h7d.direction === "BULLISH" ? "🟢 LONG" : h7d.direction === "BEARISH" ? "🔴 SHORT" : "⚪ -"} ({h7d.conviction?.toFixed(1) || "50.0"}%)
                         </span>
-                      ) : (
-                        <span className="text-[11px] text-slate-500">Independent</span>
-                      )}
+                        <span className="text-[10px] text-slate-400">
+                          TP: {formatUsd(h7d.tp_price)}
+                        </span>
+                      </div>
+                    </td>
+
+                    {/* Monthly (30D) */}
+                    <td className="py-3 px-4">
+                      <div className="flex flex-col text-xs">
+                        <span className={h30d.direction === "BULLISH" ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
+                          {h30d.direction === "BULLISH" ? "🟢 LONG" : h30d.direction === "BEARISH" ? "🔴 SHORT" : "⚪ -"} ({h30d.conviction?.toFixed(1) || "50.0"}%)
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          TP: {formatUsd(h30d.tp_price)}
+                        </span>
+                      </div>
+                    </td>
+
+                    {/* Alignment & Drilldown Action */}
+                    <td className="py-3 px-4 text-right font-sans">
+                      <div className="flex items-center justify-end gap-2">
+                        {isTriple ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-cyan-950 px-2 py-0.5 text-[10px] font-black text-cyan-300 border border-cyan-500/50 shadow-sm shadow-cyan-500/20">
+                            <Sparkles className="h-3 w-3" /> TRIPLE
+                          </span>
+                        ) : null}
+                        <span className="inline-flex items-center gap-1 rounded-lg bg-dark-900 hover:bg-cyan-950 px-2 py-1 text-[10px] font-semibold text-cyan-400 border border-slate-800 hover:border-cyan-500 transition-colors">
+                          <History className="h-3 w-3" /> 15M History
+                        </span>
+                      </div>
                     </td>
                   </tr>
                 );

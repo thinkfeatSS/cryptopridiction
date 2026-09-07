@@ -38,7 +38,7 @@ export default function DashboardPage() {
         <KpiMetrics />
       </section>
 
-      {/* 2. Complete 25-Asset Prediction Table & 15-Minute Refresh Countdown */}
+      {/* 2. Complete Top 100-Asset Prediction Table & 15-Minute Refresh Countdown */}
       <section>
         <AssetPredictionMatrix />
       </section>

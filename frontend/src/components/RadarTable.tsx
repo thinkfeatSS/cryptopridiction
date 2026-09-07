@@ -1,26 +1,38 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { useForecastQuery } from "@/hooks/useCryptoData";
 import { formatUsd } from "@/lib/utils";
-import { Layers, Sparkles, ArrowUpRight, ArrowDownRight, Target } from "lucide-react";
+import CoinSignalHistoryModal from "@/components/CoinSignalHistoryModal";
+import { Layers, Sparkles, ArrowUpRight, ArrowDownRight, Target, History } from "lucide-react";
 
 export default function RadarTable() {
   const { data: forecast, isLoading } = useForecastQuery();
+  const [selectedCoin, setSelectedCoin] = useState<{ symbol: string; price?: number } | null>(null);
   const leaderboard = forecast?.scanner_leaderboard || [];
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">
-      <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
+      {/* Coin Historical 15M Signal Audit Modal */}
+      {selectedCoin && (
+        <CoinSignalHistoryModal
+          symbol={selectedCoin.symbol}
+          currentPrice={selectedCoin.price}
+          onClose={() => setSelectedCoin(null)}
+        />
+      )}
+
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-b border-slate-800/80 pb-4">
         <div>
-          <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
+          <h2 className="text-lg font-black tracking-tight text-white flex flex-wrap items-center gap-2">
             🛰️ Multi-Horizon Opportunity Radar
             <span className="rounded-md bg-cyan-950 px-2 py-0.5 text-xs font-semibold text-cyan-400 border border-cyan-800">
-              Minutes (15M) | Hours (1H) | Days (24H)
+              15M ➔ 30D Multi-Scale Alignment
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Cross-asset directional alignment & triple confluence setup scanner
+            Cross-asset directional alignment & multi-scale confluence setup scanner.{" "}
+            <span className="text-cyan-400 font-semibold">Click any coin to view its 15-minute historical signal records.</span>
           </p>
         </div>
       </div>
@@ -40,9 +52,10 @@ export default function RadarTable() {
               <tr>
                 <th className="py-3 px-4">Asset & Live Price</th>
                 <th className="py-3 px-4">⚡ Scalp (15M)</th>
-                <th className="py-3 px-4">🌊 Swing (1H-2H)</th>
+                <th className="py-3 px-4">🌊 Swing (1H)</th>
                 <th className="py-3 px-4">🚀 Macro (24H)</th>
-                <th className="py-3 px-4 text-right">Alignment</th>
+                <th className="py-3 px-4">🗓️ Weekly (7D)</th>
+                <th className="py-3 px-4 text-right">Alignment & History</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 bg-dark-950/40">
@@ -50,6 +63,7 @@ export default function RadarTable() {
                 const s = item.horizons?.scalp || {};
                 const w = item.horizons?.swing || {};
                 const m = item.horizons?.macro || {};
+                const h7d = item.horizons?.weekly || {};
                 const isTriple = item.is_triple_confluence;
 
                 const renderHorizonCell = (h: any) => {
@@ -61,22 +75,30 @@ export default function RadarTable() {
                           {isLong ? "🟢 LONG" : "🔴 SHORT"}
                         </span>
                         <span className="text-slate-400 font-mono text-[11px]">
-                          ({h.conviction?.toFixed(1)}%)
+                          ({h.conviction?.toFixed(1) || "50.0"}%)
                         </span>
                       </div>
                       <span className="text-[10px] text-slate-400 font-mono">
-                        TP: {formatUsd(h.tp_price)} | SL: {formatUsd(h.sl_price)}
+                        TP: {formatUsd(h.tp_price)}
                       </span>
                     </div>
                   );
                 };
 
                 return (
-                  <tr key={item.symbol || idx} className="hover:bg-slate-800/40 transition-colors">
+                  <tr
+                    key={item.symbol || idx}
+                    onClick={() => setSelectedCoin({ symbol: item.symbol, price: item.current_price })}
+                    className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
+                    title="Click to view 15-minute historical signal records for this coin"
+                  >
                     {/* Asset */}
                     <td className="py-3 px-4">
                       <div className="flex flex-col">
-                        <span className="font-bold text-white text-sm">{item.symbol}</span>
+                        <span className="font-bold text-white text-sm group-hover:text-cyan-400 transition-colors flex items-center gap-1.5">
+                          {item.symbol}
+                          <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                        </span>
                         <span className="text-xs text-cyan-400 font-mono font-semibold">
                           {formatUsd(item.current_price)}
                         </span>
@@ -92,17 +114,21 @@ export default function RadarTable() {
                     {/* Macro */}
                     <td className="py-3 px-4">{renderHorizonCell(m)}</td>
 
+                    {/* Weekly */}
+                    <td className="py-3 px-4">{renderHorizonCell(h7d)}</td>
+
                     {/* Alignment Badge */}
                     <td className="py-3 px-4 text-right">
-                      {isTriple ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-cyan-950 px-2.5 py-1 text-[11px] font-black text-cyan-300 border border-cyan-500/50 shadow-sm shadow-cyan-500/20">
-                          <Sparkles className="h-3 w-3" /> TRIPLE BUY
+                      <div className="flex items-center justify-end gap-2">
+                        {isTriple ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-cyan-950 px-2.5 py-1 text-[11px] font-black text-cyan-300 border border-cyan-500/50 shadow-sm shadow-cyan-500/20">
+                            <Sparkles className="h-3 w-3" /> TRIPLE
+                          </span>
+                        ) : null}
+                        <span className="inline-flex items-center gap-1 rounded-lg bg-dark-900 group-hover:bg-cyan-950 px-2 py-1 text-[10px] font-semibold text-cyan-400 border border-slate-800 group-hover:border-cyan-500 transition-colors">
+                          <History className="h-3 w-3" /> 15M History
                         </span>
-                      ) : (
-                        <span className="text-[11px] text-slate-500 font-mono">
-                          Independent
-                        </span>
-                      )}
+                      </div>
                     </td>
                   </tr>
                 );

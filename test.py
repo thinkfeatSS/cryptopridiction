@@ -96,17 +96,27 @@ CONFIG = {
     "mode": "both",               # "both", "scanner", or "single"
     "continuous_loop": True,      # 24/7 Background Watcher Loop
     "scanner_mode": "top_volume", # "top_volume" (dynamic auto-discovery of all active Binance coins), "expanded_universe", or "custom_list"
-    "scanner_top_n": 25,          # Number of top volume Binance coins to scan simultaneously
+    "scanner_top_n": 100,         # Number of top volume Binance coins to scan simultaneously
     "single_symbol": "BTC/USDT",
     "scanner_symbols": [
-        "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT", "DOGE/USDT", "ADA/USDT",
+        "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT",
         "AVAX/USDT", "SUI/USDT", "LINK/USDT", "NEAR/USDT", "APT/USDT", "DOT/USDT", "PEPE/USDT",
         "SHIB/USDT", "TIA/USDT", "INJ/USDT", "RENDER/USDT", "FET/USDT", "OP/USDT", "ARB/USDT",
         "LTC/USDT", "UNI/USDT", "ICP/USDT", "FIL/USDT", "STX/USDT", "TAO/USDT", "SEI/USDT",
-        "WIF/USDT", "BONK/USDT", "AAVE/USDT", "ATOM/USDT", "ETC/USDT", "KAS/USDT", "FTM/USDT"
+        "WIF/USDT", "BONK/USDT", "AAVE/USDT", "ATOM/USDT", "ETC/USDT", "KAS/USDT", "FTM/USDT",
+        "WLD/USDT", "RUNE/USDT", "POL/USDT", "PYTH/USDT", "JUP/USDT", "BEAM/USDT", "ONDO/USDT",
+        "FLOKI/USDT", "OM/USDT", "CORE/USDT", "GALA/USDT", "KAVA/USDT", "ALGO/USDT", "CHZ/USDT",
+        "BLUR/USDT", "JASMY/USDT", "QNT/USDT", "DYDX/USDT", "IMX/USDT", "STG/USDT", "STRK/USDT",
+        "GRT/USDT", "EOS/USDT", "FLOW/USDT", "ENA/USDT", "PENDLE/USDT", "CFX/USDT", "AXS/USDT",
+        "MANA/USDT", "SAND/USDT", "CRV/USDT", "SNX/USDT", "DYM/USDT", "RON/USDT", "MKR/USDT",
+        "COMP/USDT", "ZRO/USDT", "IO/USDT", "NOT/USDT", "TON/USDT", "MOVE/USDT", "ME/USDT",
+        "VIRTUAL/USDT", "PENGU/USDT", "BOME/USDT", "MEW/USDT", "TURBO/USDT", "NEIRO/USDT",
+        "BRETT/USDT", "1000SATS/USDT", "ORDI/USDT", "BIGTIME/USDT", "ETHFI/USDT", "EIGEN/USDT",
+        "W/USDT", "SAFE/USDT", "ZK/USDT", "BANANA/USDT", "AKT/USDT", "ZETA/USDT", "BB/USDT",
+        "LISTA/USDT", "VOXEL/USDT", "TRX/USDT", "BCH/USDT", "HBAR/USDT"
     ],
     "timeframes": ["1d", "4h", "1h", "30m", "15m", "5m", "1m"],
-    # Multi-Horizon Definitions: Minutes, Hours, and Days
+    # Multi-Horizon Definitions: Minutes, Hours, Days, Weeks, and Months
     "horizons": {
         "scalp": {
             "name": "⚡ Scalp (15M)",
@@ -131,6 +141,46 @@ CONFIG = {
             "duration_label": "24 Hours",
             "tp_mult": 3.0,
             "sl_mult": 1.5
+        },
+        "horizon_2d": {
+            "name": "🔮 2-Day (48H)",
+            "anchor_tf": "1d",
+            "bars": 2,
+            "duration_label": "48 Hours",
+            "tp_mult": 3.5,
+            "sl_mult": 1.8
+        },
+        "horizon_3d": {
+            "name": "🔭 3-Day (72H)",
+            "anchor_tf": "1d",
+            "bars": 3,
+            "duration_label": "3 Days",
+            "tp_mult": 4.0,
+            "sl_mult": 2.0
+        },
+        "weekly": {
+            "name": "🗓️ Weekly (7D)",
+            "anchor_tf": "1d",
+            "bars": 7,
+            "duration_label": "7 Days",
+            "tp_mult": 5.0,
+            "sl_mult": 2.5
+        },
+        "biweekly": {
+            "name": "🌕 Bi-Weekly (15D)",
+            "anchor_tf": "1d",
+            "bars": 15,
+            "duration_label": "15 Days",
+            "tp_mult": 6.0,
+            "sl_mult": 3.0
+        },
+        "monthly": {
+            "name": "🪐 Monthly (30D)",
+            "anchor_tf": "1d",
+            "bars": 30,
+            "duration_label": "30 Days",
+            "tp_mult": 8.0,
+            "sl_mult": 4.0
         }
     },
     "history_limit_per_tf": {
@@ -628,7 +678,7 @@ class CryptoDataLoader:
             pass
         return 0.0
 
-    def fetch_top_volume_usdt_pairs(self, limit: int = 25) -> list:
+    def fetch_top_volume_usdt_pairs(self, limit: int = 100) -> list:
         """Dynamically discovers and ranks active volatile crypto pairs by 24h volume (strictly excluding all stablecoins)."""
         try:
             print(f"[MARKET DISCOVERY] Querying all active [{self.active_exchange_id.upper()}] pairs by 24h trading volume...")
@@ -695,10 +745,21 @@ class CryptoDataLoader:
             print(f"[WARNING] Could not fetch tickers from {self.active_exchange_id} ({e}). Using default universe.")
 
         return [
-            "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT", "DOGE/USDT", "ADA/USDT",
+            "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT",
             "AVAX/USDT", "SUI/USDT", "LINK/USDT", "NEAR/USDT", "APT/USDT", "DOT/USDT", "PEPE/USDT",
             "SHIB/USDT", "TIA/USDT", "INJ/USDT", "RENDER/USDT", "FET/USDT", "OP/USDT", "ARB/USDT",
-            "LTC/USDT", "UNI/USDT", "ICP/USDT", "FIL/USDT"
+            "LTC/USDT", "UNI/USDT", "ICP/USDT", "FIL/USDT", "STX/USDT", "TAO/USDT", "SEI/USDT",
+            "WIF/USDT", "BONK/USDT", "AAVE/USDT", "ATOM/USDT", "ETC/USDT", "KAS/USDT", "FTM/USDT",
+            "WLD/USDT", "RUNE/USDT", "POL/USDT", "PYTH/USDT", "JUP/USDT", "BEAM/USDT", "ONDO/USDT",
+            "FLOKI/USDT", "OM/USDT", "CORE/USDT", "GALA/USDT", "KAVA/USDT", "ALGO/USDT", "CHZ/USDT",
+            "BLUR/USDT", "JASMY/USDT", "QNT/USDT", "DYDX/USDT", "IMX/USDT", "STG/USDT", "STRK/USDT",
+            "GRT/USDT", "EOS/USDT", "FLOW/USDT", "ENA/USDT", "PENDLE/USDT", "CFX/USDT", "AXS/USDT",
+            "MANA/USDT", "SAND/USDT", "CRV/USDT", "SNX/USDT", "DYM/USDT", "RON/USDT", "MKR/USDT",
+            "COMP/USDT", "ZRO/USDT", "IO/USDT", "NOT/USDT", "TON/USDT", "MOVE/USDT", "ME/USDT",
+            "VIRTUAL/USDT", "PENGU/USDT", "BOME/USDT", "MEW/USDT", "TURBO/USDT", "NEIRO/USDT",
+            "BRETT/USDT", "1000SATS/USDT", "ORDI/USDT", "BIGTIME/USDT", "ETHFI/USDT", "EIGEN/USDT",
+            "W/USDT", "SAFE/USDT", "ZK/USDT", "BANANA/USDT", "AKT/USDT", "ZETA/USDT", "BB/USDT",
+            "LISTA/USDT", "VOXEL/USDT", "TRX/USDT", "BCH/USDT", "HBAR/USDT"
         ][:limit]
 
 # ------------------------------------------------------------------------------
@@ -1215,7 +1276,25 @@ class PaperTradingLedger:
             is_hit_sl = (direction == "BULLISH" and low_p <= sl_p) or (direction == "BEARISH" and high_p >= sl_p)
             
             # Minimum holding window safeguard (prevents premature exits)
-            min_dur_secs = 10 * 60 if pos.get('horizon') == 'scalp' else (60 * 60 if pos.get('horizon') == 'swing' else 12 * 3600)
+            h_name = pos.get('horizon', 'scalp')
+            if h_name == 'scalp':
+                min_dur_secs = 10 * 60
+            elif h_name == 'swing':
+                min_dur_secs = 60 * 60
+            elif h_name == 'macro':
+                min_dur_secs = 12 * 3600
+            elif h_name == 'horizon_2d':
+                min_dur_secs = 24 * 3600
+            elif h_name == 'horizon_3d':
+                min_dur_secs = 36 * 3600
+            elif h_name == 'weekly':
+                min_dur_secs = 3 * 86400
+            elif h_name == 'biweekly':
+                min_dur_secs = 7 * 86400
+            elif h_name == 'monthly':
+                min_dur_secs = 14 * 86400
+            else:
+                min_dur_secs = 10 * 60
             is_expired = (now_dt >= expiry_dt) and (dur_secs >= min_dur_secs)
 
             # 1. PARTIAL TP1 SCALE (50% locked + Trail SL to Breakeven)
@@ -1446,14 +1525,9 @@ class PaperTradingLedger:
             if pos['symbol'] == sym:
                 return
 
-        # 3. Horizon Quota Allocation (Reserve slots for high-profit Macro & Swing setups)
-        horizon_counts = {
-            'scalp': sum(1 for p in self.data['open_positions'] if p.get('horizon') == 'scalp'),
-            'swing': sum(1 for p in self.data['open_positions'] if p.get('horizon') == 'swing'),
-            'macro': sum(1 for p in self.data['open_positions'] if p.get('horizon') == 'macro'),
-        }
-        horizon_max_limits = {'scalp': 2, 'swing': 2, 'macro': 2}
-        if horizon_counts.get(horizon_key, 0) >= horizon_max_limits.get(horizon_key, 2):
+        # 3. Horizon Quota Allocation (Reserve slots for high-profit setups across horizons)
+        horizon_counts = {h: sum(1 for p in self.data['open_positions'] if p.get('horizon') == h) for h in self.config.get('horizons', {})}
+        if horizon_counts.get(horizon_key, 0) >= 2:
             return
 
         # 4. Scalp Minimum Quality Guard: Scalps must have high conviction (>= 68%) and >= 0.45% expected move
@@ -1501,7 +1575,12 @@ class PaperTradingLedger:
         tf_delta_map = {
             'scalp': timedelta(minutes=15),
             'swing': timedelta(hours=2),
-            'macro': timedelta(hours=24)
+            'macro': timedelta(hours=24),
+            'horizon_2d': timedelta(days=2),
+            'horizon_3d': timedelta(days=3),
+            'weekly': timedelta(days=7),
+            'biweekly': timedelta(days=15),
+            'monthly': timedelta(days=30)
         }
         duration = tf_delta_map.get(horizon_key, timedelta(minutes=15))
         expiry_dt = now_utc + duration
@@ -2121,9 +2200,9 @@ class SignalMetaClassifier:
                 'expected_return_pct': exp_ret,
                 'risk_reward_ratio': 2.0,
                 'is_a_plus': is_a_plus,
-                'is_scalp': 1.0 if "scalp" in h_key else 0.0,
-                'is_swing': 1.0 if "swing" in h_key else 0.0,
-                'is_macro': 1.0 if "macro" in h_key else 0.0,
+                'is_scalp': 1.0 if ("scalp" in h_key or "15m" in h_key) else 0.0,
+                'is_swing': 1.0 if ("swing" in h_key or "1h" in h_key) else 0.0,
+                'is_macro': 1.0 if ("macro" in h_key or "24h" in h_key or "1d" in h_key or "2d" in h_key or "3d" in h_key or "7d" in h_key or "15d" in h_key or "30d" in h_key or "week" in h_key or "month" in h_key) else 0.0,
                 'is_long': 1.0 if direction_str in ["LONG", "BULLISH"] else 0.0,
                 'is_dip_buy': 1.0 if "DIP-BUY" in decision_str else 0.0,
                 'is_rally_sell': 1.0 if "RALLY-SELL" in decision_str else 0.0,
@@ -2480,7 +2559,16 @@ class HybridQuantEngine:
 
         # 8. Minimum Profit Hurdle Check
         reward_pct = (abs(tp_p - current_price) / (current_price + 1e-10)) * 100.0
-        min_reward_map = {'scalp': 0.35, 'swing': 0.80, 'macro': 1.80}
+        min_reward_map = {
+            'scalp': 0.35,
+            'swing': 0.80,
+            'macro': 1.80,
+            'horizon_2d': 2.50,
+            'horizon_3d': 3.20,
+            'weekly': 5.00,
+            'biweekly': 8.00,
+            'monthly': 12.00
+        }
         min_hurdle = min_reward_map.get(horizon_key, 0.35)
         if reward_pct < min_hurdle:
             decision = "⛔ FILTER (SUB-FEE VOLATILITY / LOW ATR)"
@@ -2663,19 +2751,19 @@ class HybridQuantEngine:
             scan_mode = self.config.get("scanner_mode", "top_volume")
             if scan_mode == "top_volume":
                 try:
-                    symbols_to_scan = self.loader.fetch_top_volume_usdt_pairs(limit=self.config.get("scanner_top_n", 25))
+                    symbols_to_scan = self.loader.fetch_top_volume_usdt_pairs(limit=self.config.get("scanner_top_n", 100))
                 except Exception:
-                    symbols_to_scan = self.config.get("scanner_symbols", [])[:self.config.get("scanner_top_n", 25)]
+                    symbols_to_scan = self.config.get("scanner_symbols", [])[:self.config.get("scanner_top_n", 100)]
             elif scan_mode == "expanded_universe":
                 symbols_to_scan = self.config.get("scanner_symbols", [])
             else:
-                symbols_to_scan = self.config.get("scanner_symbols", [])[:self.config.get("scanner_top_n", 25)]
+                symbols_to_scan = self.config.get("scanner_symbols", [])[:self.config.get("scanner_top_n", 100)]
 
             print(f"\n" + "=" * 95)
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
-            max_threads = min(8, len(symbols_to_scan))
+            max_threads = min(12, len(symbols_to_scan))
             with ThreadPoolExecutor(max_workers=max_threads) as executor:
                 future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in symbols_to_scan}
                 for future in as_completed(future_to_sym):
@@ -2733,8 +2821,17 @@ class HybridQuantEngine:
                     if h['priority'] <= 2 or "EXECUTE" in h['decision'] or "DIP-BUY" in h['decision']:
                         all_candidates.append((h, h_key))
 
-            # Rank candidates: Prioritize Grade A+, High-Margin Macro (24H) & Swing (1H), and Conviction/Alpha edge
-            horizon_tier = {'macro': 3, 'swing': 2, 'scalp': 1}
+            # Rank candidates: Prioritize Grade A+, High-Margin Macro, Weekly & Swing setups, and Conviction/Alpha edge
+            horizon_tier = {
+                'monthly': 8,
+                'biweekly': 7,
+                'weekly': 6,
+                'horizon_3d': 5,
+                'horizon_2d': 4,
+                'macro': 3,
+                'swing': 2,
+                'scalp': 1
+            }
             all_candidates.sort(key=lambda x: (
                 x[0]['priority'],
                 -horizon_tier.get(x[1], 1),
@@ -2898,9 +2995,14 @@ class HybridQuantEngine:
         now_ts = time.time()
 
         cooldown_map = {
-            'scalp': 1800,   # 30 mins
-            'swing': 5400,   # 90 mins
-            'macro': 14400   # 4 hours
+            'scalp': 1800,       # 30 mins
+            'swing': 5400,       # 90 mins
+            'macro': 14400,      # 4 hours
+            'horizon_2d': 28800, # 8 hours
+            'horizon_3d': 43200, # 12 hours
+            'weekly': 86400,     # 24 hours
+            'biweekly': 172800,  # 48 hours
+            'monthly': 345600    # 4 days
         }
 
         for r in source_results:
@@ -2921,7 +3023,7 @@ class HybridQuantEngine:
                     except Exception:
                         pass
 
-            for h_key in ['scalp', 'swing', 'macro']:
+            for h_key in list(self.config.get('horizons', {}).keys()):
                 h = r['horizons'].get(h_key)
                 if not h:
                     continue
@@ -3175,8 +3277,7 @@ class HybridQuantEngine:
         print("=" * 135)
 
         h_rows = []
-        for h_key in ['scalp', 'swing', 'macro']:
-            h = data['horizons'][h_key]
+        for h_key, h in data['horizons'].items():
             h_rows.append([
                 h['horizon_name'],
                 f"{h['trade_open_str']} -> {h['trade_close_str']} ({h['duration_label']})",
@@ -3199,8 +3300,8 @@ class HybridQuantEngine:
         print("\n" + "-" * 135)
         print(f" 🎯 PROFESSIONAL SIGNAL SETUP CARDS FOR {sym} (1:2 RISK TO REWARD):")
         print("-" * 135)
-        for h_key in ['scalp', 'swing', 'macro']:
-            print(data['horizons'][h_key]['pro_signal_text'])
+        for h_key, h in data['horizons'].items():
+            print(h.get('pro_signal_text', ''))
             print("-" * 65)
         print("=" * 135 + "\n")
 

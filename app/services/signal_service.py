@@ -9,10 +9,12 @@ import numpy as np
 
 from app.config import settings
 from app.models import SignalAudit, PaperPosition, ClosedTrade, MarketForecast
+from app.services.db_sync import sync_files_to_db_live, get_sync_state
 
 class SignalService:
     def get_kpi_summary(self, db: Session) -> Dict[str, Any]:
         """Calculates executive KPI metrics from MySQL database."""
+        sync_files_to_db_live()
         total_signals = db.query(SignalAudit).count()
         if total_signals == 0:
             return {
@@ -92,6 +94,7 @@ class SignalService:
     def get_signals_list(
         self,
         db: Session,
+        symbol: Optional[str] = None,
         search: Optional[str] = None,
         date: Optional[str] = None,
         outcome: Optional[str] = None,
@@ -101,7 +104,12 @@ class SignalService:
         offset: int = 0,
     ) -> Dict[str, Any]:
         """Queries signals with search, filters, date filtering, and pagination."""
+        sync_files_to_db_live()
         query = db.query(SignalAudit)
+
+        if symbol:
+            sym_clean = symbol.strip().replace('-', '/').upper()
+            query = query.filter(SignalAudit.symbol == sym_clean)
 
         if search:
             q = f"%{search.strip()}%"
@@ -144,8 +152,18 @@ class SignalService:
             "signals": [s.to_dict() for s in signals],
         }
 
+    def get_signals_by_symbol(self, db: Session, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Retrieve all chronological 15-minute signals generated for a specific cryptocurrency."""
+        sync_files_to_db_live()
+        sym_clean = symbol.strip().replace('-', '/').upper()
+        signals = db.query(SignalAudit).filter(
+            or_(SignalAudit.symbol == sym_clean, SignalAudit.symbol.ilike(f"%{sym_clean}%"))
+        ).order_by(desc(SignalAudit.id)).limit(limit).all()
+        return [s.to_dict() for s in signals]
+
     def get_daily_summary(self, db: Session) -> List[Dict[str, Any]]:
         """Groups signals by date with Won/Lost count, Win Rate %, and Cumulative Return for each day."""
+        sync_files_to_db_live()
         dates = db.query(SignalAudit.date_utc).distinct().order_by(desc(SignalAudit.date_utc)).all()
         daily_list = []
 
@@ -188,6 +206,7 @@ class SignalService:
 
     def get_portfolio_data(self, db: Session) -> Dict[str, Any]:
         """Retrieves active positions and closed trades history from DB."""
+        sync_files_to_db_live()
         positions = db.query(PaperPosition).order_by(desc(PaperPosition.id)).all()
         closed_trades = db.query(ClosedTrade).order_by(desc(ClosedTrade.id)).all()
 
@@ -213,6 +232,7 @@ class SignalService:
 
     def get_latest_forecast(self, db: Session) -> Dict[str, Any]:
         """Retrieves the most recent market forecast scan."""
+        sync_files_to_db_live()
         latest = db.query(MarketForecast).order_by(desc(MarketForecast.id)).first()
         if latest:
             return latest.to_dict()
@@ -237,6 +257,9 @@ class SignalService:
 
     def get_engine_status(self) -> Dict[str, Any]:
         """Calculates 15-minute countdown, market shield status, and server state."""
+        sync_files_to_db_live()
+        sync_state = get_sync_state()
+
         now = datetime.now(timezone.utc)
         current_minute = now.minute
         current_second = now.second
@@ -265,6 +288,8 @@ class SignalService:
             "current_time_utc": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "next_scan_utc": next_scan_time,
             "seconds_to_next_scan": secs_remaining,
+            "scan_version": sync_state["scan_version"],
+            "last_scan_timestamp": sync_state["last_scan_timestamp"],
             "btc_market_shield": shield_status,
         }
 

@@ -67,7 +67,7 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
             horizon_str = str(row.get('horizon', '')).lower()
             is_scalp = 1.0 if "scalp" in horizon_str or "15m" in horizon_str else 0.0
             is_swing = 1.0 if "swing" in horizon_str or "1h" in horizon_str else 0.0
-            is_macro = 1.0 if "macro" in horizon_str or "24h" in horizon_str or "1d" in horizon_str else 0.0
+            is_macro = 1.0 if any(k in horizon_str for k in ["macro", "24h", "1d", "2d", "3d", "7d", "15d", "30d", "week", "month", "48h", "72h"]) else 0.0
             
             # Direction
             direction_str = str(row.get('direction', '')).upper()

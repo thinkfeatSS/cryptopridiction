@@ -13,7 +13,7 @@ export default function RadarPage() {
           Multi-Horizon Opportunity Matrix
         </h1>
         <p className="text-xs text-slate-400 mt-1">
-          Simultaneous multi-scale scanning across Scalp (15M), Swing (1H-2H), and Macro (24H) horizons with Triple Confluence detection across 25 crypto assets.
+          Simultaneous multi-scale scanning across Scalp (15M), Swing (1H-2H), and Macro (24H) horizons with Triple Confluence detection across Top 100 crypto assets.
         </p>
       </div>
 

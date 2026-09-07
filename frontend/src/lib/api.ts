@@ -66,6 +66,8 @@ export interface EngineStatus {
   current_time_utc: string;
   next_scan_utc: string;
   seconds_to_next_scan: number;
+  scan_version?: number;
+  last_scan_timestamp?: string;
   btc_market_shield?: {
     active: boolean;
     reason: string;
@@ -166,6 +168,19 @@ export async function fetchSignals(params?: {
 
   const res = await fetch(`${API_BASE}/api/signals?${query.toString()}`);
   if (!res.ok) throw new Error("Failed fetching signals");
+  return res.json();
+}
+
+export async function fetchSignalsBySymbol(symbol: string): Promise<SignalItem[]> {
+  const encoded = encodeURIComponent(symbol);
+  const res = await fetch(`${API_BASE}/api/signals/by-symbol/${encoded}`);
+  if (!res.ok) {
+    // Fallback to standard signals query
+    const res2 = await fetch(`${API_BASE}/api/signals?symbol=${encoded}&limit=100`);
+    if (!res2.ok) return [];
+    const data = await res2.json();
+    return data.signals || [];
+  }
   return res.json();
 }
 

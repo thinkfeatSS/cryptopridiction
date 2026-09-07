@@ -169,6 +169,11 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
           <option value="SCALP">⚡ Scalp (15M)</option>
           <option value="SWING">🌊 Swing (1H-2H)</option>
           <option value="MACRO">🚀 Macro (24H)</option>
+          <option value="2-DAY">🔮 2-Day (48H)</option>
+          <option value="3-DAY">🔭 3-Day (72H)</option>
+          <option value="WEEKLY">🗓️ Weekly (7D)</option>
+          <option value="BI-WEEKLY">🌕 Bi-Weekly (15D)</option>
+          <option value="MONTHLY">🪐 Monthly (30D)</option>
         </select>
       </div>
 
@@ -204,8 +209,9 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
             ) : (
               signals.map((sig) => {
                 const isLong = sig.direction === "LONG" || sig.direction === "BULLISH";
-                const isWon = sig.outcome_label?.includes("WON");
-                const isLost = sig.outcome_label?.includes("LOST");
+                const outcomeStr = (sig.outcome_label || sig.status || "").toUpperCase();
+                const isWon = outcomeStr.includes("WON");
+                const isLost = outcomeStr.includes("LOST");
                 const isGradeAPlus = sig.quality_grade?.includes("A+");
 
                 return (
@@ -281,19 +287,19 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
                       {formatUsd(sig.sl_price)}
                     </td>
 
-                    {/* Status & Outcome Badge */}
+                    {/* Status & Outcome Badge (Green for Win, Red for Loss, Blue for Pending) */}
                     <td className="py-3 px-4 font-sans">
                       {isWon ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/80 px-2.5 py-1 text-[11px] font-bold text-emerald-300 border border-emerald-500/40">
-                          <CheckCircle2 className="h-3 w-3" /> {sig.outcome_label}
+                          <CheckCircle2 className="h-3 w-3 text-emerald-400" /> {sig.outcome_label || "WON 🟢"}
                         </span>
                       ) : isLost ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-rose-950/80 px-2.5 py-1 text-[11px] font-bold text-rose-300 border border-rose-500/40">
-                          <XCircle className="h-3 w-3" /> {sig.outcome_label}
+                          <XCircle className="h-3 w-3 text-rose-400" /> {sig.outcome_label || "LOST 🔴"}
                         </span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-950/80 px-2.5 py-1 text-[11px] font-bold text-amber-300 border border-amber-500/40">
-                          <Clock className="h-3 w-3" /> Pending ⏳
+                        <span className="inline-flex items-center gap-1 rounded-full bg-blue-950/80 px-2.5 py-1 text-[11px] font-bold text-blue-300 border border-blue-500/40">
+                          <Clock className="h-3 w-3 text-blue-400 animate-pulse" /> {sig.outcome_label || "PENDING ⏳"}
                         </span>
                       )}
                     </td>
