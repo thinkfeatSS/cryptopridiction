@@ -17,10 +17,23 @@ _LAST_SYNC_TIMES = {
 _SCAN_VERSION = 1
 _LAST_SCAN_TIMESTAMP = datetime.now(timezone.utc).isoformat()
 
+from sqlalchemy import text
+
 def init_db():
-    """Creates all database tables in MySQL / SQLite."""
+    """Creates all database tables in MySQL / SQLite and applies schema updates."""
     try:
         Base.metadata.create_all(bind=engine)
+        # Ensure MySQL columns have sufficient capacity for Top 100 8-horizon scans
+        if "mysql" in settings.DATABASE_URL.lower():
+            with engine.connect() as conn:
+                try:
+                    conn.execute(text("ALTER TABLE market_forecasts MODIFY scanner_leaderboard_json LONGTEXT"))
+                    conn.execute(text("ALTER TABLE market_forecasts MODIFY top_round_signals_json LONGTEXT"))
+                    conn.execute(text("ALTER TABLE market_forecasts MODIFY deep_dive_json LONGTEXT"))
+                    conn.execute(text("ALTER TABLE market_forecasts MODIFY btc_market_shield_json LONGTEXT"))
+                    conn.commit()
+                except Exception:
+                    pass
         print("[DATABASE] All database tables verified and created.")
     except Exception as e:
         print(f"[DATABASE ERROR] Table creation error: {e}")

@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy.dialects.mysql import LONGTEXT
 from datetime import datetime, timezone
 import json
 from app.database import Base
@@ -9,10 +10,10 @@ class MarketForecast(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     timestamp_utc = Column(String(64), nullable=False)
     strategy_name = Column(String(128), default="Multi-Horizon Quantitative Engine")
-    top_round_signals_json = Column(Text)
-    scanner_leaderboard_json = Column(Text)
-    deep_dive_json = Column(Text)
-    btc_market_shield_json = Column(Text, nullable=True)
+    top_round_signals_json = Column(Text().with_variant(LONGTEXT, "mysql"), nullable=True)
+    scanner_leaderboard_json = Column(Text().with_variant(LONGTEXT, "mysql"), nullable=True)
+    deep_dive_json = Column(Text().with_variant(LONGTEXT, "mysql"), nullable=True)
+    btc_market_shield_json = Column(Text().with_variant(LONGTEXT, "mysql"), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
