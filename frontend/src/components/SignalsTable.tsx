@@ -48,7 +48,7 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
   const totalPages = Math.ceil(total / pageSize);
 
   const handleDownloadCsv = () => {
-    window.open("http://localhost:8000/api/signals/download-csv", "_blank");
+    window.open("/api/signals/download-csv", "_blank");
   };
 
   return (
