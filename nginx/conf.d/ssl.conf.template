@@ -1,0 +1,98 @@
+# Production SSL Configuration for bullsandbears.binaryunit.tech
+# Rename or copy to default.conf when SSL certificates are obtained via Certbot
+
+upstream frontend_upstream {
+    server frontend:3000;
+    keepalive 32;
+}
+
+upstream backend_upstream {
+    server backend:8000;
+    keepalive 32;
+}
+
+# HTTP Redirect to HTTPS & ACME Challenge
+server {
+    listen 80;
+    listen [::]:80;
+    server_name bullsandbears.binaryunit.tech;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# HTTPS Server Block
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name bullsandbears.binaryunit.tech;
+
+    # SSL Certificate Paths
+    ssl_certificate /etc/letsencrypt/live/bullsandbears.binaryunit.tech/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/bullsandbears.binaryunit.tech/privkey.pem;
+
+    # SSL Security Protocols & Ciphers
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+
+    # Security Headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # API Endpoints -> FastAPI Backend
+    location /api/ {
+        proxy_pass http://backend_upstream/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 75s;
+    }
+
+    # Docs / Schemas
+    location ~ ^/(docs|redoc|openapi.json) {
+        proxy_pass http://backend_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # Next.js Static Cache
+    location /_next/static/ {
+        proxy_pass http://frontend_upstream/_next/static/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        expires 365d;
+        access_log off;
+    }
+
+    # Frontend UI -> Next.js
+    location / {
+        proxy_pass http://frontend_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 120s;
+    }
+}

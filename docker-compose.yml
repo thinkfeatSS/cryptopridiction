@@ -1,0 +1,150 @@
+services:
+  # ============================================================================
+  # 1. MySQL Database Service
+  # ============================================================================
+  db:
+    image: mysql:8.0
+    container_name: crypto_mysql
+    restart: unless-stopped
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_crypto_secure_2026}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-crypto_trading}
+      MYSQL_USER: ${MYSQL_USER:-crypto_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-crypto_secure_pass_2026}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_crypto_secure_2026}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - crypto_network
+
+  # ============================================================================
+  # 2. FastAPI REST Backend Service
+  # ============================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: crypto_backend
+    restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    environment:
+      - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-crypto_user}:${MYSQL_PASSWORD:-crypto_secure_pass_2026}@db:3306/${MYSQL_DATABASE:-crypto_trading}
+      - MYSQL_HOST=db
+      - MYSQL_PORT=3306
+      - MYSQL_USER=${MYSQL_USER:-crypto_user}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-crypto_secure_pass_2026}
+      - MYSQL_DB=${MYSQL_DATABASE:-crypto_trading}
+      - EXPORT_DIR=/app/export_app_data
+    volumes:
+      - app_exports:/app/export_app_data
+      - app_models:/app/models_export_v3
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - crypto_network
+
+  # ============================================================================
+  # 3. Continuous 8-Horizon ML Prediction Scanner Daemon
+  # ============================================================================
+  scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: crypto_scanner
+    restart: unless-stopped
+    command: python run_scanner_daemon.py
+    environment:
+      - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-crypto_user}:${MYSQL_PASSWORD:-crypto_secure_pass_2026}@db:3306/${MYSQL_DATABASE:-crypto_trading}
+      - MYSQL_HOST=db
+      - MYSQL_PORT=3306
+      - MYSQL_USER=${MYSQL_USER:-crypto_user}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-crypto_secure_pass_2026}
+      - MYSQL_DB=${MYSQL_DATABASE:-crypto_trading}
+      - EXPORT_DIR=/app/export_app_data
+      - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-15}
+      - SCANNER_TOP_N=${SCANNER_TOP_N:-100}
+    volumes:
+      - app_exports:/app/export_app_data
+      - app_models:/app/models_export_v3
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    networks:
+      - crypto_network
+
+  # ============================================================================
+  # 4. Next.js Frontend UI Service
+  # ============================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ""
+    container_name: crypto_frontend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=""
+    depends_on:
+      - backend
+    networks:
+      - crypto_network
+
+  # ============================================================================
+  # 5. Production Nginx Reverse Proxy (Gateway)
+  # ============================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: crypto_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_www:/var/www/certbot:ro
+      - certbot_certs:/etc/letsencrypt:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - crypto_network
+
+  # ============================================================================
+  # 6. Certbot for Automated SSL / HTTPS
+  # ============================================================================
+  certbot:
+    image: certbot/certbot
+    container_name: crypto_certbot
+    profiles: ["certbot"]
+    volumes:
+      - certbot_www:/var/www/certbot:rw
+      - certbot_certs:/etc/letsencrypt:rw
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+# ==============================================================================
+# Persistent Named Volumes & Bridge Network
+# ==============================================================================
+volumes:
+  mysql_data:
+  app_exports:
+  app_models:
+  certbot_www:
+  certbot_certs:
+
+networks:
+  crypto_network:
+    driver: bridge
