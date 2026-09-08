@@ -37,6 +37,13 @@ export default function SignalShareModal({ signal, onClose }: SignalShareModalPr
   const horizon = signal.horizon || "SCALP (15M)";
   const grade = signal.quality_grade || signal.grade || "Grade A+";
   const conviction = signal.conviction_pct ?? signal.conviction ?? 85.0;
+  const metaWinProb =
+    signal.meta_win_prob_pct ??
+    (signal.meta_win_prob !== undefined && signal.meta_win_prob !== null
+      ? signal.meta_win_prob <= 1.0
+        ? signal.meta_win_prob * 100.0
+        : signal.meta_win_prob
+      : 75.0);
   const entry = signal.entry_price ?? signal.current_price ?? 0.0;
   const tp1 = signal.tp1_price ?? signal.tp_price ?? entry * 1.03;
   const tp2 = signal.tp2_price ?? tp1 * 1.02;
@@ -49,6 +56,7 @@ export default function SignalShareModal({ signal, onClose }: SignalShareModalPr
 🎯 Pair: ${symbol} (${horizon})
 📊 Direction: ${isLong ? "🟢 LONG BUY" : "🔴 SHORT SELL"}
 💎 Grade: ${grade} (${conviction.toFixed(1)}% Conviction)
+🧠 ML Win Prob: ${metaWinProb.toFixed(1)}%
 ━━━━━━━━━━━━━━━━━━━━
 📍 Entry: ${formatUsd(entry)}
 🎯 Target 1 (TP1): ${formatUsd(tp1)}

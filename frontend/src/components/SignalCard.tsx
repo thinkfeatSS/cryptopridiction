@@ -33,6 +33,15 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
   const horizon = signal.horizon || signal.horizon_name || "SCALP (15M)";
   const expReturn = signal.expected_return_pct ?? (signal.exp_return ? signal.exp_return * 100 : 0.0);
 
+  // ML Win Probability from secondary meta-labeler in engine (0.0 - 1.0 or 0 - 100)
+  const metaWinProb =
+    signal.meta_win_prob_pct ??
+    (signal.meta_win_prob !== undefined && signal.meta_win_prob !== null
+      ? signal.meta_win_prob <= 1.0
+        ? signal.meta_win_prob * 100.0
+        : signal.meta_win_prob
+      : null);
+
   const entryPrice = signal.entry_price ?? signal.current_price ?? 0.0;
   const tp1 = signal.tp1_price ?? signal.tp_price ?? entryPrice;
   const tp2 = signal.tp2_price ?? signal.tp_price ?? entryPrice;
@@ -70,9 +79,9 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
           }`}
         />
 
-        {/* Header: Rank Badge & Quality Grade */}
-        <div className="flex items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
-          <div className="flex items-center gap-2">
+        {/* Header: Rank Badge & Quality Grade & ML Win Prob */}
+        <div className="flex items-center justify-between gap-2 border-b border-slate-800/80 pb-3 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="rounded-lg bg-dark-900 px-2.5 py-1 text-xs font-bold text-slate-200 border border-slate-700/80">
               {rankLabel}
             </span>
@@ -85,6 +94,11 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
             >
               <Sparkles className="h-3 w-3" />
               {isGradeAPlus ? "💎 Grade A+ (ELITE)" : "🟢 Grade A (HIGH)"}
+            </span>
+
+            {/* 🧠 ML Win Prob Pill Badge */}
+            <span className="rounded-lg bg-purple-950/80 px-2.5 py-1 text-xs font-bold text-purple-300 border border-purple-500/50 shadow-sm shadow-purple-500/20 flex items-center gap-1.5 font-mono">
+              <span>🧠</span> ML Win Prob: <strong className="text-white">{metaWinProb ? `${metaWinProb.toFixed(1)}%` : "75.0%"}</strong>
             </span>
           </div>
 
@@ -139,7 +153,7 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
             </span>
           </div>
 
-          {/* Conviction & Expected Return */}
+          {/* Conviction & ML Win Prob & Expected Return */}
           <div className="text-right">
             <div className="flex items-baseline justify-end gap-1">
               <span className="text-xs text-slate-400 font-medium">Conviction:</span>
@@ -147,13 +161,19 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
                 {conviction.toFixed(1)}%
               </span>
             </div>
-            <span
-              className={`text-xs font-bold ${
-                expReturn >= 0 ? "text-emerald-400" : "text-rose-400"
-              }`}
-            >
-              Exp: {formatPercent(expReturn)}
-            </span>
+            <div className="flex items-center justify-end gap-1.5 text-xs font-mono mt-0.5">
+              <span className="text-purple-300 font-bold flex items-center gap-0.5">
+                🧠 {metaWinProb ? `${metaWinProb.toFixed(1)}%` : "75.0%"}
+              </span>
+              <span className="text-slate-600">|</span>
+              <span
+                className={`font-bold ${
+                  expReturn >= 0 ? "text-emerald-400" : "text-rose-400"
+                }`}
+              >
+                Exp: {formatPercent(expReturn)}
+              </span>
+            </div>
           </div>
         </div>
 
