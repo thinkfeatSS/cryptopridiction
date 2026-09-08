@@ -194,12 +194,14 @@ CONFIG = {
     },
     "paper_trading": {
         "enabled": True,
-        "start_balance_usd": 10.0,
-        "position_size_usd": 2.0,
-        "dynamic_sizing": True,             # Adaptive Kelly & Volatility-Adjusted Sizing
-        "min_position_size_usd": 1.0,       # Minimum position size ($1)
-        "max_position_size_pct": 0.20,      # Max 20% of account equity per position
-        "max_concurrent_positions": 6,
+        "spot_only": True,                  # Only SPOT trades (BULLISH / LONG positions only)
+        "start_balance_usd": 15.0,          # $15.00 Virtual Wallet
+        "position_size_usd": 5.0,           # Fixed $5.00 position size per trade
+        "dynamic_sizing": False,            # Fixed $5.00 per trade (no over-leveraging)
+        "min_position_size_usd": 5.0,
+        "max_concurrent_positions": 3,      # Up to 3 active trades ($5.00 x 3 = $15.00 total capital)
+        "min_net_profit_usd": 0.80,         # Minimum $0.80 net profit target on $5.00 trades (>= 16% net gain)
+        "require_positive_track_record": True, # Must have past winning signals > past losing signals
         "binance_fee_rate": 0.0010,         # Standard Binance Spot fee: 0.10% (taker/maker)
         "use_bnb_fee_discount": True,       # 25% discount when paying fees with BNB (0.075% net fee rate)
         "slippage_rate": 0.0002             # 0.02% realistic market order execution slippage
@@ -1143,23 +1145,31 @@ class PaperTradingLedger:
         self.data = self.load_or_initialize()
 
     def load_or_initialize(self) -> dict:
-        target_start = self.config['start_balance_usd']
+        target_start = float(self.config.get('start_balance_usd', 15.0))
         if os.path.exists(self.ledger_file):
             try:
                 with open(self.ledger_file, 'r') as f:
                     d = json.load(f)
-                    # If starting capital was updated in CONFIG, adjust starting & current balance seamlessly
+                    # If starting capital was updated in CONFIG (e.g. to $15.00), reset cleanly
                     if d.get('starting_balance_usd') != target_start:
-                        old_start = d.get('starting_balance_usd', 10.0)
-                        ratio = target_start / max(1.0, old_start)
                         d['starting_balance_usd'] = target_start
-                        d['current_balance_usd'] = round(d.get('current_balance_usd', old_start) * ratio, 2)
-                        d['realized_pnl_usd'] = round(d.get('realized_pnl_usd', 0.0) * ratio, 2)
-                        d['gross_profit_usd'] = round(d.get('gross_profit_usd', 0.0) * ratio, 2)
-                        d['gross_loss_usd'] = round(d.get('gross_loss_usd', 0.0) * ratio, 2)
-                        d['total_fees_paid_usd'] = round(d.get('total_fees_paid_usd', 0.0) * ratio, 2)
-                        d['gross_realized_pnl_usd'] = round(d.get('gross_realized_pnl_usd', 0.0) * ratio, 2)
-                        d['peak_balance_usd'] = max(d['current_balance_usd'], target_start)
+                        d['current_balance_usd'] = target_start
+                        d['realized_pnl_usd'] = 0.0
+                        d['gross_profit_usd'] = 0.0
+                        d['gross_loss_usd'] = 0.0
+                        d['total_fees_paid_usd'] = 0.0
+                        d['gross_realized_pnl_usd'] = 0.0
+                        d['peak_balance_usd'] = target_start
+                        d['total_trades'] = 0
+                        d['winning_trades'] = 0
+                        d['losing_trades'] = 0
+                        d['breakeven_trades'] = 0
+                        d['win_rate_pct'] = 0.0
+                        d['profit_factor'] = 0.0
+                        d['max_drawdown_usd'] = 0.0
+                        d['max_drawdown_pct'] = 0.0
+                        d['open_positions'] = []
+                        d['closed_trades_history'] = []
 
                     # Migrate / fill missing fee & analytics keys
                     defaults = {
@@ -1171,7 +1181,8 @@ class PaperTradingLedger:
                         "peak_balance_usd": d.get('current_balance_usd', target_start),
                         "max_drawdown_usd": 0.0,
                         "max_drawdown_pct": 0.0,
-                        "fee_tier_label": self.fee_tier_label
+                        "fee_tier_label": self.fee_tier_label,
+                        "queued_trades": []
                     }
                     for k, v in defaults.items():
                         if k not in d:
@@ -1202,7 +1213,8 @@ class PaperTradingLedger:
             "max_drawdown_usd": 0.0,
             "max_drawdown_pct": 0.0,
             "open_positions": [],
-            "closed_trades_history": []
+            "closed_trades_history": [],
+            "queued_trades": []
         }
 
     def update_positions(self, live_prices: dict, live_highs: dict = None, live_lows: dict = None):
@@ -1298,155 +1310,123 @@ class PaperTradingLedger:
             is_expired = (now_dt >= expiry_dt) and (dur_secs >= min_dur_secs)
 
             # 1. PARTIAL TP1 SCALE (50% locked + Trail SL to Breakeven)
-            if is_hit_tp1 and stage == 'OPEN' and not is_hit_sl:
-                scale_nominal = init_size * 0.50
-                raw_ret_1 = (tp1_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - tp1_p) / entry_p
-                p_gross = round(scale_nominal * raw_ret_1, 4)
-                p_fee = round(scale_nominal * (1.0 + raw_ret_1) * self.effective_fee_rate + (scale_nominal * self.effective_fee_rate), 4)
-                p_net = round(p_gross - p_fee, 4)
+            if is_hit_tp1 and stage == 'OPEN':
+                scale_size = round(rem_size * 0.50, 2)
+                rem_size = round(rem_size - scale_size, 2)
+                
+                # Calculate True Binance Fees for TP1 Exit Leg
+                gross_tp1_gain = scale_size * (abs(tp1_p - entry_p) / entry_p)
+                exit_nominal = scale_size + gross_tp1_gain
+                exit_fee = round(exit_nominal * self.effective_fee_rate, 4)
+                net_tp1_realized = round(gross_tp1_gain - exit_fee, 4)
 
-                pos['realized_gross_pnl'] = round(pos.get('realized_gross_pnl', 0.0) + p_gross, 4)
-                pos['realized_fees'] = round(pos.get('realized_fees', 0.0) + p_fee, 4)
-                pos['realized_net_pnl'] = round(pos.get('realized_net_pnl', 0.0) + p_net, 4)
-                pos['remaining_position_size_usd'] = round(rem_size - scale_nominal, 4)
-                pos['sl_price'] = entry_p  # TRAIL STOP LOSS TO BREAKEVEN!
+                pos['realized_gross_pnl'] = round(pos.get('realized_gross_pnl', 0.0) + gross_tp1_gain, 4)
+                pos['realized_fees'] = round(pos.get('realized_fees', 0.0) + exit_fee, 4)
+                pos['realized_net_pnl'] = round(pos.get('realized_net_pnl', 0.0) + net_tp1_realized, 4)
+                pos['remaining_position_size_usd'] = rem_size
                 pos['stage'] = 'TP1_LOCKED_BREAKEVEN'
+                pos['sl_price'] = entry_p  # Trail SL to strict breakeven entry
+                sl_p = entry_p
 
-                # Update wallet balances with partial locked profit
-                self.data['current_balance_usd'] = round(self.data['current_balance_usd'] + p_net, 2)
-                self.data['realized_pnl_usd'] = round(self.data['realized_pnl_usd'] + p_net, 2)
-                self.data['gross_realized_pnl_usd'] = round(self.data.get('gross_realized_pnl_usd', 0.0) + p_gross, 2)
-                self.data['total_fees_paid_usd'] = round(self.data.get('total_fees_paid_usd', 0.0) + p_fee, 2)
+            # 2. PARTIAL TP2 SCALE (30% locked + Dynamic ATR Chandelier Trail on 20% Runner)
+            if is_hit_tp2 and stage == 'TP1_LOCKED_BREAKEVEN':
+                scale_size = round(init_size * 0.30, 2)
+                rem_size = round(rem_size - scale_size, 2)
 
-                print(f"[TRADING LEDGER 🎯] {sym} [{pos['horizon'].upper()} {direction}] TP1 Hit! Scaled 50% profit (+${p_gross:.2f}). SL Trailed to Breakeven (${entry_p:,.4f}).")
-                still_open.append(pos)
-                continue
+                gross_tp2_gain = scale_size * (abs(tp2_p - entry_p) / entry_p)
+                exit_nominal = scale_size + gross_tp2_gain
+                exit_fee = round(exit_nominal * self.effective_fee_rate, 4)
+                net_tp2_realized = round(gross_tp2_gain - exit_fee, 4)
 
-            # 2. PARTIAL TP2 SCALE (30% locked + Activate Chandelier Trailing Stop on 20% Runner)
-            elif is_hit_tp2 and stage == 'TP1_LOCKED_BREAKEVEN' and not is_hit_sl:
-                scale_nominal = init_size * 0.30
-                raw_ret_2 = (tp2_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - tp2_p) / entry_p
-                p_gross = round(scale_nominal * raw_ret_2, 4)
-                p_fee = round(scale_nominal * (1.0 + raw_ret_2) * self.effective_fee_rate + (scale_nominal * self.effective_fee_rate), 4)
-                p_net = round(p_gross - p_fee, 4)
-
-                pos['realized_gross_pnl'] = round(pos.get('realized_gross_pnl', 0.0) + p_gross, 4)
-                pos['realized_fees'] = round(pos.get('realized_fees', 0.0) + p_fee, 4)
-                pos['realized_net_pnl'] = round(pos.get('realized_net_pnl', 0.0) + p_net, 4)
-                pos['remaining_position_size_usd'] = round(pos['remaining_position_size_usd'] - scale_nominal, 4)
-                pos['sl_price'] = tp1_p  # Initial floor at TP1, will trail with 1.5 ATR Chandelier Stop!
+                pos['realized_gross_pnl'] = round(pos.get('realized_gross_pnl', 0.0) + gross_tp2_gain, 4)
+                pos['realized_fees'] = round(pos.get('realized_fees', 0.0) + exit_fee, 4)
+                pos['realized_net_pnl'] = round(pos.get('realized_net_pnl', 0.0) + net_tp2_realized, 4)
+                pos['remaining_position_size_usd'] = rem_size
                 pos['stage'] = 'TP2_LOCKED_TRAIL'
+                pos['sl_price'] = tp1_p  # Lock SL at guaranteed TP1 profit floor
+                sl_p = tp1_p
 
-                # Update wallet balances with partial locked profit
-                self.data['current_balance_usd'] = round(self.data['current_balance_usd'] + p_net, 2)
-                self.data['realized_pnl_usd'] = round(self.data['realized_pnl_usd'] + p_net, 2)
-                self.data['gross_realized_pnl_usd'] = round(self.data.get('gross_realized_pnl_usd', 0.0) + p_gross, 2)
-                self.data['total_fees_paid_usd'] = round(self.data.get('total_fees_paid_usd', 0.0) + p_fee, 2)
+            # Final Position Exit Condition
+            is_final_exit = is_hit_sl or is_expired or (stage == 'TP2_LOCKED_TRAIL' and is_hit_tp2)
 
-                print(f"[TRADING LEDGER 💎] {sym} [{pos['horizon'].upper()} {direction}] TP2 Hit! Scaled 30% profit. Activated 1.5 ATR Chandelier Trailing Stop on remaining 20% runner!")
-                still_open.append(pos)
-                continue
+            if is_final_exit:
+                exit_p = sl_p if is_hit_sl else (tp2_p if (stage == 'TP2_LOCKED_TRAIL' and is_hit_tp2) else curr_p)
+                
+                # Calculate return on remaining allocated size
+                raw_rem_return = (exit_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - exit_p) / entry_p
+                gross_rem_pnl = rem_size * raw_rem_return
+                exit_rem_nominal = max(0.0, rem_size + gross_rem_pnl)
+                exit_rem_fee = round(exit_rem_nominal * self.effective_fee_rate, 4)
+                net_rem_realized = gross_rem_pnl - exit_rem_fee
 
-            # 3. FINAL FULL EXIT (Chandelier SL, Protection SL, or Full Duration Expiry)
-            is_final_close = is_hit_sl or is_expired
-            if is_final_close:
-                final_rem_size = pos.get('remaining_position_size_usd', rem_size)
-                if is_hit_sl:
-                    raw_ret = (sl_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - sl_p) / entry_p
-                    exit_p = sl_p
-                    if stage == 'TP1_LOCKED_BREAKEVEN':
-                        exit_reason = "🛑 BREAKEVEN_PROTECT_EXIT"
-                    elif stage == 'TP2_LOCKED_TRAIL':
-                        exit_reason = "🏃 CHANDELIER_RUNNER_PROFIT_CLOSE"
-                    else:
-                        exit_reason = "🛑 STOP_LOSS_HIT"
-                else:
-                    raw_ret = (curr_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - curr_p) / entry_p
-                    exit_p = curr_p
-                    exit_reason = "⏳ EXPIRY_PROFIT_CLOSE" if raw_ret > 0 else ("⏳ EXPIRY_LOSS_CLOSE" if raw_ret < 0 else "⏳ BREAKEVEN_EXPIRY")
+                # Total Combined Trade Accounting
+                total_gross_pnl = round(pos.get('realized_gross_pnl', 0.0) + gross_rem_pnl, 4)
+                total_fees_paid = round(pos.get('entry_fee_usd', 0.0) + pos.get('realized_fees', 0.0) + exit_rem_fee, 4)
+                total_net_realized_pnl = round(total_gross_pnl - total_fees_paid, 4)
+                net_pnl_pct = round((total_net_realized_pnl / init_size) * 100.0, 2)
+                gross_pnl_pct = round((total_gross_pnl / init_size) * 100.0, 2)
 
-                # Binance Fee Accounting on Final Tranche
-                exit_nominal_usd = max(0.0, final_rem_size * (1.0 + raw_ret))
-                exit_fee_usd = round(exit_nominal_usd * self.effective_fee_rate, 4)
-                entry_fee_tranche = round(final_rem_size * self.effective_fee_rate, 4)
-                final_tranche_fees = round(entry_fee_tranche + exit_fee_usd, 4)
-
-                final_gross_pnl = round(final_rem_size * raw_ret, 4)
-                final_net_pnl = round(final_gross_pnl - final_tranche_fees, 4)
-
-                # Total Combined Trade Results (Partial Scale + Final Exit)
-                total_gross_pnl_usd = round(pos.get('realized_gross_pnl', 0.0) + final_gross_pnl, 4)
-                total_trade_fees_usd = round(pos.get('realized_fees', 0.0) + final_tranche_fees, 4)
-                total_net_pnl_usd = round(total_gross_pnl_usd - total_trade_fees_usd, 4)
-                net_pnl_pct = round((total_net_pnl_usd / init_size) * 100.0, 2)
-                gross_pnl_pct = round((total_gross_pnl_usd / init_size) * 100.0, 2)
-
-                if total_net_pnl_usd > 0.005:
+                # Determine final outcome classification
+                if total_net_realized_pnl > 0.0001:
                     outcome = "WON"
-                    is_win = True
-                elif total_net_pnl_usd < -0.005:
+                elif total_net_realized_pnl < -0.0001:
                     outcome = "LOST"
-                    is_win = False
                 else:
                     outcome = "BREAKEVEN"
-                    is_win = False
-                    exit_reason = "⏳ BREAKEVEN_FEE_CLOSE"
 
-                # Track Cooldown for Breakeven or Lost assets to prevent immediate re-entry loop
-                if outcome in ["BREAKEVEN", "LOST"]:
+                # Exit reason string
+                if is_hit_sl:
+                    exit_reason = "TRAILING_SL_HIT" if stage != 'OPEN' else "STOP_LOSS_HIT"
+                elif stage == 'TP2_LOCKED_TRAIL' and is_hit_tp2:
+                    exit_reason = "TAKE_PROFIT_TP2_HIT"
+                else:
+                    exit_reason = f"HORIZON_EXPIRY ({duration_str})"
+
+                # Cooldown activation if stopped out or breakeven
+                if outcome in ["LOST", "BREAKEVEN"]:
                     self.cooldown_tracker[sym] = now_dt
 
-                # Update Ledger Balances & Metrics
-                self.data['current_balance_usd'] = round(self.data['current_balance_usd'] + final_net_pnl, 2)
-                self.data['realized_pnl_usd'] = round(self.data['realized_pnl_usd'] + final_net_pnl, 2)
-                self.data['gross_realized_pnl_usd'] = round(self.data.get('gross_realized_pnl_usd', 0.0) + final_gross_pnl, 2)
-                self.data['total_fees_paid_usd'] = round(self.data.get('total_fees_paid_usd', 0.0) + final_tranche_fees, 2)
-                self.data['total_trades'] += 1
+                # Update Ledger Master Capital & Analytics
+                self.data['current_balance_usd'] = round(self.data['current_balance_usd'] + total_net_realized_pnl, 2)
+                self.data['realized_pnl_usd'] = round(self.data['realized_pnl_usd'] + total_net_realized_pnl, 2)
+                self.data['gross_realized_pnl_usd'] = round(self.data['gross_realized_pnl_usd'] + total_gross_pnl, 2)
+                self.data['total_fees_paid_usd'] = round(self.data['total_fees_paid_usd'] + total_fees_paid, 2)
+                
+                if total_gross_pnl > 0:
+                    self.data['gross_profit_usd'] = round(self.data['gross_profit_usd'] + total_gross_pnl, 2)
+                else:
+                    self.data['gross_loss_usd'] = round(self.data['gross_loss_usd'] + abs(total_gross_pnl), 2)
 
+                self.data['total_trades'] += 1
                 if outcome == "WON":
                     self.data['winning_trades'] += 1
-                    self.data['gross_profit_usd'] = round(self.data.get('gross_profit_usd', 0.0) + total_gross_pnl_usd, 2)
                 elif outcome == "LOST":
                     self.data['losing_trades'] += 1
-                    self.data['gross_loss_usd'] = round(self.data.get('gross_loss_usd', 0.0) + abs(total_gross_pnl_usd), 2)
                 else:
                     self.data['breakeven_trades'] = self.data.get('breakeven_trades', 0) + 1
 
                 decisive_trades = self.data['winning_trades'] + self.data['losing_trades']
-                self.data['win_rate_pct'] = (self.data['winning_trades'] / max(1, decisive_trades)) * 100.0
-                
-                # Profit factor
-                if self.data.get('gross_loss_usd', 0.0) > 0:
-                    self.data['profit_factor'] = self.data['gross_profit_usd'] / self.data['gross_loss_usd']
-                else:
-                    self.data['profit_factor'] = 99.9 if self.data.get('gross_profit_usd', 0.0) > 0 else 0.0
+                self.data['win_rate_pct'] = round((self.data['winning_trades'] / max(1, decisive_trades)) * 100.0, 2) if decisive_trades > 0 else 0.0
+                self.data['profit_factor'] = round(self.data['gross_profit_usd'] / max(0.01, self.data['gross_loss_usd']), 2)
 
-                # Peak Balance & Drawdown
-                if self.data['current_balance_usd'] > self.data.get('peak_balance_usd', self.data['starting_balance_usd']):
-                    self.data['peak_balance_usd'] = self.data['current_balance_usd']
-                
-                curr_dd = self.data['peak_balance_usd'] - self.data['current_balance_usd']
-                if curr_dd > self.data.get('max_drawdown_usd', 0.0):
-                    self.data['max_drawdown_usd'] = round(curr_dd, 2)
-                    self.data['max_drawdown_pct'] = round((curr_dd / self.data['peak_balance_usd']) * 100.0, 2)
+                # Drawdown tracking
+                self.data['peak_balance_usd'] = max(self.data.get('peak_balance_usd', self.data['starting_balance_usd']), self.data['current_balance_usd'])
+                current_dd = round(self.data['peak_balance_usd'] - self.data['current_balance_usd'], 2)
+                current_dd_pct = round((current_dd / self.data['peak_balance_usd']) * 100.0, 2)
+                self.data['max_drawdown_usd'] = max(self.data.get('max_drawdown_usd', 0.0), current_dd)
+                self.data['max_drawdown_pct'] = max(self.data.get('max_drawdown_pct', 0.0), current_dd_pct)
 
-                opened_dt_str = opened_dt.strftime('%H:%M:%S UTC')
-                closed_dt_str = now_dt.strftime('%H:%M:%S UTC')
-                pos['entry_time_str'] = opened_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
-                pos['exit_time_str'] = now_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
-                pos['entry_exit_time_str'] = f"{opened_dt_str} ➔ {closed_dt_str}"
-
-                pos['closed_at'] = now_str
                 pos['exit_price'] = exit_p
                 pos['exit_reason'] = exit_reason
-                pos['duration_str'] = duration_str
-                pos['gross_pnl_usd'] = total_gross_pnl_usd
-                pos['gross_pnl_pct'] = gross_pnl_pct
-                pos['binance_fee_usd'] = total_trade_fees_usd
-                pos['realized_pnl_usd'] = total_net_pnl_usd
-                pos['realized_pnl_pct'] = net_pnl_pct
                 pos['outcome'] = outcome
-                pos['is_win'] = is_win
+                pos['gross_pnl_usd'] = total_gross_pnl
+                pos['gross_pnl_pct'] = gross_pnl_pct
+                pos['binance_fee_usd'] = total_fees_paid
+                pos['realized_pnl_usd'] = total_net_realized_pnl
+                pos['realized_pnl_pct'] = net_pnl_pct
+                pos['closed_at'] = now_str
+                pos['exit_time_str'] = now_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+                pos['duration_str'] = duration_str
                 
                 self.data['closed_trades_history'].append(pos)
                 closed_this_tick.append(pos)
@@ -1485,7 +1465,7 @@ class PaperTradingLedger:
             print(f" ⏱️ Holding Duration: {c.get('duration_str','N/A')} | Updated Cash Balance: ${self.data['current_balance_usd']:,.2f}")
             print(f"{'='*120}\n")
 
-    def consider_new_trade(self, result: dict, horizon_key: str):
+    def consider_new_trade(self, result: dict, horizon_key: str, signal_history: list = None):
         if not self.config['enabled']:
             return
 
@@ -1493,12 +1473,17 @@ class PaperTradingLedger:
         if "FILTER" in decision:
             return
 
-        is_executable = ("EXECUTE" in decision) or ("DIP-BUY" in decision) or ("RALLY-SELL" in decision)
+        is_executable = ("EXECUTE" in decision) or ("DIP-BUY" in decision)
         if not is_executable:
             return
 
         sym = result['symbol']
         direction = result['direction']
+        
+        # 1. Strict Spot Only Guard: Spot trading allows only LONG / BULLISH trades
+        if self.config.get('spot_only', True) and direction not in ["BULLISH", "LONG"]:
+            return
+
         entry_p = result['current_price']
         tp_p = result['tp_price']
         tp1_p = result.get('tp1_price', tp_p)
@@ -1507,12 +1492,12 @@ class PaperTradingLedger:
         sl_p = result['sl_price']
 
         # Directional Invariant Guard: Prevent inverted targets from ever opening a position
-        if direction == "BULLISH" and (tp_p <= entry_p or sl_p >= entry_p):
+        if direction in ["BULLISH", "LONG"] and (tp_p <= entry_p or sl_p >= entry_p):
             return
-        if direction == "BEARISH" and (tp_p >= entry_p or sl_p <= entry_p):
+        if direction in ["BEARISH", "SHORT"] and (tp_p >= entry_p or sl_p <= entry_p):
             return
 
-        # 1. Cooldown Guard on Choppy/Breakeven Coins (45 min cooldown)
+        # 2. Cooldown Guard on Choppy/Breakeven Coins (45 min cooldown)
         now_utc = datetime.now(timezone.utc)
         last_closed = self.cooldown_tracker.get(sym)
         if last_closed:
@@ -1520,57 +1505,72 @@ class PaperTradingLedger:
             if elapsed_cd < 2700:  # 45 minutes cooldown
                 return
 
-        # 2. Strict Single-Asset Lockout: Maximum 1 position per asset across ALL horizons
-        for pos in self.data['open_positions']:
+        # 3. Strict Single-Asset Lockout: Maximum 1 position per asset across ALL horizons
+        for pos in self.data.get('open_positions', []):
             if pos['symbol'] == sym:
                 return
 
-        # 3. Horizon Quota Allocation (Reserve slots for high-profit setups across horizons)
-        horizon_counts = {h: sum(1 for p in self.data['open_positions'] if p.get('horizon') == h) for h in self.config.get('horizons', {})}
-        if horizon_counts.get(horizon_key, 0) >= 2:
-            return
+        # 4. Fixed Position Size: $5.00 per trade ($15 total capital / 3 trades)
+        pos_size = float(self.config.get('position_size_usd', 5.0))
 
-        # 4. Scalp Minimum Quality Guard: Scalps must have high conviction (>= 68%) and >= 0.45% expected move
-        if horizon_key == 'scalp':
-            if result.get('conviction', 0.0) < 68.0 or abs(result.get('exp_return', 0.0)) < 0.0045:
-                return
+        # 5. Strict Profit Requirement: Minimum $0.80 net profit target on a $5.00 trade (>= 16.0% net gain)
+        expected_gain_pct = abs(tp1_p - entry_p) / entry_p
+        est_nominal_fees = pos_size * (self.effective_fee_rate * 2)
+        est_net_profit_usd = (pos_size * expected_gain_pct) - est_nominal_fees
+        min_required_profit = float(self.config.get('min_net_profit_usd', 0.80))
+        if est_net_profit_usd < min_required_profit:
+            return  # Skip trade: Expected net profit on $5.00 trade is below $0.80
 
-        if len(self.data['open_positions']) >= self.config['max_concurrent_positions']:
-            return
-
-        # Cross-Asset Portfolio Correlation & Directional Shield: Prevent correlated flash dumps
-        current_longs = sum(1 for p in self.data['open_positions'] if p['direction'] == 'BULLISH')
-        current_shorts = sum(1 for p in self.data['open_positions'] if p['direction'] == 'BEARISH')
-        max_directional = max(2, self.config.get('max_concurrent_positions', 6) - 2)
-        if direction == "BULLISH" and current_longs >= max_directional:
-            return
-        if direction == "BEARISH" and current_shorts >= max_directional:
-            return
-
-        # Calculate Open Collateral
-        total_open_collateral = sum(p.get('remaining_position_size_usd', p.get('position_size_usd', 10.0)) for p in self.data['open_positions'])
-        avail_cash = max(0.0, self.data['current_balance_usd'] - total_open_collateral)
-
-        # Dynamic Half-Kelly & Volatility-Adjusted Adaptive Position Sizing
-        if self.config.get('dynamic_sizing', True):
-            conv_edge = max(0.02, (result.get('conviction', 60.0) / 100.0) - 0.50)
-            norm_atr = result.get('norm_atr', 0.02)
-            max_pct = self.config.get('max_position_size_pct', 0.20)
-            min_size = self.config.get('min_position_size_usd', 5.0)
+        # 6. Strict Track Record Requirement: Selected trade MUST have past winning signals > signals lost
+        past_won = 0
+        past_lost = 0
+        if self.config.get('require_positive_track_record', True):
+            if not signal_history:
+                return  # No track record available: wait for validated historical edge
+            coin_signals = [s for s in signal_history if s.get('symbol') == sym]
+            past_won = sum(1 for s in coin_signals if "WON" in str(s.get('outcome_label', '')).upper())
+            past_lost = sum(1 for s in coin_signals if "LOST" in str(s.get('outcome_label', '')).upper())
             
-            # Sizing multiplier: larger for high conviction & lower ATR
-            size_pct = min(max_pct, max(0.05, conv_edge / max(0.01, norm_atr * 8.0)))
-            calculated_size = round(avail_cash * size_pct, 2)
-            pos_size = max(min_size, min(calculated_size, avail_cash))
-        else:
-            pos_size = self.config['position_size_usd']
+            # Must have past winning signals MORE than signals lost (past_won > past_lost)
+            if past_won <= past_lost:
+                return  # Skip trade: Coin does not have past winning signals > signals lost
 
-        # Margin Guard: Ensure wallet has sufficient available liquid capital
-        if avail_cash < pos_size or pos_size < 1.0:
+        # Check Active Queue Capacity & Liquid Cash
+        max_concurrent = int(self.config.get('max_concurrent_positions', 3))
+        total_open_collateral = sum(p.get('remaining_position_size_usd', p.get('position_size_usd', 5.0)) for p in self.data.get('open_positions', []))
+        avail_cash = max(0.0, self.data['current_balance_usd'] - total_open_collateral)
+        queue_is_full = (len(self.data.get('open_positions', [])) >= max_concurrent) or (avail_cash < pos_size)
+
+        if queue_is_full:
+            # 7. Qualified Waitlist: Trade meets 100% of criteria, but active queue is currently full (3/3)
+            queued_list = self.data.setdefault('queued_trades', [])
+            if not any(q['symbol'] == sym for q in queued_list):
+                queued_list.append({
+                    "trade_id": f"QUEUED_{sym.replace('/', '_')}_{horizon_key}_{int(time.time())}",
+                    "symbol": sym,
+                    "horizon": horizon_key,
+                    "direction": "SPOT LONG",
+                    "entry_price": entry_p,
+                    "tp_price": tp_p,
+                    "tp1_price": tp1_p,
+                    "tp2_price": tp2_p,
+                    "tp3_price": tp3_p,
+                    "sl_price": sl_p,
+                    "position_size_usd": pos_size,
+                    "est_net_profit_usd": round(est_net_profit_usd, 2),
+                    "est_net_gain_pct": round((est_net_profit_usd / pos_size) * 100.0, 2),
+                    "past_won": past_won,
+                    "past_lost": past_lost,
+                    "win_ratio_label": f"{past_won}W / {past_lost}L",
+                    "signal_decision": decision,
+                    "status": "QUALIFIED_WAITLIST",
+                    "status_reason": f"Queue Full ({len(self.data.get('open_positions', []))}/{max_concurrent} active) - Next In Line",
+                    "queued_at": now_utc.isoformat(),
+                    "predicted_window": result.get('predicted_window_str', f"{result.get('trade_open_str', 'N/A')} ➔ {result.get('trade_close_str', 'N/A')}")
+                })
+            self.save()
             return
 
-        now_utc = datetime.now(timezone.utc)
-        
         # Calculate full duration from actual fill timestamp
         tf_delta_map = {
             'scalp': timedelta(minutes=15),
@@ -1585,14 +1585,14 @@ class PaperTradingLedger:
         duration = tf_delta_map.get(horizon_key, timedelta(minutes=15))
         expiry_dt = now_utc + duration
 
-        # Calculate exact Binance entry fee on opening nominal size
+        # Calculate exact Binance entry fee on opening nominal size ($5.00)
         entry_fee = round(pos_size * self.effective_fee_rate, 4)
 
         new_pos = {
             "trade_id": f"PAPER_{sym.replace('/', '_')}_{horizon_key}_{int(time.time())}",
             "symbol": sym,
             "horizon": horizon_key,
-            "direction": direction,
+            "direction": "BULLISH",
             "entry_price": entry_p,
             "tp_price": tp_p,
             "tp1_price": tp1_p,
@@ -1602,6 +1602,7 @@ class PaperTradingLedger:
             "initial_position_size_usd": pos_size,
             "remaining_position_size_usd": pos_size,
             "position_size_usd": pos_size,
+            "allocated_usd": pos_size,
             "stage": "OPEN",
             "realized_gross_pnl": 0.0,
             "realized_fees": 0.0,
@@ -1620,7 +1621,7 @@ class PaperTradingLedger:
             "current_price": entry_p
         }
 
-        self.data['open_positions'].append(new_pos)
+        self.data.setdefault('open_positions', []).append(new_pos)
         self.save()
 
     def save(self):
@@ -1631,10 +1632,11 @@ class PaperTradingLedger:
         """Processes real-time price updates, stepped risk ratchets, partial TP scaling, and trailing stops."""
         return self.update_positions(live_prices, live_highs, live_lows)
 
-    def admit_ranked_candidates(self, ranked_candidates: list):
+    def admit_ranked_candidates(self, ranked_candidates: list, signal_history: list = None):
         """Admits candidate trades strictly in order of global priority and relative strength rank."""
+        self.data['queued_trades'] = []
         for cand, h_key in ranked_candidates:
-            self.consider_new_trade(cand, h_key)
+            self.consider_new_trade(cand, h_key, signal_history=signal_history)
 
     def render_portfolio_card(self):
         d = self.data
@@ -2885,7 +2887,7 @@ class HybridQuantEngine:
             ))
 
             # Route top ranked signals into Order Execution Manager
-            self.ledger.admit_ranked_candidates(all_candidates)
+            self.ledger.admit_ranked_candidates(all_candidates, signal_history=self.signal_tracker.records)
             self.ledger.render_portfolio_card()
 
         # 5. Persistent Signal Audit Logger: Record & Evaluate ONLY Trader Signals in CSV

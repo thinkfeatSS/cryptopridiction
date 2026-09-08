@@ -220,27 +220,50 @@ class SignalService:
     def get_portfolio_data(self, db: Session) -> Dict[str, Any]:
         """Retrieves active positions and closed trades history from DB."""
         sync_files_to_db_live()
+        
+        # Read starting balance and analytics from paper trading ledger JSON if present
+        ledger_data = {}
+        try:
+            p_path = os.path.join(settings.EXPORT_DIR, "paper_trading_ledger.json")
+            if os.path.exists(p_path):
+                with open(p_path, "r", encoding="utf-8") as f:
+                    ledger_data = json.load(f)
+        except Exception:
+            pass
+
         positions = db.query(PaperPosition).order_by(desc(PaperPosition.id)).all()
         closed_trades = db.query(ClosedTrade).order_by(desc(ClosedTrade.id)).all()
 
-        total_trades = len(closed_trades)
-        winning_trades = sum(1 for c in closed_trades if c.outcome == "WON")
-        losing_trades = sum(1 for c in closed_trades if c.outcome == "LOST")
-        net_profit = sum(c.realized_pnl_usd for c in closed_trades)
-        win_rate = round((winning_trades / max(1, total_trades)) * 100.0, 2) if total_trades > 0 else 0.0
-
-        current_balance = 10000.0 + net_profit
+        total_trades = ledger_data.get("total_trades", len(closed_trades))
+        winning_trades = ledger_data.get("winning_trades", sum(1 for c in closed_trades if c.outcome == "WON"))
+        losing_trades = ledger_data.get("losing_trades", sum(1 for c in closed_trades if c.outcome == "LOST"))
+        breakeven_trades = ledger_data.get("breakeven_trades", sum(1 for c in closed_trades if c.outcome == "BREAKEVEN"))
+        net_profit = ledger_data.get("realized_pnl_usd", sum(c.realized_pnl_usd for c in closed_trades))
+        decisive = winning_trades + losing_trades
+        win_rate = ledger_data.get("win_rate_pct", round((winning_trades / max(1, decisive)) * 100.0, 2) if decisive > 0 else 0.0)
+        start_balance = float(ledger_data.get("starting_balance_usd", 15.0))
+        current_balance = float(ledger_data.get("current_balance_usd", start_balance + net_profit))
 
         return {
-            "initial_capital_usd": 10000.0,
+            "initial_capital_usd": start_balance,
             "current_balance_usd": round(current_balance, 2),
             "open_positions": [p.to_dict() for p in positions],
             "closed_trades_history": [c.to_dict() for c in closed_trades],
             "total_trades_count": total_trades,
             "winning_trades_count": winning_trades,
             "losing_trades_count": losing_trades,
+            "breakeven_trades_count": breakeven_trades,
             "win_rate_pct": win_rate,
             "total_net_profit_usd": round(net_profit, 2),
+            "gross_profit_usd": round(float(ledger_data.get("gross_profit_usd", 0.0)), 2),
+            "gross_loss_usd": round(float(ledger_data.get("gross_loss_usd", 0.0)), 2),
+            "total_fees_paid_usd": round(float(ledger_data.get("total_fees_paid_usd", 0.0)), 2),
+            "profit_factor": float(ledger_data.get("profit_factor", 0.0)),
+            "peak_balance_usd": round(float(ledger_data.get("peak_balance_usd", start_balance)), 2),
+            "max_drawdown_usd": round(float(ledger_data.get("max_drawdown_usd", 0.0)), 2),
+            "max_drawdown_pct": round(float(ledger_data.get("max_drawdown_pct", 0.0)), 2),
+            "fee_tier_label": str(ledger_data.get("fee_tier_label", "Binance Spot (0.075% BNB Discount) + 0.02% Slippage")),
+            "queued_trades": ledger_data.get("queued_trades", []),
         }
 
     def get_latest_forecast(self, db: Session) -> Dict[str, Any]:

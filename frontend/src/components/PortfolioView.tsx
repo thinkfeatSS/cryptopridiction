@@ -20,17 +20,28 @@ export default function PortfolioView() {
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">
-      <div className="flex items-center justify-between border-b border-slate-800/80 pb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800/80 pb-4 gap-3">
         <div>
           <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
             💼 Active Open Paper Positions
             <span className="rounded-md bg-emerald-950 px-2 py-0.5 text-xs font-semibold text-emerald-400 border border-emerald-800">
-              {openPositions.length} Live Trades
+              {openPositions.length} / 3 Active Trades
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
             Monitored 24/7 with 10-second price ticks & automated take-profit executions
           </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+          <span className="rounded-md bg-purple-950/60 px-2 py-1 text-purple-300 border border-purple-800/60">
+            💰 $15.00 Wallet ($5 / trade)
+          </span>
+          <span className="rounded-md bg-cyan-950/60 px-2 py-1 text-cyan-300 border border-cyan-800/60">
+            🎯 Min +$0.80 (+16%) Target
+          </span>
+          <span className="rounded-md bg-amber-950/60 px-2 py-1 text-amber-300 border border-amber-800/60">
+            🛡️ Past Won &gt; Lost Only
+          </span>
         </div>
       </div>
 

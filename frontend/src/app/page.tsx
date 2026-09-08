@@ -8,6 +8,7 @@ import AssetPredictionMatrix from "@/components/AssetPredictionMatrix";
 import DailySignalsView from "@/components/DailySignalsView";
 import SignalsTable from "@/components/SignalsTable";
 import PortfolioView from "@/components/PortfolioView";
+import QueuedTrades from "@/components/QueuedTrades";
 import { useForecastQuery } from "@/hooks/useCryptoData";
 import { Sparkles, Zap, ShieldCheck, Activity, BarChart2 } from "lucide-react";
 
@@ -108,8 +109,9 @@ export default function DashboardPage() {
       {/* ========================================================= */}
       {/* 3. PAPER TRADING BOT: Virtual Positions & Balance         */}
       {/* ========================================================= */}
-      <section>
+      <section className="space-y-6">
         <PortfolioView />
+        <QueuedTrades />
       </section>
 
       {/* ========================================================= */}

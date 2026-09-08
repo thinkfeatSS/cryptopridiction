@@ -228,8 +228,19 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                     )
                     db.add(pos)
 
+                # Sync Closed Trades in exact parity with ledger
+                ledger_closed = p_data.get("closed_trades_history", [])
+                ledger_trade_ids = {ct.get("trade_id") for ct in ledger_closed if ct.get("trade_id")}
+                
+                # If ledger was reset (0 closed trades), purge historical DB records
+                if not ledger_closed:
+                    db.query(ClosedTrade).delete()
+                else:
+                    # Remove any DB closed trades that are not in the current ledger
+                    db.query(ClosedTrade).filter(~ClosedTrade.trade_id.in_(ledger_trade_ids)).delete(synchronize_session=False)
+
                 existing_trades = {t[0] for t in db.query(ClosedTrade.trade_id).all()}
-                for ct in p_data.get("closed_trades_history", []):
+                for ct in ledger_closed:
                     tid = ct.get("trade_id", f"TRADE_{ct.get('symbol')}_{ct.get('closed_at')}")
                     if tid not in existing_trades:
                         tr = ClosedTrade(

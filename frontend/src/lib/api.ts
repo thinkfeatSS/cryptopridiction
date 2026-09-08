@@ -122,16 +122,43 @@ export interface ClosedTradeItem {
   closed_at: string;
 }
 
+export interface QueuedTrade {
+  trade_id: string;
+  symbol: string;
+  horizon: string;
+  direction: string;
+  entry_price: number;
+  tp_price: number;
+  tp1_price: number;
+  tp2_price?: number;
+  tp3_price?: number;
+  sl_price: number;
+  position_size_usd: number;
+  est_net_profit_usd: number;
+  est_net_gain_pct: number;
+  past_won: number;
+  past_lost: number;
+  win_ratio_label: string;
+  signal_decision: string;
+  status: string;
+  status_reason: string;
+  queued_at: string;
+  predicted_window?: string;
+}
+
 export interface PortfolioData {
   initial_capital_usd: number;
   current_balance_usd: number;
   open_positions: OpenPosition[];
   closed_trades_history: ClosedTradeItem[];
+  queued_trades?: QueuedTrade[];
   total_trades_count: number;
   winning_trades_count: number;
   losing_trades_count: number;
+  breakeven_trades_count?: number;
   win_rate_pct: number;
   total_net_profit_usd: number;
+  fee_tier_label?: string;
 }
 
 export interface ForecastData {

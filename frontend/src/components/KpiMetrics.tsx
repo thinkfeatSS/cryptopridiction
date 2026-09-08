@@ -28,7 +28,7 @@ export default function KpiMetrics() {
   const pendingCount = kpi?.pending_signals_count ?? 0;
   const totalCount = kpi?.total_trader_signals ?? 0;
 
-  const currentBalance = portfolio?.current_balance_usd ?? 10000.0;
+  const currentBalance = portfolio?.current_balance_usd ?? 15.0;
   const netProfit = portfolio?.total_net_profit_usd ?? 0.0;
   const openTradesCount = portfolio?.open_positions?.length ?? 0;
 
