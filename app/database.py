@@ -10,12 +10,23 @@ def get_engine():
     db_url = settings.DATABASE_URL
     # If explicitly using SQLite or MySQL isn't reachable
     try:
-        engine = create_engine(
-            db_url,
-            pool_pre_ping=True,
-            pool_recycle=3600,
-            echo=False
-        )
+        if "mysql" in db_url.lower():
+            engine = create_engine(
+                db_url,
+                pool_size=25,
+                max_overflow=15,
+                pool_timeout=30,
+                pool_pre_ping=True,
+                pool_recycle=1800,
+                echo=False
+            )
+        else:
+            engine = create_engine(
+                db_url,
+                pool_pre_ping=True,
+                pool_recycle=1800,
+                echo=False
+            )
         # Test connection
         with engine.connect() as conn:
             pass

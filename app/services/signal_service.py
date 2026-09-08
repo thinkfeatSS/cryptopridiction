@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, desc
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
+from collections import defaultdict
 import math
 import os
 import json
@@ -9,13 +10,20 @@ import numpy as np
 
 from app.config import settings
 from app.models import SignalAudit, PaperPosition, ClosedTrade, MarketForecast
-from app.services.db_sync import sync_files_to_db_live, get_sync_state
+from app.services.db_sync import sync_files_to_db_live, get_sync_state, get_cached_forecast, set_cached_forecast
 
 class SignalService:
     def get_kpi_summary(self, db: Session) -> Dict[str, Any]:
-        """Calculates executive KPI metrics from MySQL database."""
+        """Calculates executive KPI metrics in a single optimized pass."""
         sync_files_to_db_live()
-        total_signals = db.query(SignalAudit).count()
+        signals = db.query(
+            SignalAudit.outcome_label,
+            SignalAudit.status,
+            SignalAudit.grade_tier,
+            SignalAudit.realized_return_pct
+        ).all()
+
+        total_signals = len(signals)
         if total_signals == 0:
             return {
                 "last_updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -31,49 +39,54 @@ class SignalService:
                 "cumulative_return_pct": 0.0,
             }
 
-        won = db.query(SignalAudit).filter(SignalAudit.outcome_label.like("%WON%")).count()
-        lost = db.query(SignalAudit).filter(SignalAudit.outcome_label.like("%LOST%")).count()
-        expired = db.query(SignalAudit).filter(SignalAudit.outcome_label.like("%EXPIRED%")).count()
-        pending = db.query(SignalAudit).filter(
-            or_(
-                SignalAudit.status == "PENDING_EVALUATION",
-                SignalAudit.outcome_label.like("%PENDING%")
-            )
-        ).count()
-        
+        won = 0
+        lost = 0
+        pending = 0
+        expired = 0
+        a_plus_won = 0
+        a_plus_lost = 0
+        a_won = 0
+        a_lost = 0
+        returns = []
+
+        for out_label, status, grade_tier, ret_pct in signals:
+            out_upper = (out_label or "").upper()
+            st_upper = (status or "").upper()
+
+            is_won = "WON" in out_upper
+            is_lost = "LOST" in out_upper
+            is_pending = "PENDING" in out_upper or st_upper == "PENDING_EVALUATION"
+            is_expired = "EXPIRED" in out_upper
+
+            if is_won:
+                won += 1
+                if grade_tier == 1:
+                    a_plus_won += 1
+                elif grade_tier == 2:
+                    a_won += 1
+            elif is_lost:
+                lost += 1
+                if grade_tier == 1:
+                    a_plus_lost += 1
+                elif grade_tier == 2:
+                    a_lost += 1
+            elif is_pending:
+                pending += 1
+            elif is_expired:
+                expired += 1
+
+            if ret_pct is not None and not (math.isnan(ret_pct) or math.isinf(ret_pct)):
+                returns.append(ret_pct)
+
         decisive = won + lost
         win_rate = round((won / max(1, decisive)) * 100.0, 2) if decisive > 0 else 0.0
 
-        # Grade A+ stats
-        a_plus_won = db.query(SignalAudit).filter(
-            SignalAudit.grade_tier == 1,
-            SignalAudit.outcome_label.like("%WON%")
-        ).count()
-        a_plus_lost = db.query(SignalAudit).filter(
-            SignalAudit.grade_tier == 1,
-            SignalAudit.outcome_label.like("%LOST%")
-        ).count()
         a_plus_decisive = a_plus_won + a_plus_lost
         a_plus_wr = round((a_plus_won / max(1, a_plus_decisive)) * 100.0, 2) if a_plus_decisive > 0 else 0.0
 
-        # Grade A stats
-        a_won = db.query(SignalAudit).filter(
-            SignalAudit.grade_tier == 2,
-            SignalAudit.outcome_label.like("%WON%")
-        ).count()
-        a_lost = db.query(SignalAudit).filter(
-            SignalAudit.grade_tier == 2,
-            SignalAudit.outcome_label.like("%LOST%")
-        ).count()
         a_decisive = a_won + a_lost
         a_wr = round((a_won / max(1, a_decisive)) * 100.0, 2) if a_decisive > 0 else 0.0
 
-        # Returns calculation
-        resolved_returns = db.query(SignalAudit.realized_return_pct).filter(
-            SignalAudit.realized_return_pct.isnot(None)
-        ).all()
-
-        returns = [r[0] for r in resolved_returns if r[0] is not None and not (math.isnan(r[0]) or math.isinf(r[0]))]
         avg_ret = round(float(np.mean(returns)), 2) if returns else 0.0
         total_ret = round(float(np.sum(returns)), 2) if returns else 0.0
 
@@ -162,17 +175,17 @@ class SignalService:
         return [s.to_dict() for s in signals]
 
     def get_daily_summary(self, db: Session) -> List[Dict[str, Any]]:
-        """Groups signals by date with Won/Lost count, Win Rate %, and Cumulative Return for each day."""
+        """Optimized single-query aggregation grouping signals by date."""
         sync_files_to_db_live()
-        dates = db.query(SignalAudit.date_utc).distinct().order_by(desc(SignalAudit.date_utc)).all()
+        signals = db.query(SignalAudit).order_by(desc(SignalAudit.date_utc)).all()
+        
+        grouped = defaultdict(list)
+        for s in signals:
+            if s.date_utc:
+                grouped[s.date_utc].append(s)
+
         daily_list = []
-
-        for d_tuple in dates:
-            d_str = d_tuple[0]
-            if not d_str:
-                continue
-
-            day_signals = db.query(SignalAudit).filter(SignalAudit.date_utc == d_str).all()
+        for d_str, day_signals in grouped.items():
             total_day = len(day_signals)
             won = sum(1 for s in day_signals if "WON" in (s.outcome_label or ""))
             lost = sum(1 for s in day_signals if "LOST" in (s.outcome_label or ""))
@@ -231,18 +244,30 @@ class SignalService:
         }
 
     def get_latest_forecast(self, db: Session) -> Dict[str, Any]:
-        """Retrieves the most recent market forecast scan."""
+        """Retrieves the most recent market forecast scan with in-memory cache."""
+        cached = get_cached_forecast()
+        if cached:
+            return cached
+
         sync_files_to_db_live()
+        cached = get_cached_forecast()
+        if cached:
+            return cached
+
         latest = db.query(MarketForecast).order_by(desc(MarketForecast.id)).first()
         if latest:
-            return latest.to_dict()
+            res = latest.to_dict()
+            set_cached_forecast(res)
+            return res
         
         # Fallback to direct file read if available
         try:
             forecast_path = os.path.join(settings.EXPORT_DIR, "live_market_forecast.json")
             if os.path.exists(forecast_path):
                 with open(forecast_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    set_cached_forecast(data)
+                    return data
         except Exception:
             pass
 
@@ -272,15 +297,19 @@ class SignalService:
         next_scan_time = (now + timedelta(seconds=secs_remaining)).strftime("%H:%M:%S UTC")
 
         shield_status = {"active": False, "reason": "NORMAL (Market Stable)"}
-        try:
-            forecast_path = os.path.join(settings.EXPORT_DIR, "live_market_forecast.json")
-            if os.path.exists(forecast_path):
-                with open(forecast_path, "r", encoding="utf-8") as f:
-                    f_data = json.load(f)
-                    if "btc_market_shield" in f_data:
-                        shield_status = f_data["btc_market_shield"]
-        except Exception:
-            pass
+        cached = get_cached_forecast()
+        if cached and "btc_market_shield" in cached:
+            shield_status = cached["btc_market_shield"]
+        else:
+            try:
+                forecast_path = os.path.join(settings.EXPORT_DIR, "live_market_forecast.json")
+                if os.path.exists(forecast_path):
+                    with open(forecast_path, "r", encoding="utf-8") as f:
+                        f_data = json.load(f)
+                        if "btc_market_shield" in f_data:
+                            shield_status = f_data["btc_market_shield"]
+            except Exception:
+                pass
 
         return {
             "status": "HEALTHY",

@@ -5,6 +5,7 @@ import time
 import pandas as pd
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from app.database import engine, SessionLocal, Base
 from app.models import SignalAudit, PaperPosition, ClosedTrade, MarketForecast
 from app.config import settings
@@ -14,16 +15,15 @@ _LAST_SYNC_TIMES = {
     "portfolio": 0.0,
     "forecast": 0.0,
 }
+_LAST_CHECK_TIME = 0.0
 _SCAN_VERSION = 1
 _LAST_SCAN_TIMESTAMP = datetime.now(timezone.utc).isoformat()
-
-from sqlalchemy import text
+_CACHED_FORECAST = None
 
 def init_db():
     """Creates all database tables in MySQL / SQLite and applies schema updates."""
     try:
         Base.metadata.create_all(bind=engine)
-        # Ensure MySQL columns have sufficient capacity for Top 100 8-horizon scans
         if "mysql" in settings.DATABASE_URL.lower():
             with engine.connect() as conn:
                 try:
@@ -46,13 +46,30 @@ def get_sync_state():
         "last_scan_timestamp": _LAST_SCAN_TIMESTAMP,
     }
 
+def get_cached_forecast():
+    """Returns in-memory cached forecast if available."""
+    global _CACHED_FORECAST
+    return _CACHED_FORECAST
+
+def set_cached_forecast(data):
+    """Sets in-memory cached forecast."""
+    global _CACHED_FORECAST
+    _CACHED_FORECAST = data
+
 def sync_files_to_db_live(force: bool = False) -> bool:
     """
     High-performance live synchronizer:
     Detects if CSV or JSON files have been modified by test.py,
-    and updates the database tables (inserting new signals and updating existing ones).
+    and updates the database tables using bulk mappings.
     """
-    global _LAST_SYNC_TIMES, _SCAN_VERSION, _LAST_SCAN_TIMESTAMP
+    global _LAST_SYNC_TIMES, _LAST_CHECK_TIME, _SCAN_VERSION, _LAST_SCAN_TIMESTAMP, _CACHED_FORECAST
+    now_ts = time.time()
+    
+    # Cooldown check (skip disk stats if checked less than 2.0s ago unless forced)
+    if not force and (now_ts - _LAST_CHECK_TIME) < 2.0:
+        return False
+    _LAST_CHECK_TIME = now_ts
+
     export_dir = settings.EXPORT_DIR
     signals_csv = os.path.join(export_dir, "trader_signals_tracker.csv")
     portfolio_json = os.path.join(export_dir, "paper_trading_ledger.json")
@@ -67,7 +84,6 @@ def sync_files_to_db_live(force: bool = False) -> bool:
     if not force and csv_mtime <= _LAST_SYNC_TIMES["csv"] and portfolio_mtime <= _LAST_SYNC_TIMES["portfolio"] and forecast_mtime <= _LAST_SYNC_TIMES["forecast"]:
         return False
 
-    init_db()
     db: Session = SessionLocal()
     try:
         # 1. Sync Signals Tracker CSV (Insert new + update existing outcomes & returns)
@@ -75,6 +91,10 @@ def sync_files_to_db_live(force: bool = False) -> bool:
             try:
                 df = pd.read_csv(signals_csv, keep_default_na=False).fillna("")
                 records = df.to_dict(orient="records")
+                
+                # Bulk fetch existing signals into dictionary
+                existing_signals = {s.signal_id: s for s in db.query(SignalAudit).all()}
+
                 for r in records:
                     sig_id = str(r.get("signal_id", "")).strip()
                     if not sig_id:
@@ -102,7 +122,7 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                         except Exception:
                             return fallback
 
-                    existing = db.query(SignalAudit).filter(SignalAudit.signal_id == sig_id).first()
+                    existing = existing_signals.get(sig_id)
                     if not existing:
                         sig_obj = SignalAudit(
                             signal_id=sig_id,
@@ -136,8 +156,8 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                             evaluated_at_utc=str(r.get("evaluated_at_utc", "")) or None,
                         )
                         db.add(sig_obj)
+                        existing_signals[sig_id] = sig_obj
                     else:
-                        # Update outcome, peak/trough, and exit return in existing record
                         existing.status = str(r.get("status", existing.status))
                         existing.outcome_label = str(r.get("outcome_label", existing.outcome_label))
                         existing.peak_price_seen = safe_f(r.get("peak_price_seen"), existing.peak_price_seen)
@@ -186,10 +206,10 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                     )
                     db.add(pos)
 
+                existing_trades = {t[0] for t in db.query(ClosedTrade.trade_id).all()}
                 for ct in p_data.get("closed_trades_history", []):
                     tid = ct.get("trade_id", f"TRADE_{ct.get('symbol')}_{ct.get('closed_at')}")
-                    existing_tr = db.query(ClosedTrade).filter(ClosedTrade.trade_id == tid).first()
-                    if not existing_tr:
+                    if tid not in existing_trades:
                         tr = ClosedTrade(
                             trade_id=tid,
                             symbol=ct.get("symbol"),
@@ -208,6 +228,7 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                             closed_at=str(ct.get("closed_at", "")),
                         )
                         db.add(tr)
+                        existing_trades.add(tid)
 
                 db.commit()
                 _LAST_SYNC_TIMES["portfolio"] = portfolio_mtime
@@ -223,6 +244,7 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                     f_data = json.load(f)
                 ts = f_data.get("timestamp", datetime.now(timezone.utc).isoformat())
                 _LAST_SCAN_TIMESTAMP = ts
+                _CACHED_FORECAST = f_data
 
                 # Insert new forecast record
                 existing_f = db.query(MarketForecast).filter(MarketForecast.timestamp_utc == ts).first()
