@@ -27,6 +27,60 @@ type HorizonKey = "all" | "watchlist" | "scalp" | "swing" | "macro" | "horizon_2
 import { useWatchlist } from "@/hooks/useWatchlist";
 import { Star } from "lucide-react";
 
+// Helper to render rich signal strength and catalyst badges
+function renderSignalCell(h?: any) {
+  if (!h || (!h.direction && !h.decision)) {
+    return <span className="text-slate-600 font-sans text-xs">—</span>;
+  }
+
+  const decision: string = h.decision || (h.direction === "BULLISH" ? "EXECUTE LONG" : "EXECUTE SHORT");
+  const isFilter = decision.includes("FILTER");
+  const isShortSqueeze = decision.includes("SHORT SQUEEZE");
+  const isLongFlush = decision.includes("LONG FLUSH");
+  const isLiquiditySweep = decision.includes("LIQUIDITY-SWEEP") || decision.includes("SWEEP");
+  const isDipBuy = decision.includes("DIP-BUY");
+  const isRallySell = decision.includes("RALLY-SELL");
+  const isElite = decision.includes("ELITE");
+  const isLong = h.direction === "BULLISH" || h.direction === "LONG" || decision.includes("LONG");
+
+  let badgeStyle = "bg-dark-900 text-slate-300 border-slate-800";
+  if (isFilter) {
+    badgeStyle = "bg-slate-900/90 text-slate-400 border-slate-800/80";
+  } else if (isShortSqueeze) {
+    badgeStyle = "bg-amber-950/80 text-amber-300 border-amber-500/60 shadow-sm shadow-amber-500/20";
+  } else if (isLongFlush) {
+    badgeStyle = "bg-purple-950/80 text-purple-300 border-purple-500/60 shadow-sm shadow-purple-500/20";
+  } else if (isDipBuy) {
+    badgeStyle = "bg-emerald-950/90 text-emerald-300 border-emerald-500/70 shadow-sm shadow-emerald-500/20";
+  } else if (isRallySell) {
+    badgeStyle = "bg-rose-950/90 text-rose-300 border-rose-500/70 shadow-sm shadow-rose-500/20";
+  } else if (isLiquiditySweep) {
+    badgeStyle = isLong
+      ? "bg-cyan-950/90 text-cyan-300 border-cyan-500/70 shadow-sm shadow-cyan-500/20"
+      : "bg-fuchsia-950/90 text-fuchsia-300 border-fuchsia-500/70 shadow-sm shadow-fuchsia-500/20";
+  } else if (isElite) {
+    badgeStyle = isLong
+      ? "bg-emerald-950/70 text-emerald-300 border-emerald-600/70"
+      : "bg-rose-950/70 text-rose-300 border-rose-600/70";
+  } else if (isLong) {
+    badgeStyle = "bg-emerald-950/40 text-emerald-400 border-emerald-800/50";
+  } else {
+    badgeStyle = "bg-rose-950/40 text-rose-400 border-rose-800/50";
+  }
+
+  return (
+    <div className="flex flex-col gap-1 min-w-[150px]">
+      <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-bold font-sans border tracking-tight leading-snug whitespace-normal ${badgeStyle}`}>
+        {decision}
+      </span>
+      <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+        <span className="text-cyan-400 font-semibold">{h.conviction ? `${h.conviction.toFixed(1)}%` : "—"}</span>
+        <span>TP: <strong className="text-slate-200">{formatUsd(h.tp_price)}</strong></span>
+      </div>
+    </div>
+  );
+}
+
 export default function AssetPredictionMatrix() {
   const { data: forecast, isLoading } = useForecastQuery();
   const { data: status } = useStatusQuery();
@@ -143,7 +197,7 @@ export default function AssetPredictionMatrix() {
         <table className="w-full text-left text-xs text-slate-300 font-mono">
           <thead className="bg-dark-900/90 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
             <tr>
-              <th className="py-3 px-4"># / Asset & Live Price</th>
+              <th className="py-3 px-4"># / Asset &amp; Live Price</th>
               {selectedHorizon === "all" ? (
                 <>
                   <th className="py-3 px-4">⚡ Scalp (15M)</th>
@@ -151,7 +205,7 @@ export default function AssetPredictionMatrix() {
                   <th className="py-3 px-4">🚀 Macro (24H)</th>
                   <th className="py-3 px-4">🗓️ Weekly (7D)</th>
                   <th className="py-3 px-4">🪐 Monthly (30D)</th>
-                  <th className="py-3 px-4 text-right">Alignment & History</th>
+                  <th className="py-3 px-4 text-right">Alignment &amp; History</th>
                 </>
               ) : (
                 <>
@@ -160,7 +214,7 @@ export default function AssetPredictionMatrix() {
                   <th className="py-3 px-4">Take-Profit Target</th>
                   <th className="py-3 px-4">Invalidation SL</th>
                   <th className="py-3 px-4">Expected Return</th>
-                  <th className="py-3 px-4 text-right">Actionable Decision</th>
+                  <th className="py-3 px-4 text-right">Signal Strength / Decision</th>
                 </>
               )}
             </tr>
@@ -266,11 +320,11 @@ export default function AssetPredictionMatrix() {
                         </span>
                       </td>
 
-                      {/* Decision */}
+                      {/* Signal Strength / Decision */}
                       <td className="py-3 px-4 text-right font-sans">
-                        <span className="rounded-lg bg-dark-900 px-2.5 py-1 text-[11px] font-semibold text-slate-200 border border-slate-800">
-                          {h.decision || "MONITOR CHOP"}
-                        </span>
+                        <div className="flex justify-end">
+                          {renderSignalCell(h)}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -315,62 +369,27 @@ export default function AssetPredictionMatrix() {
 
                     {/* Scalp (15M) */}
                     <td className="py-3 px-4">
-                      <div className="flex flex-col text-xs">
-                        <span className={s.direction === "BULLISH" ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
-                          {s.direction === "BULLISH" ? "🟢 LONG" : "🔴 SHORT"} ({s.conviction?.toFixed(1)}%)
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          TP: {formatUsd(s.tp_price)}
-                        </span>
-                      </div>
+                      {renderSignalCell(s)}
                     </td>
 
                     {/* Swing (1H) */}
                     <td className="py-3 px-4">
-                      <div className="flex flex-col text-xs">
-                        <span className={w.direction === "BULLISH" ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
-                          {w.direction === "BULLISH" ? "🟢 LONG" : "🔴 SHORT"} ({w.conviction?.toFixed(1)}%)
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          TP: {formatUsd(w.tp_price)}
-                        </span>
-                      </div>
+                      {renderSignalCell(w)}
                     </td>
 
                     {/* Macro (24H) */}
                     <td className="py-3 px-4">
-                      <div className="flex flex-col text-xs">
-                        <span className={m.direction === "BULLISH" ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
-                          {m.direction === "BULLISH" ? "🟢 LONG" : "🔴 SHORT"} ({m.conviction?.toFixed(1)}%)
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          TP: {formatUsd(m.tp_price)}
-                        </span>
-                      </div>
+                      {renderSignalCell(m)}
                     </td>
 
                     {/* Weekly (7D) */}
                     <td className="py-3 px-4">
-                      <div className="flex flex-col text-xs">
-                        <span className={h7d.direction === "BULLISH" ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
-                          {h7d.direction === "BULLISH" ? "🟢 LONG" : h7d.direction === "BEARISH" ? "🔴 SHORT" : "⚪ -"} ({h7d.conviction?.toFixed(1) || "50.0"}%)
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          TP: {formatUsd(h7d.tp_price)}
-                        </span>
-                      </div>
+                      {renderSignalCell(h7d)}
                     </td>
 
                     {/* Monthly (30D) */}
                     <td className="py-3 px-4">
-                      <div className="flex flex-col text-xs">
-                        <span className={h30d.direction === "BULLISH" ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
-                          {h30d.direction === "BULLISH" ? "🟢 LONG" : h30d.direction === "BEARISH" ? "🔴 SHORT" : "⚪ -"} ({h30d.conviction?.toFixed(1) || "50.0"}%)
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          TP: {formatUsd(h30d.tp_price)}
-                        </span>
-                      </div>
+                      {renderSignalCell(h30d)}
                     </td>
 
                     {/* Alignment & Drilldown Action */}
