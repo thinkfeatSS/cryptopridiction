@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Bulletproof SSL Provisioner for bullsandbears.binaryunit.tech
-# Resolves port 80 conflicts automatically (Standalone Mode)
+# Bulletproof SSL Provisioner & Nginx Activator for bullsandbears.binaryunit.tech
+# Reuses existing Let's Encrypt certificates on disk and configures HTTPS proxy
 # ==============================================================================
-
-set -e
 
 DOMAIN="bullsandbears.binaryunit.tech"
 
@@ -18,69 +16,84 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 2. Install certbot if missing
-if ! command -v certbot &> /dev/null; then
-    echo "📦 Installing certbot..."
-    apt-get update -y
-    apt-get install -y certbot
-fi
+# 2. Check if certificate already exists on disk
+CERT_FILE="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+KEY_FILE="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 
-# 3. Temporarily disable host nginx broken site symlink to prevent syntax block
-rm -f /etc/nginx/sites-enabled/$DOMAIN || true
-
-# 4. Identify containers or processes listening on port 80
-echo "🔍 Freeing Port 80 for SSL verification..."
-CONTAINERS_PORT_80=$(docker ps -q --filter "publish=80" 2>/dev/null || true)
-if [ -n "$CONTAINERS_PORT_80" ]; then
-    echo "⏸️  Temporarily pausing Docker container(s) on port 80: $CONTAINERS_PORT_80"
-    docker stop $CONTAINERS_PORT_80
-fi
-
-# Also stop host nginx if it was running
-systemctl stop nginx 2>/dev/null || true
-
-# 5. Issue Let's Encrypt Certificate via Standalone Authenticator
-echo "🔑 Requesting official Let's Encrypt SSL certificate for $DOMAIN..."
-certbot certonly --standalone -d $DOMAIN --non-interactive --agree-tos --register-unsafely-without-email --force-renewal
-
-# 6. Verify certificate files exist
-if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-    echo "✅ SSL Certificate successfully issued at /etc/letsencrypt/live/$DOMAIN/"
+if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]; then
+    echo "✨ Existing valid SSL Certificate detected at /etc/letsencrypt/live/$DOMAIN/!"
 else
-    echo "❌ Certificate file not found. Check /var/log/letsencrypt/letsencrypt.log"
-    # Restart containers before exit
+    echo "🔍 Certificate not found in live directory. Installing certbot & requesting..."
+    if ! command -v certbot &> /dev/null; then
+        apt-get update -y
+        apt-get install -y certbot
+    fi
+
+    # Temporarily stop services on port 80 to free port for standalone ACME challenge
+    echo "🔍 Freeing Port 80 for SSL verification..."
+    CONTAINERS_PORT_80=$(docker ps -q --filter "publish=80" 2>/dev/null || true)
+    if [ -n "$CONTAINERS_PORT_80" ]; then
+        echo "⏸️  Pausing Docker container(s) on port 80: $CONTAINERS_PORT_80"
+        docker stop $CONTAINERS_PORT_80
+    fi
+    systemctl stop nginx 2>/dev/null || true
+
+    # Request certificate using --keep-until-expiring to avoid duplicate rate limits
+    echo "🔑 Obtaining Let's Encrypt SSL certificate for $DOMAIN..."
+    certbot certonly --standalone -d $DOMAIN --non-interactive --agree-tos --register-unsafely-without-email --keep-until-expiring || true
+
+    # Restart containers on port 80 if any were stopped
     if [ -n "$CONTAINERS_PORT_80" ]; then
         docker start $CONTAINERS_PORT_80 || true
     fi
+fi
+
+# 3. Double check if certificate exists or can be recovered from archive
+if [ ! -f "$CERT_FILE" ]; then
+    LATEST_ARCHIVE=$(ls -td /etc/letsencrypt/archive/$DOMAIN/fullchain*.pem 2>/dev/null | head -n 1 || true)
+    if [ -n "$LATEST_ARCHIVE" ]; then
+        echo "📁 Recovering certificate symlinks from /etc/letsencrypt/archive/$DOMAIN/..."
+        mkdir -p /etc/letsencrypt/live/$DOMAIN/
+        ln -sf $(ls -td /etc/letsencrypt/archive/$DOMAIN/fullchain*.pem | head -n 1) /etc/letsencrypt/live/$DOMAIN/fullchain.pem
+        ln -sf $(ls -td /etc/letsencrypt/archive/$DOMAIN/privkey*.pem | head -n 1) /etc/letsencrypt/live/$DOMAIN/privkey.pem
+        ln -sf $(ls -td /etc/letsencrypt/archive/$DOMAIN/cert*.pem | head -n 1) /etc/letsencrypt/live/$DOMAIN/cert.pem
+        ln -sf $(ls -td /etc/letsencrypt/archive/$DOMAIN/chain*.pem | head -n 1) /etc/letsencrypt/live/$DOMAIN/chain.pem
+    fi
+fi
+
+# 4. Final verification of certificate
+if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]; then
+    echo "✅ SSL Certificate is READY: $CERT_FILE"
+else
+    echo "❌ Certificate file not found at $CERT_FILE"
+    echo "Please check /var/log/letsencrypt/letsencrypt.log"
     exit 1
 fi
 
-# 7. Restart Docker containers on port 80
-if [ -n "$CONTAINERS_PORT_80" ]; then
-    echo "▶️  Restarting Docker containers: $CONTAINERS_PORT_80"
-    docker start $CONTAINERS_PORT_80
-    sleep 2
-    
-    # Reload Docker Nginx if present
-    for cid in $CONTAINERS_PORT_80; do
-        docker exec $cid nginx -s reload 2>/dev/null || true
-    done
-fi
+# 5. Configure Host Nginx SSL Reverse Proxy
+echo "📋 Applying host Nginx SSL configuration..."
+mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /var/www/html
 
-# 8. Configure host Nginx if host Nginx is being used
-if [ -d "/etc/nginx/sites-available" ]; then
-    echo "📋 Applying host Nginx SSL configuration..."
-    cp host_nginx_bullsandbears_ssl.conf /etc/nginx/sites-available/$DOMAIN
-    ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
-    
-    # Test and start/reload host nginx if no port conflict
-    if nginx -t 2>/dev/null; then
-        systemctl start nginx 2>/dev/null || systemctl reload nginx 2>/dev/null || true
-    fi
-fi
+cp host_nginx_bullsandbears_ssl.conf /etc/nginx/sites-available/$DOMAIN
+ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
+
+# Remove default nginx site if it conflicts with port 80
+rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+
+# Test Nginx configuration
+echo "🧪 Testing Nginx configuration..."
+nginx -t
+
+# 6. Restart/Reload Nginx
+echo "🚀 Starting Nginx..."
+systemctl restart nginx || systemctl reload nginx
+
+# 7. Verify Docker services are running
+echo "🐳 Ensuring Docker application services are up..."
+docker compose up -d
 
 echo ""
 echo "=================================================================="
 echo "🎉 SSL Certificate Successfully Installed & Active!"
-echo "🌐 Visit your secure HTTPS site: https://$DOMAIN"
+echo "🌐 Secure URL: https://$DOMAIN"
 echo "=================================================================="
