@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { useForecastQuery } from "@/hooks/useCryptoData";
 import { formatUsd } from "@/lib/utils";
 import { useWatchlist } from "@/hooks/useWatchlist";
@@ -12,6 +12,17 @@ export default function RadarTable() {
   const { isStarred, toggleWatchlist } = useWatchlist();
   const [selectedCoin, setSelectedCoin] = useState<{ symbol: string; price?: number } | null>(null);
   const leaderboard = forecast?.scanner_leaderboard || [];
+
+  // Always show Starred / Active Trade coins at the TOP, followed by the original algorithmic rank
+  const sortedLeaderboard = useMemo(() => {
+    return [...leaderboard].sort((a: any, b: any) => {
+      const aStarred = isStarred(a.symbol);
+      const bStarred = isStarred(b.symbol);
+      if (aStarred && !bStarred) return -1;
+      if (!aStarred && bStarred) return 1;
+      return 0; // maintains algorithmic order within starred and unstarred groups
+    });
+  }, [leaderboard, isStarred]);
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">
@@ -34,7 +45,8 @@ export default function RadarTable() {
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
             Cross-asset directional alignment & multi-scale confluence setup scanner.{" "}
-            <span className="text-cyan-400 font-semibold">Click any coin to view its 15-minute historical signal records.</span>
+            <span className="text-amber-400 font-semibold">⭐ Starred coins pinned to top.</span>{" "}
+            <span className="text-cyan-400 font-semibold">Click any coin to view 15-minute historical records.</span>
           </p>
         </div>
       </div>
@@ -43,7 +55,7 @@ export default function RadarTable() {
         <div className="py-8 text-center text-xs text-slate-500 font-mono">
           Scanning multi-horizon opportunities across assets...
         </div>
-      ) : leaderboard.length === 0 ? (
+      ) : sortedLeaderboard.length === 0 ? (
         <div className="py-8 text-center text-xs text-slate-500 font-sans">
           No scanner results available for this round.
         </div>
@@ -61,7 +73,7 @@ export default function RadarTable() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 bg-dark-950/40">
-              {leaderboard.map((item: any, idx: number) => {
+              {sortedLeaderboard.map((item: any, idx: number) => {
                 const s = item.horizons?.scalp || {};
                 const w = item.horizons?.swing || {};
                 const m = item.horizons?.macro || {};
@@ -92,7 +104,11 @@ export default function RadarTable() {
                   <tr
                     key={item.symbol || idx}
                     onClick={() => setSelectedCoin({ symbol: item.symbol, price: item.current_price })}
-                    className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
+                    className={`cursor-pointer transition-colors group ${
+                      starred
+                        ? "bg-amber-950/20 hover:bg-amber-950/35 border-l-2 border-l-amber-500"
+                        : "hover:bg-slate-800/60"
+                    }`}
                     title="Click to view 15-minute historical signal records for this coin"
                   >
                     {/* Asset */}

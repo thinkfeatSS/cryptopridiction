@@ -42,9 +42,18 @@ export default function AssetPredictionMatrix() {
     if (selectedHorizon === "watchlist") {
       list = list.filter((item: any) => isStarred(item.symbol));
     }
-    if (!search.trim()) return list;
-    const q = search.toLowerCase().trim();
-    return list.filter((item: any) => item.symbol?.toLowerCase().includes(q));
+    if (search.trim()) {
+      const q = search.toLowerCase().trim();
+      list = list.filter((item: any) => item.symbol?.toLowerCase().includes(q));
+    }
+    // Always pin starred / active trade assets at the top while preserving rank
+    return [...list].sort((a: any, b: any) => {
+      const aStarred = isStarred(a.symbol);
+      const bStarred = isStarred(b.symbol);
+      if (aStarred && !bStarred) return -1;
+      if (!aStarred && bStarred) return 1;
+      return 0;
+    });
   }, [leaderboard, search, selectedHorizon, isStarred]);
 
   const horizonTabs: { key: HorizonKey; label: string }[] = useMemo(
