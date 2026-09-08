@@ -16,9 +16,11 @@ _LAST_SYNC_TIMES = {
     "forecast": 0.0,
 }
 _LAST_CHECK_TIME = 0.0
-_SCAN_VERSION = 1
+_FULL_SCAN_VERSION = 1
+_PORTFOLIO_VERSION = 1
 _LAST_SCAN_TIMESTAMP = datetime.now(timezone.utc).isoformat()
 _CACHED_FORECAST = None
+_IS_SCANNING = False
 
 def init_db():
     """Creates all database tables in MySQL / SQLite and applies schema updates."""
@@ -38,11 +40,30 @@ def init_db():
     except Exception as e:
         print(f"[DATABASE ERROR] Table creation error: {e}")
 
+def get_daemon_state():
+    """Reads lightweight scanner daemon state file if available."""
+    global _IS_SCANNING
+    state_file = os.path.join(settings.EXPORT_DIR, "scanner_daemon_state.json")
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                _IS_SCANNING = bool(data.get("is_scanning", False))
+                return data
+        except Exception:
+            pass
+    return {"is_scanning": _IS_SCANNING, "scan_status": "IDLE"}
+
 def get_sync_state():
-    """Returns the current scan version and last scan timestamp."""
-    global _SCAN_VERSION, _LAST_SCAN_TIMESTAMP
+    """Returns the current full scan version, portfolio version, scanning state, and last scan timestamp."""
+    global _FULL_SCAN_VERSION, _PORTFOLIO_VERSION, _LAST_SCAN_TIMESTAMP, _IS_SCANNING
+    d_state = get_daemon_state()
     return {
-        "scan_version": _SCAN_VERSION,
+        "scan_version": _FULL_SCAN_VERSION,
+        "full_scan_version": _FULL_SCAN_VERSION,
+        "portfolio_version": _PORTFOLIO_VERSION,
+        "is_scanning": d_state.get("is_scanning", _IS_SCANNING),
+        "scan_status": d_state.get("scan_status", "IDLE"),
         "last_scan_timestamp": _LAST_SCAN_TIMESTAMP,
     }
 
@@ -62,7 +83,7 @@ def sync_files_to_db_live(force: bool = False) -> bool:
     Detects if CSV or JSON files have been modified by test.py,
     and updates the database tables using bulk mappings.
     """
-    global _LAST_SYNC_TIMES, _LAST_CHECK_TIME, _SCAN_VERSION, _LAST_SCAN_TIMESTAMP, _CACHED_FORECAST
+    global _LAST_SYNC_TIMES, _LAST_CHECK_TIME, _FULL_SCAN_VERSION, _PORTFOLIO_VERSION, _LAST_SCAN_TIMESTAMP, _CACHED_FORECAST
     now_ts = time.time()
     
     # Cooldown check (skip disk stats if checked less than 2.0s ago unless forced)
@@ -75,7 +96,8 @@ def sync_files_to_db_live(force: bool = False) -> bool:
     portfolio_json = os.path.join(export_dir, "paper_trading_ledger.json")
     forecast_json = os.path.join(export_dir, "live_market_forecast.json")
 
-    changed = False
+    portfolio_changed = False
+    forecast_changed = False
 
     csv_mtime = os.path.getmtime(signals_csv) if os.path.exists(signals_csv) else 0.0
     portfolio_mtime = os.path.getmtime(portfolio_json) if os.path.exists(portfolio_json) else 0.0
@@ -172,7 +194,7 @@ def sync_files_to_db_live(force: bool = False) -> bool:
 
                 db.commit()
                 _LAST_SYNC_TIMES["csv"] = csv_mtime
-                changed = True
+                portfolio_changed = True
             except Exception as e:
                 db.rollback()
                 print(f"[LIVE SYNC ERROR] Signals CSV sync: {e}")
@@ -232,7 +254,7 @@ def sync_files_to_db_live(force: bool = False) -> bool:
 
                 db.commit()
                 _LAST_SYNC_TIMES["portfolio"] = portfolio_mtime
-                changed = True
+                portfolio_changed = True
             except Exception as e:
                 db.rollback()
                 print(f"[LIVE SYNC ERROR] Portfolio sync: {e}")
@@ -261,16 +283,19 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                     db.commit()
 
                 _LAST_SYNC_TIMES["forecast"] = forecast_mtime
-                changed = True
+                forecast_changed = True
             except Exception as e:
                 db.rollback()
                 print(f"[LIVE SYNC ERROR] Forecast sync: {e}")
 
-        if changed:
-            _SCAN_VERSION += 1
-            print(f"[LIVE SYNC ⚡] Database synchronized to Scan Version v{_SCAN_VERSION} ({_LAST_SCAN_TIMESTAMP}).")
+        if forecast_changed:
+            _FULL_SCAN_VERSION += 1
+            print(f"[LIVE SYNC ⚡] Full AI 100-Coin Scan Synchronized to Scan Version v{_FULL_SCAN_VERSION} ({_LAST_SCAN_TIMESTAMP}).")
+        
+        if portfolio_changed:
+            _PORTFOLIO_VERSION += 1
 
-        return changed
+        return forecast_changed or portfolio_changed
     finally:
         db.close()
 

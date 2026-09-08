@@ -311,13 +311,19 @@ class SignalService:
             except Exception:
                 pass
 
+        is_scanning = bool(sync_state.get("is_scanning", False))
+
         return {
             "status": "HEALTHY",
             "is_engine_active": True,
+            "is_scanning": is_scanning,
+            "scan_status": sync_state.get("scan_status", "IDLE"),
             "current_time_utc": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "next_scan_utc": next_scan_time,
             "seconds_to_next_scan": secs_remaining,
-            "scan_version": sync_state["scan_version"],
+            "scan_version": sync_state["full_scan_version"],
+            "full_scan_version": sync_state["full_scan_version"],
+            "portfolio_version": sync_state["portfolio_version"],
             "last_scan_timestamp": sync_state["last_scan_timestamp"],
             "btc_market_shield": shield_status,
         }

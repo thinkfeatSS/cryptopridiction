@@ -2765,6 +2765,19 @@ class HybridQuantEngine:
         # Clear cache to guarantee fresh live candles from exchange
         self.loader._cache.clear()
 
+        # Publish scanner daemon state: SCANNING
+        try:
+            state_path = os.path.join(self.config['app_export_dir'], "scanner_daemon_state.json")
+            with open(state_path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump({
+                    "is_scanning": True,
+                    "scan_status": "SCANNING",
+                    "scan_started_at": datetime.now(timezone.utc).isoformat(),
+                }, f)
+            os.replace(state_path + ".tmp", state_path)
+        except Exception:
+            pass
+
         mode = self.config.get("mode", "both").lower()
         print(f"\n==========================================================================================")
         print(f" 🚀 RUNNING MULTI-HORIZON QUANT ENGINE (V15.0): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -2796,7 +2809,7 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
-            max_threads = min(12, len(symbols_to_scan))
+            max_threads = min(24, len(symbols_to_scan))
             with ThreadPoolExecutor(max_workers=max_threads) as executor:
                 future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in symbols_to_scan}
                 for future in as_completed(future_to_sym):
@@ -3356,9 +3369,24 @@ class HybridQuantEngine:
             "paper_portfolio": self.ledger.data
         }
         json_path = os.path.join(self.config['app_export_dir'], "live_market_forecast.json")
-        with open(json_path, 'w') as f:
+        temp_path = json_path + ".tmp"
+        with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(payload, f, indent=4, default=str)
+        os.replace(temp_path, json_path)
         print(f"📦 Web-App Ready JSON Data Exported to: {os.path.abspath(json_path)}\n")
+
+        # Publish scanner daemon state: IDLE
+        try:
+            state_path = os.path.join(self.config['app_export_dir'], "scanner_daemon_state.json")
+            with open(state_path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump({
+                    "is_scanning": False,
+                    "scan_status": "IDLE",
+                    "last_scan_completed_at": datetime.now(timezone.utc).isoformat(),
+                }, f)
+            os.replace(state_path + ".tmp", state_path)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

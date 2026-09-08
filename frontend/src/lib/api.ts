@@ -72,10 +72,14 @@ export interface BtcMarketShield {
 export interface EngineStatus {
   status: string;
   is_engine_active: boolean;
+  is_scanning?: boolean;
+  scan_status?: string;
   current_time_utc: string;
   next_scan_utc: string;
   seconds_to_next_scan: number;
   scan_version?: number;
+  full_scan_version?: number;
+  portfolio_version?: number;
   last_scan_timestamp?: string;
   btc_market_shield?: BtcMarketShield;
 }
