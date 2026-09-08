@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 import { formatPercent, formatUsd } from "@/lib/utils";
 import SignalShareModal from "@/components/SignalShareModal";
+import CoinSignalHistoryModal from "@/components/CoinSignalHistoryModal";
 import {
   ArrowUpRight,
   ArrowDownRight,
@@ -13,6 +14,7 @@ import {
   Layers,
   Clock,
   Share2,
+  History,
 } from "lucide-react";
 
 interface SignalCardProps {
@@ -22,6 +24,7 @@ interface SignalCardProps {
 
 export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
   const [showShareModal, setShowShareModal] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
 
   const isLong = signal.direction === "LONG" || signal.direction === "BULLISH";
   const gradeStr = signal.quality_grade || signal.grade || "Grade A";
@@ -43,6 +46,14 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
     <>
       {showShareModal && (
         <SignalShareModal signal={signal} onClose={() => setShowShareModal(false)} />
+      )}
+
+      {showHistoryModal && (
+        <CoinSignalHistoryModal
+          symbol={signal.symbol}
+          currentPrice={entryPrice}
+          onClose={() => setShowHistoryModal(false)}
+        />
       )}
 
       <div
@@ -78,7 +89,19 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
           </div>
 
           <div className="flex items-center gap-1.5">
+            {/* 15M History Button */}
             <button
+              type="button"
+              onClick={() => setShowHistoryModal(true)}
+              className="px-2 py-1 rounded-lg bg-dark-900 border border-slate-800 hover:border-cyan-500 text-cyan-400 hover:text-cyan-300 hover:bg-cyan-950/60 transition-all text-xs font-semibold flex items-center gap-1"
+              title="View 15-Minute Historical Signal Records for this coin"
+            >
+              <History className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">15M History</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setShowShareModal(true)}
               className="p-1.5 rounded-lg bg-dark-900 border border-slate-800 text-slate-400 hover:text-cyan-300 hover:border-cyan-600 transition-all"
               title="Share / Export Signal Card"
@@ -103,8 +126,13 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
         {/* Asset & Horizon Bar */}
         <div className="mt-3.5 flex items-center justify-between">
           <div>
-            <h3 className="text-xl font-black tracking-tight text-white flex items-center gap-1.5">
+            <h3
+              onClick={() => setShowHistoryModal(true)}
+              className="text-xl font-black tracking-tight text-white flex items-center gap-1.5 cursor-pointer hover:text-cyan-400 transition-colors group"
+              title="Click to view historical signals for this coin"
+            >
               {signal.symbol}
+              <History className="h-3.5 w-3.5 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
             </h3>
             <span className="text-xs text-slate-400 flex items-center gap-1 mt-0.5">
               <Clock className="h-3 w-3 text-cyan-400" /> {horizon}
@@ -167,17 +195,29 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
           </div>
         </div>
 
-        {/* Invalidation & Execution Decision */}
-        <div className="mt-3.5 flex items-start gap-2 rounded-lg bg-dark-950/80 p-2.5 border border-slate-800/60 text-xs">
-          <ShieldAlert className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
-          <div className="flex flex-col">
-            <span className="font-semibold text-slate-200">
-              {signal.decision || "🎯 INSTITUTIONAL EXECUTION SIGNAL"}
-            </span>
-            <span className="text-[11px] text-slate-400 mt-0.5">
-              Risk: Strict 1–2% per trade. Move SL to Breakeven after TP1 touch.
-            </span>
+        {/* Invalidation & Execution Decision + 15M History Footer */}
+        <div className="mt-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 rounded-lg bg-dark-950/80 p-2.5 border border-slate-800/60 text-xs">
+          <div className="flex items-start gap-2">
+            <ShieldAlert className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="flex flex-col">
+              <span className="font-semibold text-slate-200">
+                {signal.decision || "🎯 INSTITUTIONAL EXECUTION SIGNAL"}
+              </span>
+              <span className="text-[11px] text-slate-400 mt-0.5">
+                Risk: Strict 1–2% per trade. Move SL to Breakeven after TP1 touch.
+              </span>
+            </div>
           </div>
+
+          <button
+            type="button"
+            onClick={() => setShowHistoryModal(true)}
+            className="self-end sm:self-center shrink-0 px-2.5 py-1 rounded-md bg-cyan-950/60 hover:bg-cyan-900/80 text-cyan-300 border border-cyan-700/60 hover:border-cyan-400 transition-all text-[11px] font-semibold flex items-center gap-1.5"
+            title="View full 15-minute historical signal records"
+          >
+            <History className="h-3.5 w-3.5 text-cyan-400" />
+            15M History
+          </button>
         </div>
       </div>
     </>
