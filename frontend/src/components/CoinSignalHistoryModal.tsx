@@ -64,13 +64,12 @@ export default function CoinSignalHistoryModal({
     }
   }, [symbol, onClose]);
 
-  if (!symbol || !mounted) return null;
-
-  const starred = isStarred(symbol);
+  const starred = symbol ? isStarred(symbol) : false;
   const latestSignal = signals.length > 0 ? signals[0] : null;
 
-  // Memoize filtered signals
+  // Memoize filtered signals unconditionally to adhere to React Rules of Hooks
   const filteredSignals = useMemo(() => {
+    if (!signals) return [];
     return signals.filter((sig) => {
       if (outcomeFilter !== "ALL") {
         const outcome = (sig.outcome_label || sig.status || "").toUpperCase();
@@ -86,8 +85,9 @@ export default function CoinSignalHistoryModal({
     });
   }, [signals, outcomeFilter, horizonFilter]);
 
-  // Memoize Coin-level stats
+  // Memoize Coin-level stats unconditionally
   const { total, wonCount, lostCount, pendingCount, winRate } = useMemo(() => {
+    if (!signals) return { total: 0, wonCount: 0, lostCount: 0, pendingCount: 0, winRate: "0.0" };
     const tot = signals.length;
     const won = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("WON")).length;
     const lost = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("LOST")).length;
@@ -96,6 +96,8 @@ export default function CoinSignalHistoryModal({
     const wr = decisive > 0 ? ((won / decisive) * 100).toFixed(1) : "0.0";
     return { total: tot, wonCount: won, lostCount: lost, pendingCount: pending, winRate: wr };
   }, [signals]);
+
+  if (!symbol || !mounted) return null;
 
   const getOutcomeBadge = (sig: any) => {
     const outcomeStr = (sig.outcome_label || sig.status || "").toUpperCase();
