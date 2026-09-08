@@ -2631,6 +2631,18 @@ class HybridQuantEngine:
             f"📈 RISK-TO-REWARD RATIO: 1:2"
         )
 
+        meta_win_prob = self.meta_classifier.predict_win_probability({
+            "conviction": h_conf,
+            "grade": "Grade A+" if h_conf >= 78.0 else "Grade A",
+            "exp_return": exp_ret,
+            "horizon_key": horizon_key,
+            "direction": h_dir,
+            "decision": decision,
+            "entry_price": current_price,
+            "tp1_price": tp1_p,
+            "sl_price": sl_p
+        })
+
         res = {
             "symbol": symbol,
             "horizon_name": h_cfg['name'],
@@ -2644,6 +2656,8 @@ class HybridQuantEngine:
             "predicted_window_str": predicted_window_str,
             "direction": h_dir,
             "conviction": h_conf,
+            "meta_win_prob": meta_win_prob,
+            "meta_win_prob_pct": round(meta_win_prob * 100.0, 1),
             "exp_return": exp_ret,
             "projected_target": projected_target,
             "tp_price": tp_p,
