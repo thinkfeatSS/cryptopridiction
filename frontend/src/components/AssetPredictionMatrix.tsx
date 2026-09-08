@@ -76,48 +76,24 @@ export default function AssetPredictionMatrix() {
         />
       )}
 
-      {/* Header with Live 15-Minute Scan Countdown */}
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between border-b border-slate-800/80 pb-5">
+      {/* Clean Matrix Header */}
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between border-b border-slate-800/80 pb-4">
         <div>
           <div className="flex items-center gap-2.5">
             <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
               <Zap className="h-5 w-5 text-cyan-400" />
               Complete Top 100-Asset Market Prediction Matrix
             </h2>
-            <span className="rounded-md bg-dark-900 px-2 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50">
+            <span className="rounded-md bg-dark-900 px-2.5 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50">
               {leaderboard.length || 100} Assets Scanned
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
             Multi-horizon AI predictions, entry prices, 1:2 R:R targets, and confluence grading across Top 100 crypto assets.{" "}
-            <span className="text-cyan-400 font-semibold underline decoration-dotted cursor-pointer">
-              Click any coin to view its 15-minute historical signal records.
+            <span className="text-cyan-400 font-semibold underline decoration-dotted">
+              Click any coin row to view its 15-minute historical audit records.
             </span>
           </p>
-        </div>
-
-        {/* Live Refresh Timer Ring & Shield Status */}
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Market Beta Shield Badge */}
-          <div
-            className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-xs shadow-md transition-all ${
-              (status?.btc_market_shield?.active || forecast?.btc_market_shield?.active)
-                ? "border-amber-500/50 bg-amber-950/40 text-amber-300 shadow-amber-500/10"
-                : "border-slate-800 bg-dark-900/90 text-slate-300 shadow-cyan-500/5"
-            }`}
-          >
-            <ShieldAlert className="h-4 w-4 text-cyan-400 shrink-0" />
-            <div className="flex flex-col">
-              <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">
-                [SHIELD 🛡️] Market Beta Status
-              </span>
-              <span className="font-mono text-xs font-bold text-white">
-                {status?.btc_market_shield?.reason || forecast?.btc_market_shield?.reason || "NORMAL (Market Stable)"}
-              </span>
-            </div>
-          </div>
-
-          <ScanCountdownBadge />
         </div>
       </div>
 
