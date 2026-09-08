@@ -4,7 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useStatusQuery } from "@/hooks/useCryptoData";
 import { playSignalChime } from "@/lib/audioAlerts";
-import { Zap, CheckCircle2 } from "lucide-react";
+import { Zap, CheckCircle2, X } from "lucide-react";
 
 export default function AutoScanWatcher() {
   const queryClient = useQueryClient();
@@ -95,17 +95,25 @@ export default function AutoScanWatcher() {
   if (!showSyncBadge) return null;
 
   return (
-    <div className="fixed bottom-5 right-5 z-50 flex items-center gap-2.5 rounded-xl bg-cyan-950/95 px-4 py-2.5 text-xs font-bold text-cyan-300 border border-cyan-500/60 shadow-xl shadow-cyan-500/20 backdrop-blur-md animate-in slide-in-from-bottom-5 fade-in duration-300">
-      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-cyan-500/20 text-cyan-400">
-        <Zap className="h-3.5 w-3.5 animate-bounce" />
-      </span>
-      <div className="flex flex-col">
-        <span className="text-white font-black">{syncMessage}</span>
-        <span className="text-[10px] text-cyan-400 font-mono">
-          All 100 Assets & 8 Horizons Synchronized with DB
+    <div className="fixed bottom-4 sm:bottom-6 right-4 sm:right-6 left-4 sm:left-auto z-50 flex items-center justify-between gap-3 rounded-2xl bg-dark-950/95 px-4 py-3 text-xs font-bold text-cyan-300 border border-cyan-500/50 shadow-2xl shadow-cyan-500/20 backdrop-blur-xl animate-in slide-in-from-bottom-5 fade-in duration-300 max-w-sm sm:max-w-md">
+      <div className="flex items-center gap-3">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-cyan-500/20 text-cyan-400 shadow-inner">
+          <Zap className="h-4 w-4 animate-bounce" />
         </span>
+        <div className="flex flex-col">
+          <span className="text-white font-black tracking-wide text-xs sm:text-sm">{syncMessage}</span>
+          <span className="text-[10px] text-cyan-400 font-mono flex items-center gap-1 mt-0.5">
+            <CheckCircle2 className="h-3 w-3 text-emerald-400 inline" /> All 100 Assets & 8 Horizons Synced
+          </span>
+        </div>
       </div>
-      <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 ml-1" />
+      <button
+        onClick={() => setShowSyncBadge(false)}
+        className="rounded-lg p-1 text-slate-400 hover:text-white hover:bg-slate-800 transition-colors shrink-0 ml-1"
+        title="Dismiss"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
     </div>
   );
 }

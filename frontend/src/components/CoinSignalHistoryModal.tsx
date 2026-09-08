@@ -109,39 +109,42 @@ export default function CoinSignalHistoryModal({
         <SignalShareModal signal={sharingSignal} onClose={() => setSharingSignal(null)} />
       )}
 
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-3 sm:p-6 animate-in fade-in duration-200">
-        <div className="relative w-full max-w-6xl max-h-[92vh] flex flex-col rounded-2xl bg-dark-950 border border-slate-800 shadow-2xl shadow-cyan-500/10 overflow-hidden">
+      <div
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-lg p-2.5 sm:p-4 md:p-6 animate-in fade-in duration-200"
+      >
+        <div className="relative w-full max-w-5xl xl:max-w-6xl max-h-[92vh] flex flex-col rounded-2xl bg-dark-950 border border-slate-700/60 shadow-2xl shadow-cyan-950/40 overflow-hidden transform animate-in zoom-in-95 duration-200">
           {/* Header */}
-          <div className="flex items-center justify-between border-b border-slate-800/80 px-6 py-4 bg-dark-900/80">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-950 border border-cyan-700/50 text-cyan-400">
-                  <Zap className="h-5 w-5" />
-                </span>
-                <div>
-                  <div className="flex items-center gap-2.5">
-                    <h2 className="text-xl font-black text-white">{symbol}</h2>
-                    <button
-                      onClick={() => toggleWatchlist(symbol)}
-                      className={`p-1 rounded-lg border transition-all ${
-                        starred
-                          ? "bg-amber-500/20 border-amber-500/50 text-amber-400"
-                          : "bg-dark-900 border-slate-800 text-slate-500 hover:text-amber-400"
-                      }`}
-                      title={starred ? "Remove from Watchlist" : "Add to Watchlist"}
-                    >
-                      <Star className={`h-4 w-4 ${starred ? "fill-amber-400 text-amber-400" : ""}`} />
-                    </button>
-                    {currentPrice ? (
-                      <span className="font-mono text-sm font-bold text-cyan-400">
-                        {formatUsd(currentPrice)}
-                      </span>
-                    ) : null}
-                  </div>
-                  <p className="text-xs text-slate-400">
-                    Chronological 15-Minute Signal History & Real-Time Performance Audit
-                  </p>
+          <div className="flex items-center justify-between border-b border-slate-800/80 px-4 sm:px-6 py-3.5 bg-dark-900/90 backdrop-blur-md sticky top-0 z-20">
+            <div className="flex items-center gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-cyan-950 border border-cyan-500/40 text-cyan-400 shadow-sm shadow-cyan-500/20">
+                <Zap className="h-5 w-5" />
+              </span>
+              <div>
+                <div className="flex items-center gap-2 sm:gap-2.5 flex-wrap">
+                  <h2 className="text-lg sm:text-xl font-black text-white">{symbol}</h2>
+                  <button
+                    onClick={() => toggleWatchlist(symbol)}
+                    className={`p-1 rounded-lg border transition-all ${
+                      starred
+                        ? "bg-amber-500/20 border-amber-500/50 text-amber-400"
+                        : "bg-dark-900 border-slate-800 text-slate-500 hover:text-amber-400"
+                    }`}
+                    title={starred ? "Remove from Watchlist" : "Add to Watchlist"}
+                  >
+                    <Star className={`h-4 w-4 ${starred ? "fill-amber-400 text-amber-400" : ""}`} />
+                  </button>
+                  {currentPrice ? (
+                    <span className="font-mono text-xs sm:text-sm font-bold text-cyan-400 px-2 py-0.5 rounded bg-cyan-950/80 border border-cyan-800/50">
+                      {formatUsd(currentPrice)}
+                    </span>
+                  ) : null}
                 </div>
+                <p className="text-[11px] text-slate-400 hidden sm:block">
+                  Chronological 15-Minute Signal History & Real-Time Performance Audit
+                </p>
               </div>
             </div>
 
@@ -149,15 +152,16 @@ export default function CoinSignalHistoryModal({
               {latestSignal && (
                 <button
                   onClick={() => setSharingSignal({ ...latestSignal, symbol, current_price: currentPrice })}
-                  className="flex items-center gap-1.5 rounded-xl bg-cyan-950/80 px-3 py-1.5 text-xs font-semibold text-cyan-300 border border-cyan-700/60 hover:bg-cyan-900 transition-colors shadow-sm"
+                  className="flex items-center gap-1.5 rounded-xl bg-cyan-950/80 px-3 py-1.5 text-xs font-bold text-cyan-300 border border-cyan-700/60 hover:bg-cyan-900 transition-colors shadow-sm"
                 >
                   <Share2 className="h-3.5 w-3.5" />
-                  Share Signal
+                  <span className="hidden sm:inline">Share Signal</span>
                 </button>
               )}
               <button
                 onClick={onClose}
                 className="rounded-xl p-2 text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors"
+                title="Close (Esc)"
               >
                 <X className="h-5 w-5" />
               </button>
