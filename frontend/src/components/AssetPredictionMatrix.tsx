@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import { useForecastQuery, useStatusQuery } from "@/hooks/useCryptoData";
-import { formatPercent, formatUsd, formatTimeRemaining } from "@/lib/utils";
+import { formatPercent, formatUsd } from "@/lib/utils";
 import CoinSignalHistoryModal from "@/components/CoinSignalHistoryModal";
+import ScanCountdownBadge from "@/components/ScanCountdownBadge";
 import {
   Sparkles,
   Radio,
@@ -28,41 +29,32 @@ export default function AssetPredictionMatrix() {
   const { data: status } = useStatusQuery();
   const [selectedHorizon, setSelectedHorizon] = useState<HorizonKey>("all");
   const [search, setSearch] = useState("");
-  const [localSeconds, setLocalSeconds] = useState<number>(0);
   const [selectedCoin, setSelectedCoin] = useState<{ symbol: string; price?: number } | null>(null);
 
-  const leaderboard = forecast?.scanner_leaderboard || [];
+  const leaderboard = useMemo(() => forecast?.scanner_leaderboard || [], [forecast?.scanner_leaderboard]);
 
-  // Countdown timer synchronization
-  useEffect(() => {
-    if (status?.seconds_to_next_scan !== undefined) {
-      setLocalSeconds(status.seconds_to_next_scan);
-    }
-  }, [status?.seconds_to_next_scan]);
+  const filteredAssets = useMemo(() => {
+    if (!search.trim()) return leaderboard;
+    const q = search.toLowerCase().trim();
+    return leaderboard.filter((item: any) => item.symbol?.toLowerCase().includes(q));
+  }, [leaderboard, search]);
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setLocalSeconds((prev) => (prev > 0 ? prev - 1 : 900));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
+  const horizonTabs: { key: HorizonKey; label: string }[] = useMemo(
+    () => [
+      { key: "all", label: "All Horizons" },
+      { key: "scalp", label: "⚡ Scalp (15M)" },
+      { key: "swing", label: "🌊 Swing (1H)" },
+      { key: "macro", label: "🚀 Macro (24H)" },
+      { key: "horizon_2d", label: "🔮 2-Day (48H)" },
+      { key: "horizon_3d", label: "🔭 3-Day (72H)" },
+      { key: "weekly", label: "🗓️ Weekly (7D)" },
+      { key: "biweekly", label: "🌕 Bi-Weekly (15D)" },
+      { key: "monthly", label: "🪐 Monthly (30D)" },
+    ],
+    []
+  );
 
-  const filteredAssets = leaderboard.filter((item: any) => {
-    if (!search) return true;
-    return item.symbol.toLowerCase().includes(search.toLowerCase().trim());
-  });
-
-  const horizonTabs: { key: HorizonKey; label: string }[] = [
-    { key: "all", label: "All Horizons" },
-    { key: "scalp", label: "⚡ Scalp (15M)" },
-    { key: "swing", label: "🌊 Swing (1H)" },
-    { key: "macro", label: "🚀 Macro (24H)" },
-    { key: "horizon_2d", label: "🔮 2-Day (48H)" },
-    { key: "horizon_3d", label: "🔭 3-Day (72H)" },
-    { key: "weekly", label: "🗓️ Weekly (7D)" },
-    { key: "biweekly", label: "🌕 Bi-Weekly (15D)" },
-    { key: "monthly", label: "🪐 Monthly (30D)" },
-  ];
+  const handleCloseModal = useCallback(() => setSelectedCoin(null), []);
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">
@@ -71,7 +63,7 @@ export default function AssetPredictionMatrix() {
         <CoinSignalHistoryModal
           symbol={selectedCoin.symbol}
           currentPrice={selectedCoin.price}
-          onClose={() => setSelectedCoin(null)}
+          onClose={handleCloseModal}
         />
       )}
 
@@ -116,20 +108,7 @@ export default function AssetPredictionMatrix() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5 rounded-xl border border-cyan-500/40 bg-cyan-950/40 px-3.5 py-2 text-xs shadow-lg shadow-cyan-500/10">
-            <div className="relative flex h-3 w-3">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75"></span>
-              <span className="relative inline-flex h-3 w-3 rounded-full bg-cyan-500"></span>
-            </div>
-            <div className="flex flex-col">
-              <span className="text-[10px] uppercase font-bold tracking-wider text-cyan-300">
-                Next AI Scan & Refresh In
-              </span>
-              <span className="font-mono text-sm font-black text-white">
-                {formatTimeRemaining(localSeconds)}
-              </span>
-            </div>
-          </div>
+          <ScanCountdownBadge />
         </div>
       </div>
 

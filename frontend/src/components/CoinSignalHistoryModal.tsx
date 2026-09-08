@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { useCoinSignalsQuery } from "@/hooks/useCryptoData";
 import { formatUsd, formatPercent } from "@/lib/utils";
 import {
@@ -36,28 +36,33 @@ export default function CoinSignalHistoryModal({
 
   if (!symbol) return null;
 
-  // Filter signals
-  const filteredSignals = signals.filter((sig) => {
-    if (outcomeFilter !== "ALL") {
-      const outcome = (sig.outcome_label || sig.status || "").toUpperCase();
-      if (outcomeFilter === "WON" && !outcome.includes("WON")) return false;
-      if (outcomeFilter === "LOST" && !outcome.includes("LOST")) return false;
-      if (outcomeFilter === "PENDING" && !outcome.includes("PENDING")) return false;
-    }
-    if (horizonFilter !== "ALL") {
-      const h = (sig.horizon || "").toUpperCase();
-      if (!h.includes(horizonFilter.toUpperCase())) return false;
-    }
-    return true;
-  });
+  // Memoize filtered signals
+  const filteredSignals = useMemo(() => {
+    return signals.filter((sig) => {
+      if (outcomeFilter !== "ALL") {
+        const outcome = (sig.outcome_label || sig.status || "").toUpperCase();
+        if (outcomeFilter === "WON" && !outcome.includes("WON")) return false;
+        if (outcomeFilter === "LOST" && !outcome.includes("LOST")) return false;
+        if (outcomeFilter === "PENDING" && !outcome.includes("PENDING")) return false;
+      }
+      if (horizonFilter !== "ALL") {
+        const h = (sig.horizon || "").toUpperCase();
+        if (!h.includes(horizonFilter.toUpperCase())) return false;
+      }
+      return true;
+    });
+  }, [signals, outcomeFilter, horizonFilter]);
 
-  // Calculate Coin-level stats
-  const total = signals.length;
-  const wonCount = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("WON")).length;
-  const lostCount = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("LOST")).length;
-  const pendingCount = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("PENDING")).length;
-  const decisive = wonCount + lostCount;
-  const winRate = decisive > 0 ? ((wonCount / decisive) * 100).toFixed(1) : "0.0";
+  // Memoize Coin-level stats
+  const { total, wonCount, lostCount, pendingCount, winRate } = useMemo(() => {
+    const tot = signals.length;
+    const won = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("WON")).length;
+    const lost = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("LOST")).length;
+    const pending = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("PENDING")).length;
+    const decisive = won + lost;
+    const wr = decisive > 0 ? ((won / decisive) * 100).toFixed(1) : "0.0";
+    return { total: tot, wonCount: won, lostCount: lost, pendingCount: pending, winRate: wr };
+  }, [signals]);
 
   const getOutcomeBadge = (sig: any) => {
     const outcomeStr = (sig.outcome_label || sig.status || "").toUpperCase();

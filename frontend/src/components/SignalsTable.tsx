@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import { useSignalsQuery, useDailySummaryQuery } from "@/hooks/useCryptoData";
 import { formatPercent, formatUsd } from "@/lib/utils";
 import {
@@ -33,23 +33,29 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
   const pageSize = 20;
 
   const { data: dailyData } = useDailySummaryQuery();
-  const { data, isLoading, isFetching, refetch } = useSignalsQuery({
-    search: search || undefined,
-    date: dateFilter || undefined,
-    outcome: outcomeFilter || undefined,
-    grade: gradeFilter || undefined,
-    horizon: horizonFilter || undefined,
-    limit: pageSize,
-    offset: page * pageSize,
-  });
 
-  const signals = data?.signals || [];
+  const queryParams = useMemo(
+    () => ({
+      search: search || undefined,
+      date: dateFilter || undefined,
+      outcome: outcomeFilter || undefined,
+      grade: gradeFilter || undefined,
+      horizon: horizonFilter || undefined,
+      limit: pageSize,
+      offset: page * pageSize,
+    }),
+    [search, dateFilter, outcomeFilter, gradeFilter, horizonFilter, page]
+  );
+
+  const { data, isLoading, isFetching, refetch } = useSignalsQuery(queryParams);
+
+  const signals = useMemo(() => data?.signals || [], [data?.signals]);
   const total = data?.total || 0;
   const totalPages = Math.ceil(total / pageSize);
 
-  const handleDownloadCsv = () => {
+  const handleDownloadCsv = useCallback(() => {
     window.open("/api/signals/download-csv", "_blank");
-  };
+  }, []);
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">

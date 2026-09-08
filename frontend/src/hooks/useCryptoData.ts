@@ -15,7 +15,8 @@ export function useKpiQuery() {
   return useQuery({
     queryKey: ["kpi"],
     queryFn: fetchKpi,
-    refetchInterval: 5000,
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
 }
 
@@ -23,7 +24,8 @@ export function useDailySummaryQuery() {
   return useQuery({
     queryKey: ["dailySummary"],
     queryFn: fetchDailySummary,
-    refetchInterval: 8000,
+    refetchInterval: 15000,
+    staleTime: 8000,
   });
 }
 
@@ -39,7 +41,8 @@ export function useSignalsQuery(params?: {
   return useQuery({
     queryKey: ["signals", params],
     queryFn: () => fetchSignals(params),
-    refetchInterval: 5000,
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
 }
 
@@ -48,7 +51,8 @@ export function useCoinSignalsQuery(symbol?: string) {
     queryKey: ["coinSignals", symbol],
     queryFn: () => (symbol ? fetchSignalsBySymbol(symbol) : Promise.resolve([])),
     enabled: !!symbol,
-    refetchInterval: 6000,
+    refetchInterval: 10000,
+    staleTime: 5000,
   });
 }
 
@@ -56,7 +60,8 @@ export function usePortfolioQuery() {
   return useQuery({
     queryKey: ["portfolio"],
     queryFn: fetchPortfolio,
-    refetchInterval: 5000,
+    refetchInterval: 8000,
+    staleTime: 4000,
   });
 }
 
@@ -64,7 +69,8 @@ export function useForecastQuery() {
   return useQuery({
     queryKey: ["forecast"],
     queryFn: fetchForecast,
-    refetchInterval: 6000,
+    refetchInterval: 15000,
+    staleTime: 6000,
   });
 }
 
@@ -73,5 +79,6 @@ export function useStatusQuery() {
     queryKey: ["status"],
     queryFn: fetchStatus,
     refetchInterval: 2500,
+    staleTime: 1500,
   });
 }

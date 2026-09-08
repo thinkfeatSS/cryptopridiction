@@ -1,17 +1,16 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useMemo } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useStatusQuery } from "@/hooks/useCryptoData";
-import { formatTimeRemaining } from "@/lib/utils";
+import NavCountdownTimer from "@/components/NavCountdownTimer";
 import {
   Activity,
   BarChart2,
   Clock,
   Database,
   Layers,
-  Radio,
   ShieldCheck,
   TrendingUp,
   Zap,
@@ -20,31 +19,16 @@ import {
 export default function Navbar() {
   const pathname = usePathname();
   const { data: status } = useStatusQuery();
-  const [utcTime, setUtcTime] = useState<string>("");
-  const [localSeconds, setLocalSeconds] = useState<number>(0);
 
-  // Sync and tick down the 15-minute countdown clock
-  useEffect(() => {
-    if (status?.seconds_to_next_scan !== undefined) {
-      setLocalSeconds(status.seconds_to_next_scan);
-    }
-  }, [status?.seconds_to_next_scan]);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const now = new Date();
-      setUtcTime(now.toUTCString().replace("GMT", "UTC"));
-      setLocalSeconds((prev) => (prev > 0 ? prev - 1 : 900));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  const navLinks = [
-    { href: "/", label: "Master Terminal", icon: Activity },
-    { href: "/signals", label: "Signals Audit Ledger", icon: BarChart2 },
-    { href: "/portfolio", label: "Paper Trading Bot", icon: TrendingUp },
-    { href: "/radar", label: "Multi-Horizon Radar", icon: Layers },
-  ];
+  const navLinks = useMemo(
+    () => [
+      { href: "/", label: "Master Terminal", icon: Activity },
+      { href: "/signals", label: "Signals Audit Ledger", icon: BarChart2 },
+      { href: "/portfolio", label: "Paper Trading Bot", icon: TrendingUp },
+      { href: "/radar", label: "Multi-Horizon Radar", icon: Layers },
+    ],
+    []
+  );
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-slate-800/80 bg-dark-950/90 backdrop-blur-xl">
@@ -117,17 +101,7 @@ export default function Navbar() {
           </div>
 
           {/* 15-min Countdown Ring / Badge */}
-          <div className="hidden lg:flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-950/40 px-3 py-1.5 text-xs shadow-sm shadow-indigo-500/10">
-            <Radio className="h-3.5 w-3.5 animate-pulse text-indigo-400 shrink-0" />
-            <div className="flex flex-col">
-              <span className="text-[9px] uppercase tracking-wider text-indigo-300/80 font-bold">
-                Next 15M Scan In
-              </span>
-              <span className="font-mono text-xs font-bold text-white">
-                {formatTimeRemaining(localSeconds)}
-              </span>
-            </div>
-          </div>
+          <NavCountdownTimer />
 
           {/* Bot State Indicator */}
           <div className="hidden xl:flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-3 py-1.5 text-xs text-emerald-400">
