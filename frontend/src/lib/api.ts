@@ -224,6 +224,15 @@ export async function fetchPortfolio(): Promise<PortfolioData> {
   return res.json();
 }
 
+export async function resetPortfolio(): Promise<{ success: boolean; message: string; portfolio: PortfolioData }> {
+  const res = await fetch(`${API_BASE}/api/portfolio/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" }
+  });
+  if (!res.ok) throw new Error("Failed resetting portfolio");
+  return res.json();
+}
+
 export async function fetchForecast(): Promise<ForecastData> {
   const res = await fetch(`${API_BASE}/api/forecast`);
   if (!res.ok) throw new Error("Failed fetching forecast");

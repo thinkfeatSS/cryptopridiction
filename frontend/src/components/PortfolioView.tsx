@@ -1,7 +1,9 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { usePortfolioQuery } from "@/hooks/useCryptoData";
+import { useQueryClient } from "@tanstack/react-query";
+import { resetPortfolio } from "@/lib/api";
 import { formatPercent, formatUsd } from "@/lib/utils";
 import {
   TrendingUp,
@@ -12,14 +14,111 @@ import {
   DollarSign,
   ShieldCheck,
   Zap,
+  RotateCcw,
+  AlertTriangle,
+  CheckCircle2,
 } from "lucide-react";
 
 export default function PortfolioView() {
+  const queryClient = useQueryClient();
   const { data: portfolio, isLoading } = usePortfolioQuery();
   const openPositions = portfolio?.open_positions || [];
 
+  const [isResetting, setIsResetting] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
+
+  const handleReset = async () => {
+    try {
+      setIsResetting(true);
+      const res = await resetPortfolio();
+      queryClient.invalidateQueries({ queryKey: ["portfolio"] });
+      queryClient.invalidateQueries({ queryKey: ["kpi"] });
+      queryClient.invalidateQueries({ queryKey: ["forecast"] });
+      setShowConfirmModal(false);
+      setResetMessage(res.message || "Paper trading successfully reset to $15.00!");
+      setTimeout(() => setResetMessage(null), 5000);
+    } catch (err: any) {
+      alert("Failed to reset paper trading: " + (err.message || err));
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
   return (
-    <div className="glass-panel rounded-2xl p-5 border border-slate-800">
+    <div className="glass-panel rounded-2xl p-5 border border-slate-800 relative">
+      {/* Confirmation Modal */}
+      {showConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-dark-950/80 backdrop-blur-sm p-4">
+          <div className="max-w-md w-full rounded-2xl bg-dark-900 border border-slate-700 p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 text-rose-400 mb-3">
+              <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30">
+                <AlertTriangle className="h-6 w-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-white">Reset Paper Trading?</h3>
+                <p className="text-xs text-slate-400">This action will wipe all history</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Are you sure you want to reset paper trading? This will:
+            </p>
+            <ul className="text-xs text-slate-400 list-disc list-inside mt-2 space-y-1 font-mono">
+              <li>Close &amp; delete all active open positions</li>
+              <li>Wipe previous closed trade history</li>
+              <li>Reset wallet capital back to clean <span className="text-emerald-400 font-bold">$15.00</span></li>
+              <li>Activate $5 max 3 spot trades rules</li>
+            </ul>
+
+            <div className="mt-5 flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowConfirmModal(false)}
+                disabled={isResetting}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-300 bg-dark-950 border border-slate-700 hover:bg-slate-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleReset}
+                disabled={isResetting}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-rose-600 hover:bg-rose-500 transition-colors flex items-center gap-1.5 disabled:opacity-50 shadow-lg shadow-rose-900/30"
+              >
+                {isResetting ? (
+                  <>
+                    <RotateCcw className="h-3.5 w-3.5 animate-spin" />
+                    Resetting...
+                  </>
+                ) : (
+                  <>
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Confirm Reset to $15.00
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Success Notification Banner */}
+      {resetMessage && (
+        <div className="mb-4 rounded-xl bg-emerald-950/80 border border-emerald-500/40 p-3.5 flex items-center justify-between gap-3 text-xs text-emerald-300 animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+            <span className="font-medium">{resetMessage}</span>
+          </div>
+          <button
+            onClick={() => setResetMessage(null)}
+            className="text-slate-400 hover:text-white text-xs font-mono"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800/80 pb-4 gap-3">
         <div>
           <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
@@ -29,19 +128,32 @@ export default function PortfolioView() {
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Monitored 24/7 with 10-second price ticks & automated take-profit executions
+            Monitored 24/7 with 10-second price ticks &amp; automated take-profit executions
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
-          <span className="rounded-md bg-purple-950/60 px-2 py-1 text-purple-300 border border-purple-800/60">
-            💰 $15.00 Wallet ($5 / trade)
-          </span>
-          <span className="rounded-md bg-cyan-950/60 px-2 py-1 text-cyan-300 border border-cyan-800/60">
-            🎯 Min +$0.80 (+16%) Target
-          </span>
-          <span className="rounded-md bg-amber-950/60 px-2 py-1 text-amber-300 border border-amber-800/60">
-            🛡️ Past Won &gt; Lost Only
-          </span>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+            <span className="rounded-md bg-purple-950/60 px-2 py-1 text-purple-300 border border-purple-800/60">
+              💰 $15.00 Wallet ($5 / trade)
+            </span>
+            <span className="rounded-md bg-cyan-950/60 px-2 py-1 text-cyan-300 border border-cyan-800/60">
+              🎯 Min +$0.80 (+16%) Target
+            </span>
+            <span className="rounded-md bg-amber-950/60 px-2 py-1 text-amber-300 border border-amber-800/60">
+              🛡️ Past Won &gt; Lost Only
+            </span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setShowConfirmModal(true)}
+            className="rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 px-3 py-1.5 text-xs font-semibold flex items-center gap-1.5 transition-all hover:border-rose-500/60 ml-auto"
+            title="Wipe previous open positions and reset paper trading wallet to $15.00"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Reset Paper Trading ($15)
+          </button>
         </div>
       </div>
 

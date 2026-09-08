@@ -266,6 +266,57 @@ class SignalService:
             "queued_trades": ledger_data.get("queued_trades", []),
         }
 
+    def reset_portfolio_data(self, db: Session, target_start_balance: float = 15.0) -> Dict[str, Any]:
+        """Completely wipes open positions and closed trades from DB and resets paper trading ledger JSON to clean state."""
+        try:
+            db.query(PaperPosition).delete()
+            db.query(ClosedTrade).delete()
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print(f"[RESET ERROR] Database purge: {e}")
+
+        clean_ledger = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "fee_tier_label": "Binance Spot (0.075% BNB Discount) + 0.02% Slippage",
+            "starting_balance_usd": target_start_balance,
+            "current_balance_usd": target_start_balance,
+            "realized_pnl_usd": 0.0,
+            "gross_realized_pnl_usd": 0.0,
+            "total_fees_paid_usd": 0.0,
+            "gross_profit_usd": 0.0,
+            "gross_loss_usd": 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "breakeven_trades": 0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "peak_balance_usd": target_start_balance,
+            "max_drawdown_usd": 0.0,
+            "max_drawdown_pct": 0.0,
+            "open_positions": [],
+            "closed_trades_history": [],
+            "queued_trades": []
+        }
+
+        try:
+            os.makedirs(settings.EXPORT_DIR, exist_ok=True)
+            p_path = os.path.join(settings.EXPORT_DIR, "paper_trading_ledger.json")
+            with open(p_path, "w", encoding="utf-8") as f:
+                json.dump(clean_ledger, f, indent=4)
+        except Exception as e:
+            print(f"[RESET ERROR] File write: {e}")
+
+        clear_forecast_cache()
+
+        return {
+            "success": True,
+            "message": f"Paper trading successfully reset to ${target_start_balance:.2f} starting capital. All prior open positions and history wiped.",
+            "portfolio": clean_ledger
+        }
+
     def get_latest_forecast(self, db: Session) -> Dict[str, Any]:
         """Retrieves the most recent market forecast scan with in-memory cache."""
         cached = get_cached_forecast()
