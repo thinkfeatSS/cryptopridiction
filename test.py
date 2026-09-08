@@ -134,6 +134,14 @@ CONFIG = {
             "tp_mult": 2.5,
             "sl_mult": 1.2
         },
+        "horizon_4h": {
+            "name": "⏳ Intraday (4H)",
+            "anchor_tf": "4h",
+            "bars": 1,
+            "duration_label": "4 Hours",
+            "tp_mult": 2.8,
+            "sl_mult": 1.4
+        },
         "macro": {
             "name": "🚀 Macro (24H)",
             "anchor_tf": "1d",
@@ -3237,15 +3245,61 @@ class HybridQuantEngine:
 
         pool_for_selection = qualified_pool if len(qualified_pool) >= min_sig else all_signals
 
-        # Dynamic Elastic Selection (Grade A+/A with minimum fallback & maximum cap)
-        if is_dynamic:
-            grade_a_signals = [s for s in pool_for_selection if s['grade_tier'] <= 2 and s.get('meta_win_prob', 0) >= min_meta_prob]
-            if len(grade_a_signals) >= min_sig:
-                selected_signals = grade_a_signals[:max_sig]
+        # Horizon-Separated High-Potential Signal Buckets (>= 0.40% Return & >= 65% Meta Win Prob)
+        horizon_bucket_defs = [
+            {"key": "scalp", "tag": "15M", "label": "⚡ Scalp (15M)", "min_return": 0.40},
+            {"key": "swing", "tag": "1H", "label": "🌊 Swing (1H)", "min_return": 0.40},
+            {"key": "horizon_4h", "tag": "4H", "label": "⏳ Intraday (4H)", "min_return": 0.40},
+            {"key": "macro", "tag": "24H", "label": "🚀 Macro (24H)", "min_return": 0.40},
+            {"key": "weekly", "tag": "7D", "label": "🗓️ Weekly (7D)", "min_return": 0.40},
+            {"key": "monthly", "tag": "30D", "label": "🪐 Monthly (30D)", "min_return": 0.40}
+        ]
+
+        signals_by_horizon = {b["tag"]: [] for b in horizon_bucket_defs}
+        selected_signals = []
+        selected_symbols_horizon = set()
+
+        for b in horizon_bucket_defs:
+            h_k = b["key"]
+            h_tag = b["tag"]
+            min_ret = b["min_return"]
+
+            # Filter candidates for this exact horizon
+            h_candidates = [
+                s for s in all_signals
+                if (s['horizon_key'] == h_k or h_tag.lower() in s['horizon_key'].lower())
+                and not s['is_shield_blocked']
+                and not s['is_parabolic_short']
+                and not s['is_fee_drag_rejected']
+                and abs(s.get('exp_return', 0.0) * 100.0) >= min_ret
+                and (s['meta_win_prob'] >= min_meta_prob or (s['grade_tier'] == 1 and s['conviction'] >= 78.0))
+            ]
+
+            # Sort by Grade Tier -> Meta Win Prob -> Composite Score
+            h_candidates.sort(key=lambda x: (x['grade_tier'], -x['meta_win_prob'], -x['composite_score'], -x['conviction']))
+
+            if h_candidates:
+                top_h_picks = h_candidates[:2]  # Top 1-2 per horizon
+                for pick in top_h_picks:
+                    pick['horizon_tag'] = h_tag
+                    signals_by_horizon[h_tag].append(pick)
+                    if (pick['symbol'], h_k) not in selected_symbols_horizon:
+                        selected_signals.append(pick)
+                        selected_symbols_horizon.add((pick['symbol'], h_k))
             else:
-                selected_signals = pool_for_selection[:min_sig]
-        else:
-            selected_signals = pool_for_selection[:3]
+                # No qualifying signal in this horizon this round -> Skip cleanly
+                signals_by_horizon[h_tag] = []
+
+        # If overall selected signals is empty, fallback to top qualified pick to guarantee live monitoring
+        if not selected_signals:
+            fallback = [s for s in all_signals if not s['is_shield_blocked'] and abs(s.get('exp_return', 0.0) * 100.0) >= 0.40]
+            if fallback:
+                top_pick = fallback[0]
+                top_pick['horizon_tag'] = "15M" if "scalp" in top_pick['horizon_key'] else ("1H" if "swing" in top_pick['horizon_key'] else "24H")
+                selected_signals.append(top_pick)
+                signals_by_horizon[top_pick['horizon_tag']].append(top_pick)
+
+        self.signals_by_horizon = signals_by_horizon
 
         # Update Cooldown Timestamps for Dispatched Signals
         for sig in selected_signals:
@@ -3267,9 +3321,10 @@ class HybridQuantEngine:
             regime_tag = "🛡️ DEFENSIVE CHOP / CAPITAL PRESERVATION (Showing Highest-Ranked Defensive Setup)"
 
         print("\n" + "=" * 145)
-        print(f" 🎯 DYNAMIC QUANTITATIVE SIGNAL ENGINE ({len(selected_signals)} SIGNALS DETECTED THIS ROUND)")
-        print(f" Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Scanned: {len(source_results)} Pairs across 15M, 1H & 24H")
-        print(f" ML Meta-Radar: 💎 {count_a_plus} Grade A+ | 🟢 {count_a} Grade A | 🟡 {count_b} Grade B+ | Regime: {regime_tag}")
+        print(f" 🎯 DYNAMIC QUANTITATIVE SIGNAL ENGINE ({len(selected_signals)} SIGNALS ACROSS HORIZONS THIS ROUND)")
+        print(f" Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Scanned: {len(source_results)} Pairs across 15M, 1H, 4H, 24H, 7D, 30D")
+        active_horizons = [f"{k} ({len(v)})" for k, v in signals_by_horizon.items() if len(v) > 0]
+        print(f" Active Horizons Firing: {', '.join(active_horizons) if active_horizons else 'None (Defensive)'} | Regime: {regime_tag}")
         if self.btc_shield_active:
             print(f" ⚠️  CIRCUIT BREAKER: {self.btc_shield_reason} -> Prioritizing Shorts & BTC Hedges.")
         print("=" * 145)
@@ -3385,6 +3440,7 @@ class HybridQuantEngine:
                 "altcoin_longs_allowed": not self.btc_shield_active,
             },
             "top_round_signals": top_signals or [],
+            "signals_by_horizon": getattr(self, "signals_by_horizon", {}),
             "scanner_leaderboard": scanner_results,
             "deep_dive": deep_dive_result,
             "paper_portfolio": self.ledger.data

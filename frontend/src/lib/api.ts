@@ -166,8 +166,10 @@ export interface ForecastData {
   strategy: string;
   btc_market_shield?: BtcMarketShield;
   top_round_signals: any[];
+  signals_by_horizon?: Record<string, any[]>;
   scanner_leaderboard: any[];
   deep_dive: any;
+  paper_portfolio?: any;
 }
 
 export async function fetchKpi(): Promise<KpiSummary> {
