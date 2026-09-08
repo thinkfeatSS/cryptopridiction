@@ -216,7 +216,8 @@ CONFIG = {
         "require_min_rr_ratio": 2.0,        # 1:2 Risk to Reward minimum
         "min_meta_probability": 0.65,       # Secondary ML meta-labeling win probability hurdle (>=65%)
         "ban_parabolic_shorts": True,       # Circuit breaker: Block SHORT if 24h pump > 12% or 1h RSI > 68
-        "min_scalp_gain_pct": 0.45,         # Minimum expected TP1 gain on 15M to clear taker fees
+        "min_expected_return_pct": 0.40,    # Minimum expected return hurdle: >= 0.40% (guarantees net return after buy & sell fees)
+        "min_scalp_gain_pct": 0.40,         # Minimum expected TP1 gain on 15M to clear taker fees (>= 0.40%)
         "min_swing_gain_pct": 0.75,         # Minimum expected TP1 gain on 1H
         "asset_cooldown_minutes": 60        # Deduping lockout window across horizons
     },
@@ -2592,10 +2593,10 @@ class HybridQuantEngine:
             tp4_p = max(min_floor, current_price - (2.00 * risk_dist))
             tp_p = tp4_p
 
-        # 8. Minimum Profit Hurdle Check
+        # 8. Minimum Profit Hurdle Check (Enforces >= 0.40% return to clear round-trip buy & sell fees)
         reward_pct = (abs(tp_p - current_price) / (current_price + 1e-10)) * 100.0
         min_reward_map = {
-            'scalp': 0.35,
+            'scalp': 0.40,       # Minimum 0.40% profit hurdle for 15M (clears buy & sell exchange fees)
             'swing': 0.80,
             'macro': 1.80,
             'horizon_2d': 2.50,
@@ -2604,9 +2605,9 @@ class HybridQuantEngine:
             'biweekly': 8.00,
             'monthly': 12.00
         }
-        min_hurdle = min_reward_map.get(horizon_key, 0.35)
-        if reward_pct < min_hurdle:
-            decision = "⛔ FILTER (SUB-FEE VOLATILITY / LOW ATR)"
+        min_hurdle = min_reward_map.get(horizon_key, 0.40)
+        if reward_pct < min_hurdle or abs(exp_ret * 100.0) < 0.40:
+            decision = "⛔ FILTER (SUB-0.4% RETURN / FEE DRAG)"
             priority = 4
 
         # Generate Professional 3-Tier Signal Card (1:2 Risk to Reward Architecture)
@@ -3118,9 +3119,13 @@ class HybridQuantEngine:
                         decision = f"🛡️ SUPPRESSED (PARABOLIC MOMENTUM SQUEEZE RISK)"
                         prio = 5
 
-                # 2. Fee Hurdle: Filter out micro-targets where fees eat the profit
+                # 2. Fee Hurdle: Filter out micro-targets where fees eat the profit (>= 0.40% minimum net profit hurdle)
                 is_fee_drag_rejected = False
-                if h_key == 'scalp' and tp_pct < min_scalp_gain:
+                min_return_hurdle = sig_cfg.get('min_expected_return_pct', 0.40)
+                if tp_pct < min_return_hurdle or abs(exp_ret * 100.0) < min_return_hurdle:
+                    is_fee_drag_rejected = True
+                    decision = "⛔ FILTER (SUB-0.4% RETURN / FEE DRAG)"
+                elif h_key == 'scalp' and tp_pct < min_scalp_gain:
                     is_fee_drag_rejected = True
                 elif h_key == 'swing' and tp_pct < min_swing_gain:
                     is_fee_drag_rejected = True
