@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { formatUsd } from "@/lib/utils";
 import {
   X,
@@ -20,10 +21,15 @@ interface SignalShareModalProps {
 }
 
 export default function SignalShareModal({ signal, onClose }: SignalShareModalProps) {
+  const [mounted, setMounted] = useState(false);
   const [copied, setCopied] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
 
-  if (!signal) return null;
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!signal || !mounted) return null;
 
   const symbol = signal.symbol || "BTC/USDT";
   const direction = (signal.direction || "LONG").toUpperCase();
@@ -63,12 +69,12 @@ export default function SignalShareModal({ signal, onClose }: SignalShareModalPr
     }
   };
 
-  return (
+  return createPortal(
     <div
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-lg p-3 sm:p-4 animate-in fade-in duration-200"
+      className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/85 backdrop-blur-lg p-3 sm:p-4 animate-in fade-in duration-200"
     >
       <div className="relative w-full max-w-md rounded-2xl bg-dark-950 border border-slate-700/60 shadow-2xl shadow-cyan-950/40 overflow-hidden transform animate-in zoom-in-95 duration-200">
         {/* Header */}
@@ -186,6 +192,7 @@ export default function SignalShareModal({ signal, onClose }: SignalShareModalPr
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

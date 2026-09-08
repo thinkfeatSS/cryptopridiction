@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useMemo, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useCoinSignalsQuery } from "@/hooks/useCryptoData";
 import { formatUsd, formatPercent } from "@/lib/utils";
 import { useWatchlist } from "@/hooks/useWatchlist";
@@ -37,10 +38,15 @@ export default function CoinSignalHistoryModal({
   currentPrice = 0,
   onClose,
 }: CoinSignalHistoryModalProps) {
+  const [mounted, setMounted] = useState(false);
   const [activeTab, setActiveTab] = useState<"history" | "chart">("history");
   const [outcomeFilter, setOutcomeFilter] = useState<string>("ALL");
   const [horizonFilter, setHorizonFilter] = useState<string>("ALL");
   const [sharingSignal, setSharingSignal] = useState<any | null>(null);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const { isStarred, toggleWatchlist } = useWatchlist();
   const { data: signals = [], isLoading } = useCoinSignalsQuery(symbol || undefined);
@@ -58,7 +64,7 @@ export default function CoinSignalHistoryModal({
     }
   }, [symbol, onClose]);
 
-  if (!symbol) return null;
+  if (!symbol || !mounted) return null;
 
   const starred = isStarred(symbol);
   const latestSignal = signals.length > 0 ? signals[0] : null;
@@ -118,19 +124,19 @@ export default function CoinSignalHistoryModal({
     );
   };
 
-  return (
+  return createPortal(
     <>
       {/* Share Ticket Card Modal */}
       {sharingSignal && (
         <SignalShareModal signal={sharingSignal} onClose={() => setSharingSignal(null)} />
       )}
 
-      {/* Top-Anchored Overlay with Full Natural Scrollability */}
+      {/* Top-Anchored Overlay with Full Natural Scrollability rendered directly at document.body */}
       <div
         onClick={(e) => {
           if (e.target === e.currentTarget) onClose();
         }}
-        className="fixed inset-0 z-50 overflow-y-auto bg-black/80 backdrop-blur-md flex justify-center items-start p-2 sm:p-4 md:p-6 animate-in fade-in duration-200"
+        className="fixed inset-0 z-[99999] overflow-y-auto bg-black/85 backdrop-blur-md flex justify-center items-start p-2 sm:p-4 md:p-6 animate-in fade-in duration-200"
       >
         <div
           onClick={(e) => e.stopPropagation()}
@@ -459,6 +465,7 @@ export default function CoinSignalHistoryModal({
           </div>
         </div>
       </div>
-    </>
+    </>,
+    document.body
   );
 }
