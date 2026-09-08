@@ -6,6 +6,7 @@ import { formatUsd, formatPercent } from "@/lib/utils";
 import { useWatchlist } from "@/hooks/useWatchlist";
 import TradingViewCandleChart from "@/components/TradingViewCandleChart";
 import SignalShareModal from "@/components/SignalShareModal";
+import ErrorBoundary from "@/components/ErrorBoundary";
 import {
   X,
   Clock,
@@ -167,16 +168,18 @@ export default function CoinSignalHistoryModal({
           <div className="flex-1 overflow-y-auto">
             {/* 1. Interactive TradingView Candlestick Chart */}
             <div className="p-4 sm:p-6 pb-2">
-              <TradingViewCandleChart
-                symbol={symbol}
-                currentPrice={currentPrice}
-                entryPrice={latestSignal?.entry_price}
-                tp1Price={latestSignal?.tp1_price}
-                tp2Price={latestSignal?.tp2_price}
-                tp3Price={latestSignal?.tp3_price}
-                slPrice={latestSignal?.sl_price}
-                direction={latestSignal?.direction || "LONG"}
-              />
+              <ErrorBoundary fallbackTitle="Interactive chart is reloading...">
+                <TradingViewCandleChart
+                  symbol={symbol}
+                  currentPrice={currentPrice}
+                  entryPrice={latestSignal?.entry_price}
+                  tp1Price={latestSignal?.tp1_price}
+                  tp2Price={latestSignal?.tp2_price}
+                  tp3Price={latestSignal?.tp3_price}
+                  slPrice={latestSignal?.sl_price}
+                  direction={latestSignal?.direction || "LONG"}
+                />
+              </ErrorBoundary>
             </div>
 
             {/* 2. Stats Ribbon */}

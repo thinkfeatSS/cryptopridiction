@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import Providers from "@/components/Providers";
 import Navbar from "@/components/Navbar";
+import ErrorBoundary from "@/components/ErrorBoundary";
 
 export const metadata: Metadata = {
   title: "QUANT EDGE V15.0 - Quantitative Crypto Terminal",
@@ -19,7 +20,9 @@ export default function RootLayout({
         <Providers>
           <Navbar />
           <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-6 sm:px-6">
-            {children}
+            <ErrorBoundary fallbackTitle="Dashboard is refreshing...">
+              {children}
+            </ErrorBoundary>
           </main>
           <footer className="border-t border-slate-800/80 bg-dark-950 py-6 text-center text-xs text-slate-500">
             <p>
