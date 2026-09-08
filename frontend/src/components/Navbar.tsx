@@ -14,12 +14,14 @@ import {
   Database,
   Layers,
   ShieldCheck,
+  ShieldAlert,
   TrendingUp,
   Zap,
   Volume2,
   VolumeX,
   Keyboard,
 } from "lucide-react";
+import { getShieldTheme } from "@/lib/marketShield";
 
 export default function Navbar() {
   const pathname = usePathname();
@@ -136,27 +138,30 @@ export default function Navbar() {
             </button>
 
             {/* 🛡️ Market Beta Status Badge */}
-            <div
-              className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs shadow-sm transition-all ${
-                status?.btc_market_shield?.active
-                  ? "border-amber-500/60 bg-amber-950/40 text-amber-300 shadow-amber-500/20 animate-pulse"
-                  : "border-cyan-500/30 bg-cyan-950/30 text-cyan-300 shadow-cyan-500/10"
-              }`}
-            >
-              {status?.btc_market_shield?.active ? (
-                <ShieldCheck className="h-4 w-4 text-amber-400 animate-bounce shrink-0" />
-              ) : (
-                <ShieldCheck className="h-4 w-4 text-cyan-400 shrink-0" />
-              )}
-              <div className="flex flex-col">
-                <span className="text-[9px] uppercase tracking-wider font-bold text-slate-400">
-                  [SHIELD 🛡️] Market Beta
-                </span>
-                <span className="font-mono text-[11px] font-bold truncate max-w-[130px] sm:max-w-[160px]">
-                  {status?.btc_market_shield?.reason || "NORMAL (Market Stable)"}
-                </span>
-              </div>
-            </div>
+            {(() => {
+              const shieldTheme = getShieldTheme(status?.btc_market_shield);
+              return (
+                <div
+                  className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs shadow-sm transition-all ${shieldTheme.border}`}
+                  title={`${shieldTheme.headline}: ${shieldTheme.subline}`}
+                >
+                  {shieldTheme.isAlert ? (
+                    <ShieldAlert className={`h-4 w-4 ${shieldTheme.iconColor} shrink-0 animate-bounce`} />
+                  ) : (
+                    <ShieldCheck className={`h-4 w-4 ${shieldTheme.iconColor} shrink-0`} />
+                  )}
+                  <div className="flex flex-col">
+                    <span className="text-[9px] uppercase tracking-wider font-bold text-slate-400 flex items-center gap-1">
+                      [SHIELD 🛡️] Market Beta
+                      <span className={`inline-block h-1.5 w-1.5 rounded-full ${shieldTheme.dotColor}`} />
+                    </span>
+                    <span className="font-mono text-[11px] font-bold truncate max-w-[130px] sm:max-w-[170px]">
+                      {shieldTheme.statusTitle}
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* 15-min Countdown Ring / Badge */}
             <NavCountdownTimer />

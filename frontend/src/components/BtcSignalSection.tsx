@@ -20,6 +20,7 @@ import {
   History,
   Share2,
 } from "lucide-react";
+import { getShieldTheme } from "@/lib/marketShield";
 
 export default function BtcSignalSection() {
   const { data: forecast, isLoading } = useForecastQuery();
@@ -221,13 +222,31 @@ export default function BtcSignalSection() {
             </div>
 
             {/* Market Beta Safeguard Info Bar */}
-            <div className="mt-3 flex items-center justify-between border-t border-slate-800/60 pt-2 text-xs">
-              <div className="flex items-center gap-1.5">
-                <ShieldCheck className="h-3.5 w-3.5 text-cyan-400" />
-                <span className="text-slate-300 text-[11px]">Beta Shield: <strong>{shield.reason || "NORMAL"}</strong></span>
-              </div>
-              <span className="text-[10px] text-emerald-400 font-mono">100% Multi-Scale Aligned</span>
-            </div>
+            {(() => {
+              const theme = getShieldTheme(shield);
+              return (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/60 pt-2 text-xs">
+                  <div className="flex items-center gap-1.5">
+                    {theme.isAlert ? (
+                      <ShieldAlert className="h-3.5 w-3.5 text-rose-400 animate-pulse" />
+                    ) : (
+                      <ShieldCheck className={`h-3.5 w-3.5 ${theme.iconColor}`} />
+                    )}
+                    <span className="text-slate-300 text-[11px]">
+                      Beta Shield: <strong className={theme.iconColor}>{theme.statusTitle}</strong>
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {shield.btc_15m_change_pct !== undefined && (
+                      <span className="text-[10px] text-slate-400 font-mono">
+                        15M: <strong className={shield.btc_15m_change_pct >= 0 ? "text-emerald-400" : "text-rose-400"}>{shield.btc_15m_change_pct > 0 ? `+${shield.btc_15m_change_pct}%` : `${shield.btc_15m_change_pct}%`}</strong>
+                      </span>
+                    )}
+                    <span className="text-[10px] text-emerald-400 font-mono">100% Multi-Scale Aligned</span>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </div>
       </div>

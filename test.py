@@ -2253,11 +2253,19 @@ class HybridQuantEngine:
             except Exception as e:
                 print(f"[WARNING] BTC reference fetch note for {tf}: {e}")
 
-        # 🛡️ GLOBAL BTC MARKET BETA SHIELD (MARKET CIRCUIT BREAKER)
+        # 🛡️ GLOBAL BTC MARKET BETA SHIELD (MARKET REGIME & CIRCUIT BREAKER)
         # Protects altcoins from correlated stop-outs during BTC flash drops / severe flushes
         self.btc_shield_active = False
+        self.btc_shield_code = "NORMAL"
         self.btc_shield_reason = "NORMAL (Market Stable)"
+        self.btc_15m_change = 0.0
+        self.btc_1h_change = 0.0
+
         try:
+            ret_15m_1 = 0.0
+            ret_15m_2 = 0.0
+            ret_1h = 0.0
+
             if '15m' in self.btc_cache and len(self.btc_cache['15m']) >= 3:
                 df_15m = self.btc_cache['15m']
                 c_now = float(df_15m['close'].iloc[-1])
@@ -2265,19 +2273,44 @@ class HybridQuantEngine:
                 c_prev2 = float(df_15m['close'].iloc[-3])
                 ret_15m_1 = (c_now - c_prev) / c_prev
                 ret_15m_2 = (c_now - c_prev2) / c_prev2
+                self.btc_15m_change = round(ret_15m_1 * 100.0, 2)
 
-                if ret_15m_1 <= -0.012 or ret_15m_2 <= -0.018:
-                    self.btc_shield_active = True
-                    self.btc_shield_reason = f"BTC 15M Flash Dump ({ret_15m_1*100:.2f}%)"
-
-            if not self.btc_shield_active and '1h' in self.btc_cache and len(self.btc_cache['1h']) >= 2:
+            if '1h' in self.btc_cache and len(self.btc_cache['1h']) >= 2:
                 df_1h = self.btc_cache['1h']
                 ret_1h = (float(df_1h['close'].iloc[-1]) - float(df_1h['close'].iloc[-2])) / float(df_1h['close'].iloc[-2])
-                if ret_1h <= -0.022:
-                    self.btc_shield_active = True
-                    self.btc_shield_reason = f"BTC 1H Severe Selloff ({ret_1h*100:.2f}%)"
+                self.btc_1h_change = round(ret_1h * 100.0, 2)
+
+            # Evaluate Market Regime Hierarchy
+            if ret_15m_1 <= -0.025 or ret_1h <= -0.035:
+                # Critical Systemic Dump
+                self.btc_shield_active = True
+                self.btc_shield_code = "ALERT_DUMP"
+                self.btc_shield_reason = f"SEVERE DUMP (15M: {ret_15m_1*100:+.2f}%, 1H: {ret_1h*100:+.2f}%)"
+            elif ret_15m_1 <= -0.012 or ret_15m_2 <= -0.018 or ret_1h <= -0.020:
+                # Defensive Circuit Breaker (Altcoin Longs Paused)
+                self.btc_shield_active = True
+                self.btc_shield_code = "DEFENSIVE"
+                self.btc_shield_reason = f"DEFENSIVE (BTC Dump 15M: {ret_15m_1*100:+.2f}%)"
+            elif ret_15m_1 <= -0.007 or ret_1h <= -0.012:
+                # Elevated Volatility Caution
+                self.btc_shield_active = False
+                self.btc_shield_code = "CAUTION"
+                self.btc_shield_reason = f"CAUTION (High Volatility 15M: {ret_15m_1*100:+.2f}%)"
+            elif ret_15m_1 >= 0.012 or ret_1h >= 0.020:
+                # Strong Bullish Trend Expansion
+                self.btc_shield_active = False
+                self.btc_shield_code = "BULL_MOMENTUM"
+                self.btc_shield_reason = f"BULLISH EXPANSION (BTC 15M: {ret_15m_1*100:+.2f}%)"
+            else:
+                # Normal Stable Market
+                self.btc_shield_active = False
+                self.btc_shield_code = "NORMAL"
+                self.btc_shield_reason = "NORMAL (Market Stable)"
+
         except Exception as e:
-            pass
+            self.btc_shield_active = False
+            self.btc_shield_code = "NORMAL"
+            self.btc_shield_reason = "NORMAL (Market Stable)"
 
         if self.btc_shield_active:
             print(f"\n[SHIELD 🛡️] ⚠️ BTC MARKET BETA SHIELD ACTIVATED: {self.btc_shield_reason} | Altcoin Longs Paused to Prevent Correlated Stop-Outs.\n")
@@ -3311,7 +3344,11 @@ class HybridQuantEngine:
             "strategy": "Multi-Horizon Quantitative Engine (V16.0)",
             "btc_market_shield": {
                 "active": self.btc_shield_active,
-                "reason": self.btc_shield_reason
+                "status_code": getattr(self, "btc_shield_code", "NORMAL"),
+                "reason": self.btc_shield_reason,
+                "btc_15m_change_pct": getattr(self, "btc_15m_change", 0.0),
+                "btc_1h_change_pct": getattr(self, "btc_1h_change", 0.0),
+                "altcoin_longs_allowed": not self.btc_shield_active,
             },
             "top_round_signals": top_signals or [],
             "scanner_leaderboard": scanner_results,

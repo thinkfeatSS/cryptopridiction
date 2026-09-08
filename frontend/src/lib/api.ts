@@ -60,6 +60,15 @@ export interface DailySummaryItem {
   average_return_pct: number;
 }
 
+export interface BtcMarketShield {
+  active: boolean;
+  status_code?: "NORMAL" | "BULL_MOMENTUM" | "CAUTION" | "DEFENSIVE" | "ALERT_DUMP" | string;
+  reason: string;
+  btc_15m_change_pct?: number;
+  btc_1h_change_pct?: number;
+  altcoin_longs_allowed?: boolean;
+}
+
 export interface EngineStatus {
   status: string;
   is_engine_active: boolean;
@@ -68,10 +77,7 @@ export interface EngineStatus {
   seconds_to_next_scan: number;
   scan_version?: number;
   last_scan_timestamp?: string;
-  btc_market_shield?: {
-    active: boolean;
-    reason: string;
-  };
+  btc_market_shield?: BtcMarketShield;
 }
 
 export interface OpenPosition {
@@ -127,10 +133,7 @@ export interface PortfolioData {
 export interface ForecastData {
   timestamp: string;
   strategy: string;
-  btc_market_shield?: {
-    active: boolean;
-    reason: string;
-  };
+  btc_market_shield?: BtcMarketShield;
   top_round_signals: any[];
   scanner_leaderboard: any[];
   deep_dive: any;
