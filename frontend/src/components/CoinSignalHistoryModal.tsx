@@ -23,7 +23,6 @@ import {
   Star,
   Share2,
   BarChart2,
-  ListFilter,
   History,
 } from "lucide-react";
 
@@ -46,16 +45,17 @@ export default function CoinSignalHistoryModal({
   const { isStarred, toggleWatchlist } = useWatchlist();
   const { data: signals = [], isLoading } = useCoinSignalsQuery(symbol || undefined);
 
-  // Lock background scroll while modal is open
+  // Lock background scroll cleanly while modal is active & listen to Escape
   useEffect(() => {
     if (symbol) {
+      const originalOverflow = document.body.style.overflow;
       document.body.style.overflow = "hidden";
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === "Escape") onClose();
       };
       window.addEventListener("keydown", handleKeyDown);
       return () => {
-        document.body.style.overflow = "unset";
+        document.body.style.overflow = originalOverflow;
         window.removeEventListener("keydown", handleKeyDown);
       };
     }
@@ -128,14 +128,14 @@ export default function CoinSignalHistoryModal({
         <SignalShareModal signal={sharingSignal} onClose={() => setSharingSignal(null)} />
       )}
 
-      {/* Floating Centered Backdrop */}
+      {/* Top-Anchored Overlay with Full Scrollability */}
       <div
         onClick={(e) => {
           if (e.target === e.currentTarget) onClose();
         }}
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-xl p-3 sm:p-5 md:p-8 animate-in fade-in duration-200"
+        className="fixed inset-0 z-50 overflow-y-auto bg-black/85 backdrop-blur-xl flex justify-center items-start px-2 py-4 sm:px-4 sm:py-6 md:py-8 animate-in fade-in duration-200"
       >
-        <div className="relative w-full max-w-5xl xl:max-w-6xl h-[88vh] flex flex-col rounded-2xl bg-dark-950 border border-slate-700/60 shadow-2xl shadow-cyan-950/50 overflow-hidden transform animate-in zoom-in-95 duration-200">
+        <div className="relative w-full max-w-5xl xl:max-w-6xl max-h-[90vh] sm:max-h-[88vh] flex flex-col rounded-2xl bg-dark-950 border border-slate-700/80 shadow-2xl shadow-cyan-950/60 overflow-hidden transform animate-in zoom-in-95 duration-200 my-0">
           {/* 1. Modal Sticky Header */}
           <div className="flex items-center justify-between border-b border-slate-800/80 px-4 sm:px-6 py-3.5 bg-dark-900/95 backdrop-blur-md shrink-0">
             <div className="flex items-center gap-3">
@@ -239,8 +239,8 @@ export default function CoinSignalHistoryModal({
             </div>
           </div>
 
-          {/* 3. Tab Content Viewport */}
-          <div className="flex-1 overflow-y-auto min-h-0">
+          {/* 3. Smooth Tab Content Viewport */}
+          <div className="flex-1 overflow-y-auto min-h-0 overscroll-contain">
             {activeTab === "chart" ? (
               /* Chart Tab */
               <div className="p-4 sm:p-6">
