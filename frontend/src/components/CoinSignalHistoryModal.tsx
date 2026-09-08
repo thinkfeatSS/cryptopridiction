@@ -45,17 +45,14 @@ export default function CoinSignalHistoryModal({
   const { isStarred, toggleWatchlist } = useWatchlist();
   const { data: signals = [], isLoading } = useCoinSignalsQuery(symbol || undefined);
 
-  // Lock background scroll cleanly while modal is active & listen to Escape
+  // Listen to Escape key to close modal
   useEffect(() => {
     if (symbol) {
-      const originalOverflow = document.body.style.overflow;
-      document.body.style.overflow = "hidden";
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === "Escape") onClose();
       };
       window.addEventListener("keydown", handleKeyDown);
       return () => {
-        document.body.style.overflow = originalOverflow;
         window.removeEventListener("keydown", handleKeyDown);
       };
     }
@@ -128,16 +125,19 @@ export default function CoinSignalHistoryModal({
         <SignalShareModal signal={sharingSignal} onClose={() => setSharingSignal(null)} />
       )}
 
-      {/* Top-Anchored Overlay with Full Scrollability */}
+      {/* Top-Anchored Overlay with Full Natural Scrollability */}
       <div
         onClick={(e) => {
           if (e.target === e.currentTarget) onClose();
         }}
-        className="fixed inset-0 z-50 overflow-y-auto bg-black/85 backdrop-blur-xl flex justify-center items-start px-2 py-4 sm:px-4 sm:py-6 md:py-8 animate-in fade-in duration-200"
+        className="fixed inset-0 z-50 overflow-y-auto bg-black/80 backdrop-blur-md flex justify-center items-start p-2 sm:p-4 md:p-6 animate-in fade-in duration-200"
       >
-        <div className="relative w-full max-w-5xl xl:max-w-6xl max-h-[90vh] sm:max-h-[88vh] flex flex-col rounded-2xl bg-dark-950 border border-slate-700/80 shadow-2xl shadow-cyan-950/60 overflow-hidden transform animate-in zoom-in-95 duration-200 my-0">
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="relative w-full max-w-5xl xl:max-w-6xl rounded-2xl bg-dark-950 border border-slate-700/80 shadow-2xl shadow-cyan-950/60 flex flex-col my-2 sm:my-4 transform animate-in zoom-in-95 duration-200"
+        >
           {/* 1. Modal Sticky Header */}
-          <div className="flex items-center justify-between border-b border-slate-800/80 px-4 sm:px-6 py-3.5 bg-dark-900/95 backdrop-blur-md shrink-0">
+          <div className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-800/80 px-4 sm:px-6 py-3.5 bg-dark-900/95 backdrop-blur-md rounded-t-2xl shrink-0">
             <div className="flex items-center gap-3">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-cyan-950 border border-cyan-500/40 text-cyan-400 shadow-sm shadow-cyan-500/20">
                 <Zap className="h-5 w-5" />
@@ -240,7 +240,7 @@ export default function CoinSignalHistoryModal({
           </div>
 
           {/* 3. Smooth Tab Content Viewport */}
-          <div className="flex-1 overflow-y-auto min-h-0 overscroll-contain">
+          <div className="w-full">
             {activeTab === "chart" ? (
               /* Chart Tab */
               <div className="p-4 sm:p-6">
@@ -261,7 +261,7 @@ export default function CoinSignalHistoryModal({
               /* 15M History Table Tab */
               <div>
                 {/* Filter Controls Bar */}
-                <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 py-2.5 bg-dark-950/95 backdrop-blur-md border-b border-slate-800">
+                <div className="sticky top-[61px] z-10 flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 py-2.5 bg-dark-950/95 backdrop-blur-md border-b border-slate-800">
                   <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
                     <button
                       onClick={() => setOutcomeFilter("ALL")}
