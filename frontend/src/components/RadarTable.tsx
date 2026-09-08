@@ -3,11 +3,13 @@
 import React, { useState } from "react";
 import { useForecastQuery } from "@/hooks/useCryptoData";
 import { formatUsd } from "@/lib/utils";
+import { useWatchlist } from "@/hooks/useWatchlist";
 import CoinSignalHistoryModal from "@/components/CoinSignalHistoryModal";
-import { Layers, Sparkles, ArrowUpRight, ArrowDownRight, Target, History } from "lucide-react";
+import { Layers, Sparkles, ArrowUpRight, ArrowDownRight, Target, History, Star } from "lucide-react";
 
 export default function RadarTable() {
   const { data: forecast, isLoading } = useForecastQuery();
+  const { isStarred, toggleWatchlist } = useWatchlist();
   const [selectedCoin, setSelectedCoin] = useState<{ symbol: string; price?: number } | null>(null);
   const leaderboard = forecast?.scanner_leaderboard || [];
 
@@ -65,6 +67,7 @@ export default function RadarTable() {
                 const m = item.horizons?.macro || {};
                 const h7d = item.horizons?.weekly || {};
                 const isTriple = item.is_triple_confluence;
+                const starred = isStarred(item.symbol);
 
                 const renderHorizonCell = (h: any) => {
                   const isLong = h.direction === "BULLISH" || h.direction === "LONG";
@@ -94,14 +97,31 @@ export default function RadarTable() {
                   >
                     {/* Asset */}
                     <td className="py-3 px-4">
-                      <div className="flex flex-col">
-                        <span className="font-bold text-white text-sm group-hover:text-cyan-400 transition-colors flex items-center gap-1.5">
-                          {item.symbol}
-                          <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                        </span>
-                        <span className="text-xs text-cyan-400 font-mono font-semibold">
-                          {formatUsd(item.current_price)}
-                        </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleWatchlist(item.symbol);
+                          }}
+                          className="p-1 text-slate-500 hover:text-amber-400 transition-colors"
+                          title={starred ? "Remove from Watchlist" : "Add to Watchlist"}
+                        >
+                          <Star
+                            className={`h-3.5 w-3.5 ${
+                              starred ? "fill-amber-400 text-amber-400" : ""
+                            }`}
+                          />
+                        </button>
+                        <div className="flex flex-col">
+                          <span className="font-bold text-white text-sm group-hover:text-cyan-400 transition-colors flex items-center gap-1.5">
+                            {item.symbol}
+                            <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                          </span>
+                          <span className="text-xs text-cyan-400 font-mono font-semibold">
+                            {formatUsd(item.current_price)}
+                          </span>
+                        </div>
                       </div>
                     </td>
 

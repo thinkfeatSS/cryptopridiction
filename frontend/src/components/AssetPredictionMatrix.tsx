@@ -22,11 +22,15 @@ import {
   Hourglass,
 } from "lucide-react";
 
-type HorizonKey = "all" | "scalp" | "swing" | "macro" | "horizon_2d" | "horizon_3d" | "weekly" | "biweekly" | "monthly";
+type HorizonKey = "all" | "watchlist" | "scalp" | "swing" | "macro" | "horizon_2d" | "horizon_3d" | "weekly" | "biweekly" | "monthly";
+
+import { useWatchlist } from "@/hooks/useWatchlist";
+import { Star } from "lucide-react";
 
 export default function AssetPredictionMatrix() {
   const { data: forecast, isLoading } = useForecastQuery();
   const { data: status } = useStatusQuery();
+  const { isStarred, toggleWatchlist, watchlist } = useWatchlist();
   const [selectedHorizon, setSelectedHorizon] = useState<HorizonKey>("all");
   const [search, setSearch] = useState("");
   const [selectedCoin, setSelectedCoin] = useState<{ symbol: string; price?: number } | null>(null);
@@ -34,14 +38,19 @@ export default function AssetPredictionMatrix() {
   const leaderboard = useMemo(() => forecast?.scanner_leaderboard || [], [forecast?.scanner_leaderboard]);
 
   const filteredAssets = useMemo(() => {
-    if (!search.trim()) return leaderboard;
+    let list = leaderboard;
+    if (selectedHorizon === "watchlist") {
+      list = list.filter((item: any) => isStarred(item.symbol));
+    }
+    if (!search.trim()) return list;
     const q = search.toLowerCase().trim();
-    return leaderboard.filter((item: any) => item.symbol?.toLowerCase().includes(q));
-  }, [leaderboard, search]);
+    return list.filter((item: any) => item.symbol?.toLowerCase().includes(q));
+  }, [leaderboard, search, selectedHorizon, isStarred]);
 
   const horizonTabs: { key: HorizonKey; label: string }[] = useMemo(
     () => [
       { key: "all", label: "All Horizons" },
+      { key: "watchlist", label: `⭐ Watchlist (${watchlist.length})` },
       { key: "scalp", label: "⚡ Scalp (15M)" },
       { key: "swing", label: "🌊 Swing (1H)" },
       { key: "macro", label: "🚀 Macro (24H)" },
@@ -51,7 +60,7 @@ export default function AssetPredictionMatrix() {
       { key: "biweekly", label: "🌕 Bi-Weekly (15D)" },
       { key: "monthly", label: "🪐 Monthly (30D)" },
     ],
-    []
+    [watchlist.length]
   );
 
   const handleCloseModal = useCallback(() => setSelectedCoin(null), []);
@@ -210,6 +219,21 @@ export default function AssetPredictionMatrix() {
                       {/* Asset & Price */}
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleWatchlist(item.symbol);
+                            }}
+                            className="p-1 text-slate-500 hover:text-amber-400 transition-colors"
+                            title={isStarred(item.symbol) ? "Remove from Watchlist" : "Add to Watchlist"}
+                          >
+                            <Star
+                              className={`h-3.5 w-3.5 ${
+                                isStarred(item.symbol) ? "fill-amber-400 text-amber-400" : ""
+                              }`}
+                            />
+                          </button>
                           <span className="text-slate-500 font-sans text-xs">#{idx + 1}</span>
                           <div>
                             <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1.5">
@@ -278,6 +302,21 @@ export default function AssetPredictionMatrix() {
                     {/* Asset & Price */}
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleWatchlist(item.symbol);
+                          }}
+                          className="p-1 text-slate-500 hover:text-amber-400 transition-colors"
+                          title={isStarred(item.symbol) ? "Remove from Watchlist" : "Add to Watchlist"}
+                        >
+                          <Star
+                            className={`h-3.5 w-3.5 ${
+                              isStarred(item.symbol) ? "fill-amber-400 text-amber-400" : ""
+                            }`}
+                          />
+                        </button>
                         <span className="text-slate-500 font-sans text-xs">#{idx + 1}</span>
                         <div>
                           <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1.5">

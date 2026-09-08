@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useStatusQuery } from "@/hooks/useCryptoData";
+import { playSignalChime } from "@/lib/audioAlerts";
 import { Zap, CheckCircle2, RefreshCw } from "lucide-react";
 
 export default function AutoScanWatcher() {
@@ -43,6 +44,16 @@ export default function AutoScanWatcher() {
       queryClient.invalidateQueries({ queryKey: ["dailySummary"] });
       queryClient.invalidateQueries({ queryKey: ["portfolio"] });
       queryClient.invalidateQueries({ queryKey: ["coinSignals"] });
+
+      // Trigger Web Audio Alert Chime if sound is enabled
+      try {
+        const soundEnabled = localStorage.getItem("quantedge_sound_enabled") !== "false";
+        if (soundEnabled) {
+          playSignalChime();
+        }
+      } catch (e) {
+        console.error(e);
+      }
 
       // Trigger visual toast confirmation
       setSyncMessage(`New AI Scan Completed • Data Auto-Refreshed`);
