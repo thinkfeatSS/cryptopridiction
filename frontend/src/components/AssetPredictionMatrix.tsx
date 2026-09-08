@@ -27,13 +27,41 @@ type HorizonKey = "all" | "watchlist" | "scalp" | "swing" | "macro" | "horizon_2
 import { useWatchlist } from "@/hooks/useWatchlist";
 import { Star } from "lucide-react";
 
-// Helper to render rich signal strength and catalyst badges
+// Helper to render rich 3-line signal strength and catalyst badges matching institutional scanner
 function renderSignalCell(h?: any) {
   if (!h || (!h.direction && !h.decision)) {
     return <span className="text-slate-600 font-sans text-xs">—</span>;
   }
 
-  const decision: string = h.decision || (h.direction === "BULLISH" ? "EXECUTE LONG" : "EXECUTE SHORT");
+  const isLong = h.direction === "BULLISH" || h.direction === "LONG" || (h.decision && h.decision.includes("LONG"));
+  const directionText = h.direction || (isLong ? "BULLISH" : "BEARISH");
+  const convictionVal = h.conviction !== undefined && h.conviction !== null ? Number(h.conviction).toFixed(1) : "—";
+
+  let decision: string = h.decision || (isLong ? "EXECUTE LONG" : "EXECUTE SHORT");
+  // Ensure appropriate prefix emoji if missing
+  if (
+    !decision.startsWith("🎯") &&
+    !decision.startsWith("⛔") &&
+    !decision.startsWith("✅") &&
+    !decision.startsWith("⚡") &&
+    !decision.startsWith("🌊") &&
+    !decision.startsWith("💎")
+  ) {
+    if (decision.includes("FILTER")) {
+      decision = `⛔ ${decision}`;
+    } else if (decision.includes("ELITE")) {
+      decision = `🎯 ${decision}`;
+    } else if (decision.includes("STANDARD")) {
+      decision = `✅ ${decision}`;
+    } else if (decision.includes("SHORT SQUEEZE")) {
+      decision = `⚡ ${decision}`;
+    } else if (decision.includes("LONG FLUSH")) {
+      decision = `🌊 ${decision}`;
+    } else {
+      decision = `${isLong ? "🟢" : "🔴"} ${decision}`;
+    }
+  }
+
   const isFilter = decision.includes("FILTER");
   const isShortSqueeze = decision.includes("SHORT SQUEEZE");
   const isLongFlush = decision.includes("LONG FLUSH");
@@ -41,7 +69,6 @@ function renderSignalCell(h?: any) {
   const isDipBuy = decision.includes("DIP-BUY");
   const isRallySell = decision.includes("RALLY-SELL");
   const isElite = decision.includes("ELITE");
-  const isLong = h.direction === "BULLISH" || h.direction === "LONG" || decision.includes("LONG");
 
   let badgeStyle = "bg-dark-900 text-slate-300 border-slate-800";
   if (isFilter) {
@@ -60,22 +87,39 @@ function renderSignalCell(h?: any) {
       : "bg-fuchsia-950/90 text-fuchsia-300 border-fuchsia-500/70 shadow-sm shadow-fuchsia-500/20";
   } else if (isElite) {
     badgeStyle = isLong
-      ? "bg-emerald-950/70 text-emerald-300 border-emerald-600/70"
-      : "bg-rose-950/70 text-rose-300 border-rose-600/70";
+      ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/70 shadow-sm shadow-emerald-500/20"
+      : "bg-rose-950/80 text-rose-300 border-rose-500/70 shadow-sm shadow-rose-500/20";
   } else if (isLong) {
-    badgeStyle = "bg-emerald-950/40 text-emerald-400 border-emerald-800/50";
+    badgeStyle = "bg-emerald-950/50 text-emerald-400 border-emerald-800/60";
   } else {
-    badgeStyle = "bg-rose-950/40 text-rose-400 border-rose-800/50";
+    badgeStyle = "bg-rose-950/50 text-rose-400 border-rose-800/60";
   }
 
   return (
-    <div className="flex flex-col gap-1 min-w-[150px]">
-      <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-bold font-sans border tracking-tight leading-snug whitespace-normal ${badgeStyle}`}>
-        {decision}
-      </span>
-      <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
-        <span className="text-cyan-400 font-semibold">{h.conviction ? `${h.conviction.toFixed(1)}%` : "—"}</span>
-        <span>TP: <strong className="text-slate-200">{formatUsd(h.tp_price)}</strong></span>
+    <div className="flex flex-col gap-1 py-1 min-w-[170px] max-w-[240px]">
+      {/* Line 1: Direction & Conviction % (e.g. 🔴 BEARISH (75.7%) / 🟢 BULLISH (82.1%)) */}
+      <div className="flex items-center gap-1.5 font-bold font-mono text-[11px] leading-tight">
+        <span>{isLong ? "🟢" : "🔴"}</span>
+        <span className={isLong ? "text-emerald-400 font-extrabold" : "text-rose-400 font-extrabold"}>
+          {directionText}
+        </span>
+        <span className="text-slate-300 font-medium">({convictionVal}%)</span>
+      </div>
+
+      {/* Line 2: Take Profit & Stop Loss targets (e.g. TP: $0.007787 | SL: $0.008197) */}
+      <div className="text-[10px] font-mono text-slate-400 whitespace-nowrap leading-tight">
+        <span>TP: <strong className="text-emerald-400">{formatUsd(h.tp_price)}</strong></span>
+        <span className="mx-1 text-slate-600">|</span>
+        <span>SL: <strong className="text-rose-400">{formatUsd(h.sl_price)}</strong></span>
+      </div>
+
+      {/* Line 3: Signal Strength / Filter Badge (e.g. 🎯 ELITE EXECUTE SHORT or ⛔ FILTER (MACRO CONFLICT)) */}
+      <div className="mt-0.5">
+        <span
+          className={`inline-block rounded px-1.5 py-0.5 text-[9.5px] font-bold font-sans border tracking-tight leading-snug whitespace-normal ${badgeStyle}`}
+        >
+          {decision}
+        </span>
       </div>
     </div>
   );
@@ -257,14 +301,14 @@ export default function AssetPredictionMatrix() {
                     >
                       {/* Asset & Price */}
                       <td className="py-3 px-4">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-start gap-2 min-w-[150px]">
                           <button
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
                               toggleWatchlist(item.symbol);
                             }}
-                            className="p-1 text-slate-500 hover:text-amber-400 transition-colors"
+                            className="p-1 mt-0.5 text-slate-500 hover:text-amber-400 transition-colors shrink-0"
                             title={isStarred(item.symbol) ? "Remove from Watchlist" : "Add to Watchlist"}
                           >
                             <Star
@@ -273,13 +317,38 @@ export default function AssetPredictionMatrix() {
                               }`}
                             />
                           </button>
-                          <span className="text-slate-500 font-sans text-xs">#{idx + 1}</span>
-                          <div>
-                            <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1.5">
-                              {item.symbol}
-                              <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                            </span>
-                            <p className="text-cyan-400 font-semibold">{formatUsd(item.current_price)}</p>
+                          <div className="flex flex-col gap-1">
+                            {/* Asset Status Badge */}
+                            <div className="flex items-center gap-1.5">
+                              {isTriple ? (
+                                <span
+                                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-black border tracking-tight shadow-sm ${
+                                    s.direction === "BULLISH"
+                                      ? "bg-emerald-950/90 text-emerald-300 border-emerald-500/70 shadow-emerald-500/20"
+                                      : "bg-rose-950/90 text-rose-300 border-rose-500/70 shadow-rose-500/20"
+                                  }`}
+                                >
+                                  {s.direction === "BULLISH" ? "💎 TRIPLE BUY" : "💎 TRIPLE SELL"}
+                                </span>
+                              ) : idx === 0 ? (
+                                <span className="inline-flex items-center gap-1 rounded bg-amber-950/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/50">
+                                  🥇 TOP PICK
+                                </span>
+                              ) : (
+                                <span className="text-slate-500 font-sans text-xs font-semibold">#{idx + 1}</span>
+                              )}
+                            </div>
+
+                            {/* Symbol & Price */}
+                            <div className="flex items-baseline gap-1.5">
+                              <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1">
+                                {item.symbol}
+                                <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                              </span>
+                              <span className="text-xs font-mono font-semibold text-cyan-400">
+                                ({formatUsd(item.current_price)})
+                              </span>
+                            </div>
                           </div>
                         </div>
                       </td>
@@ -340,14 +409,14 @@ export default function AssetPredictionMatrix() {
                   >
                     {/* Asset & Price */}
                     <td className="py-3 px-4">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-start gap-2 min-w-[150px]">
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
                             toggleWatchlist(item.symbol);
                           }}
-                          className="p-1 text-slate-500 hover:text-amber-400 transition-colors"
+                          className="p-1 mt-0.5 text-slate-500 hover:text-amber-400 transition-colors shrink-0"
                           title={isStarred(item.symbol) ? "Remove from Watchlist" : "Add to Watchlist"}
                         >
                           <Star
@@ -356,13 +425,38 @@ export default function AssetPredictionMatrix() {
                             }`}
                           />
                         </button>
-                        <span className="text-slate-500 font-sans text-xs">#{idx + 1}</span>
-                        <div>
-                          <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1.5">
-                            {item.symbol}
-                            <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                          </span>
-                          <p className="text-cyan-400 font-semibold">{formatUsd(item.current_price)}</p>
+                        <div className="flex flex-col gap-1">
+                          {/* Asset Status Badge */}
+                          <div className="flex items-center gap-1.5">
+                            {isTriple ? (
+                              <span
+                                className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-black border tracking-tight shadow-sm ${
+                                  s.direction === "BULLISH"
+                                    ? "bg-emerald-950/90 text-emerald-300 border-emerald-500/70 shadow-emerald-500/20"
+                                    : "bg-rose-950/90 text-rose-300 border-rose-500/70 shadow-rose-500/20"
+                                }`}
+                              >
+                                {s.direction === "BULLISH" ? "💎 TRIPLE BUY" : "💎 TRIPLE SELL"}
+                              </span>
+                            ) : idx === 0 ? (
+                              <span className="inline-flex items-center gap-1 rounded bg-amber-950/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/50">
+                                🥇 TOP PICK
+                              </span>
+                            ) : (
+                              <span className="text-slate-500 font-sans text-xs font-semibold">#{idx + 1}</span>
+                            )}
+                          </div>
+
+                          {/* Symbol & Price */}
+                          <div className="flex items-baseline gap-1.5">
+                            <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1">
+                              {item.symbol}
+                              <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                            </span>
+                            <span className="text-xs font-mono font-semibold text-cyan-400">
+                              ({formatUsd(item.current_price)})
+                            </span>
+                          </div>
                         </div>
                       </div>
                     </td>
