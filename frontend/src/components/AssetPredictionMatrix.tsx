@@ -20,12 +20,28 @@ import {
   CheckCircle2,
   XCircle,
   Hourglass,
+  Star,
+  Activity,
+  TrendingUp,
+  TrendingDown,
+  Compass,
 } from "lucide-react";
-
-type HorizonKey = "all" | "watchlist" | "scalp" | "swing" | "macro" | "horizon_2d" | "horizon_3d" | "weekly" | "biweekly" | "monthly";
-
 import { useWatchlist } from "@/hooks/useWatchlist";
-import { Star } from "lucide-react";
+
+type HorizonKey =
+  | "all"
+  | "high_confluence"
+  | "reversals"
+  | "trend_expansion"
+  | "watchlist"
+  | "scalp"
+  | "swing"
+  | "macro"
+  | "horizon_2d"
+  | "horizon_3d"
+  | "weekly"
+  | "biweekly"
+  | "monthly";
 
 // Helper to render rich 3-line signal strength, catalyst badges, and ML Win Prob matching institutional scanner
 function renderSignalCell(h?: any) {
@@ -49,30 +65,10 @@ function renderSignalCell(h?: any) {
       : 72.0);
 
   let decision: string = h.decision || (isLong ? "EXECUTE LONG" : "EXECUTE SHORT");
-  // Ensure appropriate prefix emoji if missing
-  if (
-    !decision.startsWith("🎯") &&
-    !decision.startsWith("⛔") &&
-    !decision.startsWith("✅") &&
-    !decision.startsWith("⚡") &&
-    !decision.startsWith("🌊") &&
-    !decision.startsWith("💎")
-  ) {
-    if (decision.includes("FILTER")) {
-      decision = `⛔ ${decision}`;
-    } else if (decision.includes("ELITE")) {
-      decision = `🎯 ${decision}`;
-    } else if (decision.includes("STANDARD")) {
-      decision = `✅ ${decision}`;
-    } else if (decision.includes("SHORT SQUEEZE")) {
-      decision = `⚡ ${decision}`;
-    } else if (decision.includes("LONG FLUSH")) {
-      decision = `🌊 ${decision}`;
-    } else {
-      decision = `${isLong ? "🟢" : "🔴"} ${decision}`;
-    }
-  }
-
+  
+  const isConsolidation = decision.includes("CONSOLIDATION") || decision.includes("RANGE");
+  const isBottomReversal = decision.includes("BOTTOM-REVERSAL");
+  const isTopReversal = decision.includes("TOP-REVERSAL");
   const isFilter = decision.includes("FILTER");
   const isShortSqueeze = decision.includes("SHORT SQUEEZE");
   const isLongFlush = decision.includes("LONG FLUSH");
@@ -81,8 +77,41 @@ function renderSignalCell(h?: any) {
   const isRallySell = decision.includes("RALLY-SELL");
   const isElite = decision.includes("ELITE");
 
+  // Prefix emoji if missing
+  if (
+    !decision.startsWith("🎯") &&
+    !decision.startsWith("⛔") &&
+    !decision.startsWith("✅") &&
+    !decision.startsWith("⚡") &&
+    !decision.startsWith("🌊") &&
+    !decision.startsWith("💎") &&
+    !decision.startsWith("⚪")
+  ) {
+    if (isConsolidation) {
+      decision = `⚪ ${decision}`;
+    } else if (isBottomReversal || isTopReversal) {
+      decision = `🎯 ${decision}`;
+    } else if (isFilter) {
+      decision = `⛔ ${decision}`;
+    } else if (isElite) {
+      decision = `🎯 ${decision}`;
+    } else if (isShortSqueeze) {
+      decision = `⚡ ${decision}`;
+    } else if (isLongFlush) {
+      decision = `🌊 ${decision}`;
+    } else {
+      decision = `${isLong ? "🟢" : "🔴"} ${decision}`;
+    }
+  }
+
   let badgeStyle = "bg-dark-900 text-slate-300 border-slate-800";
-  if (isFilter) {
+  if (isBottomReversal) {
+    badgeStyle = "bg-emerald-950/95 text-emerald-200 border-emerald-400/80 shadow-md shadow-emerald-500/25";
+  } else if (isTopReversal) {
+    badgeStyle = "bg-rose-950/95 text-rose-200 border-rose-400/80 shadow-md shadow-rose-500/25";
+  } else if (isConsolidation) {
+    badgeStyle = "bg-slate-900/90 text-slate-400 border-slate-700/60";
+  } else if (isFilter) {
     badgeStyle = "bg-slate-900/90 text-slate-400 border-slate-800/80";
   } else if (isShortSqueeze) {
     badgeStyle = "bg-amber-950/80 text-amber-300 border-amber-500/60 shadow-sm shadow-amber-500/20";
@@ -111,11 +140,20 @@ function renderSignalCell(h?: any) {
       {/* Line 1: Direction & Conviction % & ML Win Prob */}
       <div className="flex items-center justify-between gap-1 font-mono text-[11px] leading-tight">
         <div className="flex items-center gap-1">
-          <span>{isLong ? "🟢" : "🔴"}</span>
-          <span className={isLong ? "text-emerald-400 font-extrabold" : "text-rose-400 font-extrabold"}>
-            {directionText}
-          </span>
-          <span className="text-slate-300 font-medium">({convictionVal}%)</span>
+          {isConsolidation ? (
+            <span className="text-slate-400 font-bold flex items-center gap-1">
+              <span>⚪</span>
+              <span>NEUTRAL</span>
+            </span>
+          ) : (
+            <>
+              <span>{isLong ? "🟢" : "🔴"}</span>
+              <span className={isLong ? "text-emerald-400 font-extrabold" : "text-rose-400 font-extrabold"}>
+                {directionText}
+              </span>
+              <span className="text-slate-300 font-medium">({convictionVal}%)</span>
+            </>
+          )}
         </div>
         <span
           className="text-purple-300 font-bold text-[10px] bg-purple-950/80 px-1 py-0.5 rounded border border-purple-500/40 shrink-0"
@@ -125,14 +163,14 @@ function renderSignalCell(h?: any) {
         </span>
       </div>
 
-      {/* Line 2: Take Profit & Stop Loss targets (e.g. TP: $0.007787 | SL: $0.008197) */}
+      {/* Line 2: Take Profit & Stop Loss targets */}
       <div className="text-[10px] font-mono text-slate-400 whitespace-nowrap leading-tight">
         <span>TP: <strong className="text-emerald-400">{formatUsd(h.tp_price)}</strong></span>
         <span className="mx-1 text-slate-600">|</span>
         <span>SL: <strong className="text-rose-400">{formatUsd(h.sl_price)}</strong></span>
       </div>
 
-      {/* Line 3: Signal Strength / Filter Badge (e.g. 🎯 ELITE EXECUTE SHORT or ⛔ FILTER (MACRO CONFLICT)) */}
+      {/* Line 3: Signal Strength / Filter Badge */}
       <div className="mt-0.5">
         <span
           className={`inline-block rounded px-1.5 py-0.5 text-[9.5px] font-bold font-sans border tracking-tight leading-snug whitespace-normal ${badgeStyle}`}
@@ -156,13 +194,40 @@ export default function AssetPredictionMatrix() {
 
   const filteredAssets = useMemo(() => {
     let list = leaderboard;
-    if (selectedHorizon === "watchlist") {
+
+    if (selectedHorizon === "high_confluence") {
+      list = list.filter(
+        (item: any) =>
+          item.confluence_bull_count >= 5 ||
+          item.confluence_bear_count >= 5 ||
+          item.is_triple_confluence ||
+          (item.consistency_index && item.consistency_index >= 80)
+      );
+    } else if (selectedHorizon === "reversals") {
+      list = list.filter(
+        (item: any) =>
+          (item.confluence_tag && (item.confluence_tag.includes("REVERSAL") || item.confluence_tag.includes("EXHAUSTION"))) ||
+          (item.market_phase && (item.market_phase.includes("ACCUMULATION") || item.market_phase.includes("DISTRIBUTION"))) ||
+          item.horizons?.scalp?.decision?.includes("REVERSAL") ||
+          item.horizons?.scalp?.decision?.includes("DIP-BUY") ||
+          item.horizons?.scalp?.decision?.includes("RALLY-SELL")
+      );
+    } else if (selectedHorizon === "trend_expansion") {
+      list = list.filter(
+        (item: any) =>
+          (item.market_phase && item.market_phase.includes("EXPANSION")) ||
+          item.confluence_bull_count >= 6 ||
+          item.confluence_bear_count >= 6
+      );
+    } else if (selectedHorizon === "watchlist") {
       list = list.filter((item: any) => isStarred(item.symbol));
     }
+
     if (search.trim()) {
       const q = search.toLowerCase().trim();
       list = list.filter((item: any) => item.symbol?.toLowerCase().includes(q));
     }
+
     // Always pin starred / active trade assets at the top while preserving rank
     return [...list].sort((a: any, b: any) => {
       const aStarred = isStarred(a.symbol);
@@ -175,7 +240,10 @@ export default function AssetPredictionMatrix() {
 
   const horizonTabs: { key: HorizonKey; label: string }[] = useMemo(
     () => [
-      { key: "all", label: "All Horizons" },
+      { key: "all", label: "All Horizons Matrix" },
+      { key: "high_confluence", label: "💎 High Confluence (≥5/8)" },
+      { key: "reversals", label: "⚡ Reversals & Bounces" },
+      { key: "trend_expansion", label: "🚀 Trend Expansion" },
       { key: "watchlist", label: `⭐ Watchlist (${watchlist.length})` },
       { key: "scalp", label: "⚡ Scalp (15M)" },
       { key: "swing", label: "🌊 Swing (1H)" },
@@ -202,22 +270,22 @@ export default function AssetPredictionMatrix() {
         />
       )}
 
-      {/* Clean Matrix Header */}
+      {/* Clean Matrix Header with Radar Confluence Diagnostics */}
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between border-b border-slate-800/80 pb-4">
         <div>
           <div className="flex items-center gap-2.5">
             <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
-              <Zap className="h-5 w-5 text-cyan-400" />
-              Complete Top 100-Asset Market Prediction Matrix
+              <Compass className="h-5 w-5 text-cyan-400" />
+              Complete Top 100-Asset Multi-Horizon Prediction Matrix
             </h2>
             <span className="rounded-md bg-dark-900 px-2.5 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50">
               {leaderboard.length || 100} Assets Scanned
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Multi-horizon AI predictions, entry prices, 1:2 R:R targets, and confluence grading across Top 100 crypto assets.{" "}
+            Multi-timeframe AI prediction matrix with Hysteresis noise-filtering, 8-horizon confluence scoring, and institutional phase tags.{" "}
             <span className="text-cyan-400 font-semibold underline decoration-dotted">
-              Click any coin row to view its 15-minute historical audit records.
+              Click any row to inspect historical 15-minute audit cards.
             </span>
           </p>
         </div>
@@ -247,7 +315,7 @@ export default function AssetPredictionMatrix() {
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
           <input
             type="text"
-            placeholder="Search from 100 assets..."
+            placeholder="Search 100 assets..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full rounded-xl bg-dark-900/90 pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 border border-slate-800 focus:border-cyan-500 focus:outline-none"
@@ -260,15 +328,15 @@ export default function AssetPredictionMatrix() {
         <table className="w-full text-left text-xs text-slate-300 font-mono">
           <thead className="bg-dark-900/90 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
             <tr>
-              <th className="py-3 px-4"># / Asset &amp; Live Price</th>
-              {selectedHorizon === "all" ? (
+              <th className="py-3 px-4"># / Asset &amp; Confluence</th>
+              {selectedHorizon === "all" || selectedHorizon === "high_confluence" || selectedHorizon === "reversals" || selectedHorizon === "trend_expansion" || selectedHorizon === "watchlist" ? (
                 <>
                   <th className="py-3 px-4">⚡ Scalp (15M)</th>
                   <th className="py-3 px-4">🌊 Swing (1H)</th>
                   <th className="py-3 px-4">🚀 Macro (24H)</th>
                   <th className="py-3 px-4">🗓️ Weekly (7D)</th>
                   <th className="py-3 px-4">🪐 Monthly (30D)</th>
-                  <th className="py-3 px-4 text-right">Alignment &amp; History</th>
+                  <th className="py-3 px-4 text-right">Radar Confluence</th>
                 </>
               ) : (
                 <>
@@ -286,14 +354,14 @@ export default function AssetPredictionMatrix() {
           <tbody className="divide-y divide-slate-800/60 bg-dark-950/40">
             {isLoading ? (
               <tr>
-                <td colSpan={selectedHorizon === "all" ? 7 : 8} className="py-12 text-center text-slate-500 font-sans">
-                  Loading Top 100 asset predictions from latest scan...
+                <td colSpan={8} className="py-12 text-center text-slate-500 font-sans">
+                  Loading Top 100 asset predictions from latest multi-horizon scan...
                 </td>
               </tr>
             ) : filteredAssets.length === 0 ? (
               <tr>
-                <td colSpan={selectedHorizon === "all" ? 7 : 8} className="py-12 text-center text-slate-500 font-sans">
-                  No assets match your search.
+                <td colSpan={8} className="py-12 text-center text-slate-500 font-sans">
+                  No assets match the selected filter.
                 </td>
               </tr>
             ) : (
@@ -304,9 +372,17 @@ export default function AssetPredictionMatrix() {
                 const h7d = item.horizons?.weekly || {};
                 const h30d = item.horizons?.monthly || {};
                 const isTriple = item.is_triple_confluence;
+                const confTag = item.confluence_tag || (isTriple ? "💎 TRIPLE CONFLUENCE" : `Score: ${item.alignment_score ?? 0}%`);
+                const phase = item.market_phase || "CONSOLIDATION";
 
                 // Specific Horizon View (e.g. 15M, 1H, 24H, 2D, 3D, 7D, 15D, 30D)
-                if (selectedHorizon !== "all") {
+                if (
+                  selectedHorizon !== "all" &&
+                  selectedHorizon !== "high_confluence" &&
+                  selectedHorizon !== "reversals" &&
+                  selectedHorizon !== "trend_expansion" &&
+                  selectedHorizon !== "watchlist"
+                ) {
                   const h = item.horizons?.[selectedHorizon] || {};
                   const isLong = h.direction === "BULLISH" || h.direction === "LONG";
                   const conv = h.conviction ?? 50.0;
@@ -330,7 +406,7 @@ export default function AssetPredictionMatrix() {
                     >
                       {/* Asset & Price */}
                       <td className="py-3 px-4">
-                        <div className="flex items-start gap-2 min-w-[150px]">
+                        <div className="flex items-start gap-2 min-w-[170px]">
                           <button
                             type="button"
                             onClick={(e) => {
@@ -347,25 +423,11 @@ export default function AssetPredictionMatrix() {
                             />
                           </button>
                           <div className="flex flex-col gap-1">
-                            {/* Asset Status Badge */}
-                            <div className="flex items-center gap-1.5">
-                              {isTriple ? (
-                                <span
-                                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-black border tracking-tight shadow-sm ${
-                                    s.direction === "BULLISH"
-                                      ? "bg-emerald-950/90 text-emerald-300 border-emerald-500/70 shadow-emerald-500/20"
-                                      : "bg-rose-950/90 text-rose-300 border-rose-500/70 shadow-rose-500/20"
-                                  }`}
-                                >
-                                  {s.direction === "BULLISH" ? "💎 TRIPLE BUY" : "💎 TRIPLE SELL"}
-                                </span>
-                              ) : idx === 0 ? (
-                                <span className="inline-flex items-center gap-1 rounded bg-amber-950/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/50">
-                                  🥇 TOP PICK
-                                </span>
-                              ) : (
-                                <span className="text-slate-500 font-sans text-xs font-semibold">#{idx + 1}</span>
-                              )}
+                            {/* Confluence Tag Badge */}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="rounded bg-dark-900 px-1.5 py-0.5 text-[9px] font-bold text-cyan-300 border border-slate-800">
+                                {confTag}
+                              </span>
                             </div>
 
                             {/* Symbol & Price */}
@@ -435,7 +497,7 @@ export default function AssetPredictionMatrix() {
                   );
                 }
 
-                // All-Horizon Combined Overview Row
+                // All-Horizon / Confluence Overview Row
                 return (
                   <tr
                     key={item.symbol}
@@ -443,9 +505,9 @@ export default function AssetPredictionMatrix() {
                     className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
                     title="Click to view 15-minute historical signal records for this coin"
                   >
-                    {/* Asset & Price */}
+                    {/* Asset, Price & Radar Confluence Tag */}
                     <td className="py-3 px-4">
-                      <div className="flex items-start gap-2 min-w-[150px]">
+                      <div className="flex items-start gap-2 min-w-[175px]">
                         <button
                           type="button"
                           onClick={(e) => {
@@ -462,24 +524,15 @@ export default function AssetPredictionMatrix() {
                           />
                         </button>
                         <div className="flex flex-col gap-1">
-                          {/* Asset Status Badge */}
-                          <div className="flex items-center gap-1.5">
-                            {isTriple ? (
-                              <span
-                                className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-black border tracking-tight shadow-sm ${
-                                  s.direction === "BULLISH"
-                                    ? "bg-emerald-950/90 text-emerald-300 border-emerald-500/70 shadow-emerald-500/20"
-                                    : "bg-rose-950/90 text-rose-300 border-rose-500/70 shadow-rose-500/20"
-                                }`}
-                              >
-                                {s.direction === "BULLISH" ? "💎 TRIPLE BUY" : "💎 TRIPLE SELL"}
+                          {/* Confluence Badge */}
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="rounded bg-dark-900 px-1.5 py-0.5 text-[9.5px] font-bold text-cyan-300 border border-slate-800 tracking-tight">
+                              {confTag}
+                            </span>
+                            {idx === 0 && (
+                              <span className="inline-flex items-center gap-1 rounded bg-amber-950/80 px-1 py-0.5 text-[9px] font-bold text-amber-300 border border-amber-500/50">
+                                🥇 TOP
                               </span>
-                            ) : idx === 0 ? (
-                              <span className="inline-flex items-center gap-1 rounded bg-amber-950/80 px-1.5 py-0.5 text-[10px] font-bold text-amber-300 border border-amber-500/50">
-                                🥇 TOP PICK
-                              </span>
-                            ) : (
-                              <span className="text-slate-500 font-sans text-xs font-semibold">#{idx + 1}</span>
                             )}
                           </div>
 
@@ -522,16 +575,23 @@ export default function AssetPredictionMatrix() {
                       {renderSignalCell(h30d)}
                     </td>
 
-                    {/* Alignment & Drilldown Action */}
+                    {/* Alignment & Radar Meter */}
                     <td className="py-3 px-4 text-right font-sans">
-                      <div className="flex items-center justify-end gap-2">
-                        {isTriple ? (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-cyan-950 px-2 py-0.5 text-[10px] font-black text-cyan-300 border border-cyan-500/50 shadow-sm shadow-cyan-500/20">
-                            <Sparkles className="h-3 w-3" /> TRIPLE
-                          </span>
-                        ) : null}
-                        <span className="inline-flex items-center gap-1 rounded-lg bg-dark-900 hover:bg-cyan-950 px-2 py-1 text-[10px] font-semibold text-cyan-400 border border-slate-800 hover:border-cyan-500 transition-colors">
-                          <History className="h-3 w-3" /> 15M History
+                      <div className="flex flex-col items-end gap-1">
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-black border ${
+                            item.confluence_bull_count >= 5
+                              ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/60"
+                              : item.confluence_bear_count >= 5
+                              ? "bg-rose-950/80 text-rose-300 border-rose-500/60"
+                              : "bg-slate-900/90 text-slate-400 border-slate-800"
+                          }`}
+                        >
+                          <Activity className="h-3 w-3" />
+                          {item.confluence_bull_count ?? 0} Bulls / {item.confluence_bear_count ?? 0} Bears
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-500">
+                          Align: {item.alignment_score !== undefined ? `${item.alignment_score > 0 ? "+" : ""}${item.alignment_score}%` : "—"}
                         </span>
                       </div>
                     </td>

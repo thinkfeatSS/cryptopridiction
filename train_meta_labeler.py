@@ -77,6 +77,9 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
             decision_str = str(row.get('decision', '')).upper()
             is_dip_buy = 1.0 if "DIP-BUY" in decision_str else 0.0
             is_rally_sell = 1.0 if "RALLY-SELL" in decision_str else 0.0
+            is_bottom_reversal = 1.0 if "BOTTOM-REVERSAL" in decision_str else 0.0
+            is_top_reversal = 1.0 if "TOP-REVERSAL" in decision_str else 0.0
+            is_reversal = 1.0 if (is_bottom_reversal or is_top_reversal) else 0.0
             is_liq_sweep = 1.0 if "LIQUIDITY-SWEEP" in decision_str else 0.0
             is_squeeze = 1.0 if "SHORT SQUEEZE" in decision_str else 0.0
             is_paper_exec = 1.0 if "EXECUTED" in str(row.get('paper_trading_status', '')).upper() else 0.0
@@ -111,6 +114,9 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
                 'is_long': is_long,
                 'is_dip_buy': is_dip_buy,
                 'is_rally_sell': is_rally_sell,
+                'is_bottom_reversal': is_bottom_reversal,
+                'is_top_reversal': is_top_reversal,
+                'is_reversal': is_reversal,
                 'is_liq_sweep': is_liq_sweep,
                 'is_squeeze': is_squeeze,
                 'is_paper_exec': is_paper_exec,

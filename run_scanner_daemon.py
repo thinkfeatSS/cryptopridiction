@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from test import HybridQuantEngine, CONFIG
 from app.services.db_sync import migrate_files_to_db, sync_files_to_db_live
+from app.services.model_retrainer import check_and_trigger_async
 
 def run_daemon():
     interval_seconds = int(os.getenv("SCAN_INTERVAL_SECONDS", "900"))  # Default: 15 minutes (900s)
@@ -42,6 +43,10 @@ def run_daemon():
             print(f"[SCANNER CYCLE #{scan_cycle}] Syncing exported data with database...")
             sync_files_to_db_live(force=True)
             print(f"[SCANNER CYCLE #{scan_cycle}] Market scan & DB sync completed successfully! ✅")
+
+            # Automated Model Retraining Trigger: Checks if >= 5 newly resolved signals available
+            print(f"[SCANNER CYCLE #{scan_cycle}] Checking automated model retraining threshold...")
+            check_and_trigger_async(force=False, min_new_samples=5)
 
         except Exception as e:
             print(f"[SCANNER CYCLE #{scan_cycle} ERROR ❌] Exception during market scan: {e}")

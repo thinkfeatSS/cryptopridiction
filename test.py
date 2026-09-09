@@ -868,6 +868,117 @@ class AdvancedFeatureEngineer:
         adx = dx.ewm(alpha=1/period, adjust=False).mean().fillna(20.0)
         return adx, plus_di, minus_di
 
+    @staticmethod
+    def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
+        ema_fast = series.ewm(span=fast, adjust=False).mean()
+        ema_slow = series.ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        hist = macd_line - signal_line
+        norm_factor = (series + 1e-10)
+        norm_hist = hist / norm_factor
+        hist_slope = (hist - hist.shift(1)) / norm_factor
+        bull_cross = ((macd_line > signal_line) & (macd_line.shift(1) <= signal_line.shift(1))).astype(float)
+        bear_cross = ((macd_line < signal_line) & (macd_line.shift(1) >= signal_line.shift(1))).astype(float)
+        return norm_hist.fillna(0.0), hist_slope.fillna(0.0), bull_cross.fillna(0.0), bear_cross.fillna(0.0)
+
+    @staticmethod
+    def compute_rsi_divergences(df: pd.DataFrame, rsi: pd.Series, lookback: int = 14):
+        low = df['low']
+        high = df['high']
+        prior_low_min = low.shift(1).rolling(lookback).min()
+        prior_rsi_min = rsi.shift(1).rolling(lookback).min()
+        prior_high_max = high.shift(1).rolling(lookback).max()
+        prior_rsi_max = rsi.shift(1).rolling(lookback).max()
+        
+        # Bullish Divergence: Price creates new local low while RSI prints a higher low (oversold bounce setup)
+        bull_div = ((low <= prior_low_min * 1.002) & (rsi > prior_rsi_min + 0.03) & (rsi < 0.45)).astype(float)
+        # Bearish Divergence: Price creates new local high while RSI prints a lower high (overbought top setup)
+        bear_div = ((high >= prior_high_max * 0.998) & (rsi < prior_rsi_max - 0.03) & (rsi > 0.55)).astype(float)
+        return bull_div.fillna(0.0), bear_div.fillna(0.0)
+
+    @staticmethod
+    def compute_demark_td9(series: pd.Series):
+        c = series.values
+        n = len(c)
+        buy_counts = np.zeros(n)
+        sell_counts = np.zeros(n)
+        curr_buy = 0
+        curr_sell = 0
+        for i in range(4, n):
+            if c[i] < c[i-4]:
+                curr_buy = min(9, curr_buy + 1)
+                curr_sell = 0
+            elif c[i] > c[i-4]:
+                curr_sell = min(9, curr_sell + 1)
+                curr_buy = 0
+            else:
+                curr_buy = 0
+                curr_sell = 0
+            buy_counts[i] = curr_buy
+            sell_counts[i] = curr_sell
+            
+        buy_s = pd.Series(buy_counts, index=series.index)
+        sell_s = pd.Series(sell_counts, index=series.index)
+        buy_exhaustion = (buy_s >= 8).astype(float)
+        sell_exhaustion = (sell_s >= 8).astype(float)
+        return (buy_s / 9.0).fillna(0.0), (sell_s / 9.0).fillna(0.0), buy_exhaustion, sell_exhaustion
+
+    @staticmethod
+    def compute_candlestick_reversal_patterns(df: pd.DataFrame):
+        o, h, l, c = df['open'], df['high'], df['low'], df['close']
+        bar_range = (h - l).clip(lower=1e-10)
+        upper_wick = h - np.maximum(c, o)
+        lower_wick = np.minimum(c, o) - l
+        
+        # Hammer / Bullish Pin Bar
+        is_hammer = ((lower_wick >= 0.55 * bar_range) & (upper_wick <= 0.20 * bar_range) & (c >= (l + 0.60 * bar_range))).astype(float)
+        # Shooting Star / Bearish Pin Bar
+        is_shooting_star = ((upper_wick >= 0.55 * bar_range) & (lower_wick <= 0.20 * bar_range) & (c <= (l + 0.40 * bar_range))).astype(float)
+        
+        # Bullish Engulfing
+        prev_red = (c.shift(1) < o.shift(1))
+        curr_green = (c > o)
+        bull_engulf = (prev_red & curr_green & (c > o.shift(1)) & (o <= c.shift(1))).astype(float)
+        
+        # Bearish Engulfing
+        prev_green = (c.shift(1) > o.shift(1))
+        curr_red = (c < o)
+        bear_engulf = (prev_green & curr_red & (c < o.shift(1)) & (o >= c.shift(1))).astype(float)
+        
+        bull_pattern = ((is_hammer > 0) | (bull_engulf > 0)).astype(float)
+        bear_pattern = ((is_shooting_star > 0) | (bear_engulf > 0)).astype(float)
+        return bull_pattern.fillna(0.0), bear_pattern.fillna(0.0)
+
+    @staticmethod
+    def compute_band_reversion_metrics(df: pd.DataFrame):
+        c, h, l = df['close'], df['high'], df['low']
+        sma20 = c.rolling(20).mean()
+        std20 = c.rolling(20).std()
+        upper_bb = sma20 + (2.0 * std20)
+        lower_bb = sma20 - (2.0 * std20)
+        
+        # Spring: Low pierced lower band, close finished back inside bands
+        bb_spring = ((l.shift(1) < lower_bb.shift(1)) & (c > lower_bb)).astype(float)
+        # Upthrust: High pierced upper band, close finished back inside bands
+        bb_upthrust = ((h.shift(1) > upper_bb.shift(1)) & (c < upper_bb)).astype(float)
+        z_score_ema = ((c - sma20) / (std20 + 1e-10)).clip(-4.0, 4.0)
+        return bb_spring.fillna(0.0), bb_upthrust.fillna(0.0), z_score_ema.fillna(0.0)
+
+    @staticmethod
+    def compute_volume_climax(df: pd.DataFrame):
+        v = df['volume']
+        c, o, h, l = df['close'], df['open'], df['high'], df['low']
+        v_ma20 = v.rolling(20).mean()
+        vol_surge = (v / (v_ma20 + 1e-10))
+        bar_range = (h - l).clip(lower=1e-10)
+        lower_wick = np.minimum(c, o) - l
+        upper_wick = h - np.maximum(c, o)
+        
+        climax_bottom = ((vol_surge >= 1.8) & (lower_wick >= 0.35 * bar_range) & (c >= o)).astype(float)
+        climax_top = ((vol_surge >= 1.8) & (upper_wick >= 0.35 * bar_range) & (c <= o)).astype(float)
+        return vol_surge.clip(0.0, 10.0).fillna(1.0), climax_bottom.fillna(0.0), climax_top.fillna(0.0)
+
     def build_timeframe_features(self, df: pd.DataFrame, prefix: str) -> pd.DataFrame:
         data = df.copy()
         c = data['close']
@@ -900,7 +1011,7 @@ class AdvancedFeatureEngineer:
         pk_vol = self.parkinson_volatility(data, window=14)
         feats[f'{prefix}_vrp_ratio'] = (gk_vol / (pk_vol + 1e-10)).clip(0.1, 5.0)
 
-        # 4. TTM Squeeze
+        # 4. TTM Squeeze & Bollinger Reversion Alpha
         raw_atr20 = self.compute_atr(data, period=20)
         sma20 = c.rolling(20).mean()
         std20 = c.rolling(20).std()
@@ -910,6 +1021,11 @@ class AdvancedFeatureEngineer:
         lower_kc = sma20 - (1.5 * raw_atr20)
         feats[f'{prefix}_ttm_squeeze'] = ((lower_bb > lower_kc) & (upper_bb < upper_kc)).astype(float)
         feats[f'{prefix}_bb_pct_b'] = ((c - lower_bb) / ((upper_bb - lower_bb) + 1e-10)).clip(-0.5, 1.5)
+        
+        bb_spring, bb_upthrust, z_score_ema = self.compute_band_reversion_metrics(data)
+        feats[f'{prefix}_bb_spring'] = bb_spring
+        feats[f'{prefix}_bb_upthrust'] = bb_upthrust
+        feats[f'{prefix}_zscore_ema20'] = z_score_ema
 
         # 5. Institutional Alphas: FVG & Wick Rejection
         bull_fvg = (l - h.shift(2)).clip(lower=0.0) / (c + 1e-10)
@@ -930,19 +1046,50 @@ class AdvancedFeatureEngineer:
         feats[f'{prefix}_dist_to_ema200'] = (c - ema200) / (c + 1e-10)
         feats[f'{prefix}_ema9_slope'] = (ema9 - ema9.shift(1)) / (c + 1e-10)
 
-        # 7. Momentum
+        # 7. Momentum & Oscillators
         feats[f'{prefix}_mfi_14'] = self.compute_mfi(data, period=14)
-        feats[f'{prefix}_rsi_14'] = self.compute_rsi(c, period=14)
+        rsi_series = self.compute_rsi(c, period=14)
+        feats[f'{prefix}_rsi_14'] = rsi_series
         stoch_k, stoch_d = self.compute_stoch_rsi(c, period=14)
         feats[f'{prefix}_stoch_rsi_k'] = stoch_k
         feats[f'{prefix}_stoch_rsi_diff'] = stoch_k - stoch_d
 
-        # 8. Fractional Memory & Multi-Lag Returns
+        # 8. MACD Reversal & Divergences
+        norm_hist, hist_slope, macd_bull_cross, macd_bear_cross = self.compute_macd(c)
+        feats[f'{prefix}_macd_norm_hist'] = norm_hist
+        feats[f'{prefix}_macd_hist_slope'] = hist_slope
+        feats[f'{prefix}_macd_bull_cross'] = macd_bull_cross
+        feats[f'{prefix}_macd_bear_cross'] = macd_bear_cross
+
+        # 9. Regular RSI Divergences (Bottom Bounces & Top Pullbacks)
+        rsi_bull_div, rsi_bear_div = self.compute_rsi_divergences(data, rsi_series, lookback=14)
+        feats[f'{prefix}_rsi_bull_div'] = rsi_bull_div
+        feats[f'{prefix}_rsi_bear_div'] = rsi_bear_div
+
+        # 10. DeMark Sequential TD-9 Trend Exhaustion
+        td_buy_norm, td_sell_norm, td9_buy_ex, td9_sell_ex = self.compute_demark_td9(c)
+        feats[f'{prefix}_td_buy_count'] = td_buy_norm
+        feats[f'{prefix}_td_sell_count'] = td_sell_norm
+        feats[f'{prefix}_td9_buy_exhaustion'] = td9_buy_ex
+        feats[f'{prefix}_td9_sell_exhaustion'] = td9_sell_ex
+
+        # 11. Candlestick Price Action Reversal Formations
+        candlestick_bull_rev, candlestick_bear_rev = self.compute_candlestick_reversal_patterns(data)
+        feats[f'{prefix}_candlestick_bull_reversal'] = candlestick_bull_rev
+        feats[f'{prefix}_candlestick_bear_reversal'] = candlestick_bear_rev
+
+        # 12. Volume Climax & Absorption
+        vol_surge, climax_bot, climax_top = self.compute_volume_climax(data)
+        feats[f'{prefix}_vol_surge_ratio'] = vol_surge
+        feats[f'{prefix}_vol_climax_bottom'] = climax_bot
+        feats[f'{prefix}_vol_climax_top'] = climax_top
+
+        # 13. Fractional Memory & Multi-Lag Returns
         feats[f'{prefix}_frac_diff'] = self.get_fractional_diff(c, d=0.35)
         for lag in [1, 3]:
             feats[f'{prefix}_ret_{lag}'] = np.log(c / c.shift(lag).clip(lower=1e-10)).fillna(0.0)
 
-        # 9. Cumulative Volume Delta (CVD) & Market Aggression (Taker Buy Ratio)
+        # 14. Cumulative Volume Delta (CVD) & Market Aggression (Taker Buy Ratio)
         if 'taker_buy_vol' in data.columns:
             tb_vol = data['taker_buy_vol']
             taker_ratio = (tb_vol / (v + 1e-10)).clip(0.0, 1.0)
@@ -950,14 +1097,13 @@ class AdvancedFeatureEngineer:
             cvd_roll = net_delta.rolling(14).sum() / (v.rolling(14).sum() + 1e-10)
             feats[f'{prefix}_taker_buy_ratio'] = taker_ratio.fillna(0.5)
             feats[f'{prefix}_cvd_norm'] = cvd_roll.clip(-1.0, 1.0).fillna(0.0)
-            # CVD Acceleration (3-bar volume delta velocity)
             feats[f'{prefix}_cvd_accel'] = (feats[f'{prefix}_cvd_norm'] - feats[f'{prefix}_cvd_norm'].shift(3)).fillna(0.0)
         else:
             feats[f'{prefix}_taker_buy_ratio'] = 0.50
             feats[f'{prefix}_cvd_norm'] = 0.0
             feats[f'{prefix}_cvd_accel'] = 0.0
 
-        # 10. Smart Money Concepts: Liquidity Sweep & Wall Proximity
+        # 15. Smart Money Concepts: Liquidity Sweep & Wall Proximity
         roll_high_24 = h.rolling(24).max()
         roll_low_24 = l.rolling(24).min()
         bull_sweep = ((l < roll_low_24.shift(1)) & (c > roll_low_24.shift(1)) & (lower_wick >= 0.28 * bar_range)).astype(float)
@@ -967,10 +1113,39 @@ class AdvancedFeatureEngineer:
         feats[f'{prefix}_headroom_to_high24'] = ((roll_high_24 - c) / (c + 1e-10)).clip(lower=0.0)
         feats[f'{prefix}_headroom_to_low24'] = ((c - roll_low_24) / (c + 1e-10)).clip(lower=0.0)
 
-        # 11. Multi-Timeframe EMA Alignment Cohesion Vector (+1 for perfect Bull stack, -1 for perfect Bear stack)
+        # 16. Multi-Timeframe EMA Alignment Cohesion Vector
         ema_bull_stack = ((ema9 > ema21) & (ema21 > ema50) & (ema50 > ema200)).astype(float)
         ema_bear_stack = ((ema9 < ema21) & (ema21 < ema50) & (ema50 < ema200)).astype(float)
         feats[f'{prefix}_ema_stack_cohesion'] = (ema_bull_stack - ema_bear_stack).fillna(0.0)
+
+        # 17. Quantitative Composite Reversal Scores (0.0 to 1.0)
+        rsi_oversold_factor = (0.50 - rsi_series).clip(lower=0.0) * 2.0
+        rsi_overbought_factor = (rsi_series - 0.50).clip(lower=0.0) * 2.0
+
+        bull_rev_score = (
+            0.25 * rsi_bull_div +
+            0.20 * rsi_oversold_factor +
+            0.15 * (hist_slope > 0).astype(float) +
+            0.15 * td9_buy_ex +
+            0.15 * candlestick_bull_rev +
+            0.15 * bb_spring +
+            0.10 * climax_bot +
+            0.10 * bull_sweep
+        ).clip(0.0, 1.0)
+
+        bear_rev_score = (
+            0.25 * rsi_bear_div +
+            0.20 * rsi_overbought_factor +
+            0.15 * (hist_slope < 0).astype(float) +
+            0.15 * td9_sell_ex +
+            0.15 * candlestick_bear_rev +
+            0.15 * bb_upthrust +
+            0.10 * climax_top +
+            0.10 * bear_sweep
+        ).clip(0.0, 1.0)
+
+        feats[f'{prefix}_bull_reversal_score'] = bull_rev_score.fillna(0.0)
+        feats[f'{prefix}_bear_reversal_score'] = bear_rev_score.fillna(0.0)
 
         return feats.ffill().bfill()
 
@@ -2168,21 +2343,32 @@ class SignalMetaClassifier:
         self.bundle = None
         self.model = None
         self.feature_cols = []
+        self._last_mtime = 0
         self.load_model()
 
     def load_model(self):
         if os.path.exists(self.model_path):
             try:
-                self.bundle = joblib.load(self.model_path)
-                self.model = self.bundle.get('model')
-                self.feature_cols = self.bundle.get('feature_cols', [])
-                print(f"[META CLASSIFIER 🧠] Loaded Trained Secondary Meta-Labeling Model from {self.model_path}")
+                mtime = os.path.getmtime(self.model_path)
+                if mtime != self._last_mtime or self.model is None:
+                    self.bundle = joblib.load(self.model_path)
+                    self.model = self.bundle.get('model')
+                    self.feature_cols = self.bundle.get('feature_cols', [])
+                    self._last_mtime = mtime
+                    print(f"[META CLASSIFIER 🧠] Loaded / Hot-Reloaded Trained Secondary Meta-Labeling Model from {self.model_path}")
             except Exception as e:
                 print(f"[META CLASSIFIER ⚠️] Model load fallback note: {e}")
                 self.model = None
 
     def predict_win_probability(self, sig: dict) -> float:
         """Predicts calibrated win probability (0.0 to 1.0) for a candidate signal."""
+        # Auto-check if model was updated on disk
+        if os.path.exists(self.model_path):
+            try:
+                if os.path.getmtime(self.model_path) != self._last_mtime:
+                    self.load_model()
+            except Exception:
+                pass
         conv = float(sig.get('conviction', 70.0))
         is_a_plus = 1.0 if "A+" in str(sig.get('grade', '')) else 0.0
         exp_ret = float(sig.get('exp_return', 0.0)) * 100.0
@@ -2206,6 +2392,10 @@ class SignalMetaClassifier:
             return round(min(0.95, max(0.40, base_p)), 3)
 
         try:
+            is_bottom_reversal = 1.0 if "BOTTOM-REVERSAL" in decision_str else 0.0
+            is_top_reversal = 1.0 if "TOP-REVERSAL" in decision_str else 0.0
+            is_reversal = 1.0 if (is_bottom_reversal or is_top_reversal) else 0.0
+
             row = {
                 'conviction_pct': conv,
                 'expected_return_pct': exp_ret,
@@ -2217,6 +2407,9 @@ class SignalMetaClassifier:
                 'is_long': 1.0 if direction_str in ["LONG", "BULLISH"] else 0.0,
                 'is_dip_buy': 1.0 if "DIP-BUY" in decision_str else 0.0,
                 'is_rally_sell': 1.0 if "RALLY-SELL" in decision_str else 0.0,
+                'is_bottom_reversal': is_bottom_reversal,
+                'is_top_reversal': is_top_reversal,
+                'is_reversal': is_reversal,
                 'is_liq_sweep': 1.0 if "LIQUIDITY-SWEEP" in decision_str else 0.0,
                 'is_squeeze': 1.0 if "SHORT SQUEEZE" in decision_str else 0.0,
                 'is_paper_exec': 1.0 if "ACTIVE" in str(sig.get('paper_trading_status', '')).upper() else 0.0,
@@ -2496,10 +2689,23 @@ class HybridQuantEngine:
                         'ts': now_ts
                     }
 
-        # 1. Base ML Direction & Calibrated Probability
+        # 1. Base ML Direction & Calibrated Probability with Hysteresis Smoothing
         h_prob = (p_cat_live * w_cat) + (p_xgb_live * w_xgb) + (p_lgb_live * w_lgb) + (p_et_live * w_et)
-        h_dir = "BULLISH" if h_prob >= 0.5 else "BEARISH"
-        h_conf = (h_prob if h_prob >= 0.5 else (1.0 - h_prob)) * 100.0
+        
+        # Hysteresis Band: [0.47, 0.53] represents low-conviction neutral consolidation zone
+        if h_prob >= 0.53:
+            h_dir = "BULLISH"
+            h_conf = h_prob * 100.0
+            is_neutral_zone = False
+        elif h_prob <= 0.47:
+            h_dir = "BEARISH"
+            h_conf = (1.0 - h_prob) * 100.0
+            is_neutral_zone = False
+        else:
+            # Inside the neutral consolidation band
+            h_dir = "BULLISH" if d1_macro_bull else "BEARISH"
+            h_conf = 50.0 + abs(h_prob - 0.50) * 100.0
+            is_neutral_zone = True
 
         # 2. Futures Funding Rate & Squeeze Catalyst Integration
         squeeze_boost_label = ""
@@ -2541,38 +2747,83 @@ class HybridQuantEngine:
 
         # 6. Determine Strategy Signal & Directional Overrides
         rsi_anchor = live_candle[f'{anchor_tf}_rsi_14'].values[0] * 100.0 if f'{anchor_tf}_rsi_14' in live_candle.columns else 50.0
+        bull_rev_score = float(live_candle.get(f'{anchor_tf}_bull_reversal_score', pd.Series([0.0])).values[0])
+        bear_rev_score = float(live_candle.get(f'{anchor_tf}_bear_reversal_score', pd.Series([0.0])).values[0])
+        rsi_bull_div = live_candle.get(f'{anchor_tf}_rsi_bull_div', pd.Series([0])).values[0] == 1.0
+        rsi_bear_div = live_candle.get(f'{anchor_tf}_rsi_bear_div', pd.Series([0])).values[0] == 1.0
+        td9_buy_ex = live_candle.get(f'{anchor_tf}_td9_buy_exhaustion', pd.Series([0])).values[0] == 1.0
+        td9_sell_ex = live_candle.get(f'{anchor_tf}_td9_sell_exhaustion', pd.Series([0])).values[0] == 1.0
+        candlestick_bull = live_candle.get(f'{anchor_tf}_candlestick_bull_reversal', pd.Series([0])).values[0] == 1.0
+        candlestick_bear = live_candle.get(f'{anchor_tf}_candlestick_bear_reversal', pd.Series([0])).values[0] == 1.0
+        bb_spring = live_candle.get(f'{anchor_tf}_bb_spring', pd.Series([0])).values[0] == 1.0
+        bb_upthrust = live_candle.get(f'{anchor_tf}_bb_upthrust', pd.Series([0])).values[0] == 1.0
+
+        # Quantitative Reversal Detection: Bottom Bounces after Downtrends & Top Exhaustion after Uptrends
+        is_bottom_reversal = (
+            (bull_rev_score >= 0.45 or rsi_bull_div or (td9_buy_ex and (candlestick_bull or rsi_anchor <= 38.0)) or (bb_spring and rsi_anchor <= 42.0))
+            and (p_cat_live >= 0.43 or p_xgb_live >= 0.43 or h_prob >= 0.45)
+        )
+        is_top_reversal = (
+            (bear_rev_score >= 0.45 or rsi_bear_div or (td9_sell_ex and (candlestick_bear or rsi_anchor >= 62.0)) or (bb_upthrust and rsi_anchor >= 58.0))
+            and (p_cat_live <= 0.57 or p_xgb_live <= 0.57 or h_prob <= 0.55)
+        )
+
         is_dip_buy = d1_macro_bull and rsi_anchor <= 46.0 and (p_cat_live >= 0.48 or p_xgb_live >= 0.48)
         is_rally_sell = (not d1_macro_bull) and rsi_anchor >= 55.0 and (p_cat_live <= 0.52 or p_xgb_live <= 0.52)
 
-        if is_bull_sweep and (p_cat_live >= 0.44 or p_xgb_live >= 0.44):
+        is_reversal_setup = False
+        if is_bottom_reversal and (not is_top_reversal or bull_rev_score > bear_rev_score):
+            h_dir = "BULLISH"
+            h_conf = max(72.0, min(97.0, 62.0 + (bull_rev_score * 35.0)))
+            decision = f"🎯 ELITE BOTTOM-REVERSAL (LONG){squeeze_boost_label}"
+            priority = 1
+            is_reversal_setup = True
+            is_neutral_zone = False
+        elif is_top_reversal and (not is_bottom_reversal or bear_rev_score > bull_rev_score):
+            h_dir = "BEARISH"
+            h_conf = max(72.0, min(97.0, 62.0 + (bear_rev_score * 35.0)))
+            decision = f"🎯 ELITE TOP-REVERSAL (SHORT){squeeze_boost_label}"
+            priority = 1
+            is_reversal_setup = True
+            is_neutral_zone = False
+        elif is_bull_sweep and (p_cat_live >= 0.44 or p_xgb_live >= 0.44):
             h_dir = "BULLISH"
             h_conf = max(68.0, min(96.0, h_conf + 8.0))
             decision = f"🎯 ELITE LIQUIDITY-SWEEP (LONG){squeeze_boost_label}"
             priority = 1
+            is_neutral_zone = False
         elif is_bear_sweep and (p_cat_live <= 0.56 or p_xgb_live <= 0.56):
             h_dir = "BEARISH"
             h_conf = max(68.0, min(96.0, h_conf + 8.0))
             decision = f"🎯 ELITE LIQUIDITY-SWEEP (SHORT){squeeze_boost_label}"
             priority = 1
+            is_neutral_zone = False
         elif is_dip_buy:
             h_dir = "BULLISH"
             h_conf = max(55.0, h_conf)
             decision = f"🎯 ELITE DIP-BUY EXECUTE (LONG){squeeze_boost_label}"
             priority = 1
+            is_neutral_zone = False
         elif is_rally_sell:
             h_dir = "BEARISH"
             h_conf = max(55.0, h_conf)
             decision = f"🎯 ELITE RALLY-SELL EXECUTE (SHORT){squeeze_boost_label}"
             priority = 1
+            is_neutral_zone = False
+        elif is_neutral_zone:
+            decision = "⚪ CONSOLIDATION (RANGE-BOUND / WAIT)"
+            priority = 4
         else:
             is_macro_aligned = (h_dir == "BULLISH" and d1_macro_bull) or (h_dir == "BEARISH" and not d1_macro_bull)
+            is_15m_scalp_exception = (horizon_key == "scalp" and h_conf >= 62.0)
+
             if is_macro_aligned and h_conf >= (self.config['elite_conviction_threshold'] * 100.0):
                 decision = f"🎯 ELITE EXECUTE {'LONG' if h_dir=='BULLISH' else 'SHORT'}{squeeze_boost_label}"
                 priority = 1
-            elif is_macro_aligned and h_conf >= 55.0:
+            elif (is_macro_aligned or is_15m_scalp_exception) and h_conf >= 55.0:
                 decision = f"✅ STANDARD EXECUTE {'LONG' if h_dir=='BULLISH' else 'SHORT'}{squeeze_boost_label}"
                 priority = 2
-            elif not is_macro_aligned:
+            elif not is_macro_aligned and not is_15m_scalp_exception:
                 decision = "⛔ FILTER (MACRO CONFLICT)"
                 priority = 3
             else:
@@ -2585,20 +2836,33 @@ class HybridQuantEngine:
         projected_target = current_price * (1.0 + exp_ret)
 
         risk_dist = max(1e-8, sl_mult_eff * live_raw_atr)
+        live_low_c = float(live_candle['low'].values[0]) if 'low' in live_candle.columns else current_price
+        live_high_c = float(live_candle['high'].values[0]) if 'high' in live_candle.columns else current_price
+
         if h_dir == "BULLISH":
-            sl_p = current_price - risk_dist
-            tp1_p = current_price + (0.50 * risk_dist)
-            tp2_p = current_price + (1.00 * risk_dist)
-            tp3_p = current_price + (1.50 * risk_dist)
-            tp4_p = current_price + (2.00 * risk_dist)
+            sl_base = current_price - risk_dist
+            if is_reversal_setup or is_bull_sweep:
+                sl_p = min(sl_base, live_low_c - (0.25 * live_raw_atr))
+            else:
+                sl_p = sl_base
+            actual_risk = max(1e-8, current_price - sl_p)
+            tp1_p = current_price + (0.50 * actual_risk)
+            tp2_p = current_price + (1.00 * actual_risk)
+            tp3_p = current_price + (1.50 * actual_risk)
+            tp4_p = current_price + (2.00 * actual_risk)
             tp_p = tp4_p
         else:
-            sl_p = current_price + risk_dist
+            sl_base = current_price + risk_dist
+            if is_reversal_setup or is_bear_sweep:
+                sl_p = max(sl_base, live_high_c + (0.25 * live_raw_atr))
+            else:
+                sl_p = sl_base
+            actual_risk = max(1e-8, sl_p - current_price)
             min_floor = max(1e-8, current_price * 0.05)
-            tp1_p = max(min_floor, current_price - (0.50 * risk_dist))
-            tp2_p = max(min_floor, current_price - (1.00 * risk_dist))
-            tp3_p = max(min_floor, current_price - (1.50 * risk_dist))
-            tp4_p = max(min_floor, current_price - (2.00 * risk_dist))
+            tp1_p = max(min_floor, current_price - (0.50 * actual_risk))
+            tp2_p = max(min_floor, current_price - (1.00 * actual_risk))
+            tp3_p = max(min_floor, current_price - (1.50 * actual_risk))
+            tp4_p = max(min_floor, current_price - (2.00 * actual_risk))
             tp_p = tp4_p
 
         # 8. Minimum Profit Hurdle Check (Enforces >= 0.40% return to clear round-trip buy & sell fees)
@@ -2755,16 +3019,63 @@ class HybridQuantEngine:
         d1_ema200 = pd.Series(d1_c).ewm(span=200).mean().values[-1]
         d1_macro_bull = (d1_c[-1] > d1_ema50) or (d1_ema50 > d1_ema200)
 
-        # Evaluate all 3 horizons simultaneously: Scalp (15M), Swing (1H), Macro (24H)
+        # Evaluate all horizons simultaneously: Scalp (15M), Swing (1H), Macro (24H), etc.
         horizon_results = {}
         for h_key, h_cfg in self.config['horizons'].items():
             horizon_results[h_key] = self.evaluate_single_horizon(symbol, h_key, h_cfg, raw_dfs, tf_features, d1_macro_bull, funding_info)
 
-        # Check for Triple Confluence
-        scalp_dir = horizon_results['scalp']['direction']
-        swing_dir = horizon_results['swing']['direction']
-        macro_dir = horizon_results['macro']['direction']
-        is_triple_confluence = (scalp_dir == swing_dir == macro_dir)
+        # Multi-Horizon Alignment & Confluence Diagnostics
+        bull_horizons = [k for k, h in horizon_results.items() if h['direction'] == "BULLISH" and "CONSOLIDATION" not in h['decision']]
+        bear_horizons = [k for k, h in horizon_results.items() if h['direction'] == "BEARISH" and "CONSOLIDATION" not in h['decision']]
+        neutral_horizons = [k for k, h in horizon_results.items() if "CONSOLIDATION" in h['decision']]
+        
+        total_h = len(horizon_results)
+        bull_count = len(bull_horizons)
+        bear_count = len(bear_horizons)
+        neutral_count = len(neutral_horizons)
+        alignment_score = round(((bull_count - bear_count) / max(1, total_h)) * 100.0, 1)
+
+        # Determine Institutional Market Phase & Radar Confluence Tag
+        scalp_h = horizon_results.get('scalp', {})
+        swing_h = horizon_results.get('swing', {})
+        macro_h = horizon_results.get('macro', {})
+
+        is_scalp_bottom = "BOTTOM-REVERSAL" in scalp_h.get('decision', '') or "DIP-BUY" in scalp_h.get('decision', '')
+        is_scalp_top = "TOP-REVERSAL" in scalp_h.get('decision', '') or "RALLY-SELL" in scalp_h.get('decision', '')
+        
+        if bull_count >= 7:
+            confluence_tag = f"💎 {bull_count}/{total_h} BULL EXPANSION"
+            market_phase = "🚀 BULL_TREND_EXPANSION"
+            consistency_index = 95.0
+        elif bear_count >= 7:
+            confluence_tag = f"💎 {bear_count}/{total_h} BEAR BREAKDOWN"
+            market_phase = "🩸 BEAR_TREND_EXPANSION"
+            consistency_index = 95.0
+        elif bull_count >= 5:
+            confluence_tag = f"🟢 {bull_count}/{total_h} STRONG BULLISH"
+            market_phase = "🚀 BULL_TREND_EXPANSION" if macro_h.get('direction') == 'BULLISH' else "💎 DIP_ACCUMULATION"
+            consistency_index = 80.0
+        elif bear_count >= 5:
+            confluence_tag = f"🔴 {bear_count}/{total_h} STRONG BEARISH"
+            market_phase = "🩸 BEAR_TREND_EXPANSION" if macro_h.get('direction') == 'BEARISH' else "🛑 TOP_DISTRIBUTION"
+            consistency_index = 80.0
+        elif is_scalp_bottom:
+            confluence_tag = f"⚡ 15M BOTTOM REVERSAL"
+            market_phase = "💎 DIP_ACCUMULATION"
+            consistency_index = 75.0
+        elif is_scalp_top:
+            confluence_tag = f"⚡ 15M TOP EXHAUSTION"
+            market_phase = "🛑 TOP_DISTRIBUTION"
+            consistency_index = 75.0
+        else:
+            confluence_tag = f"⚪ {neutral_count}/{total_h} RANGE CONSOLIDATION"
+            market_phase = "💤 RANGE_CONSOLIDATION"
+            consistency_index = 50.0
+
+        is_triple_confluence = (
+            scalp_h.get('direction') == swing_h.get('direction') == macro_h.get('direction')
+            and "CONSOLIDATION" not in scalp_h.get('decision', '')
+        )
 
         # Master pick priority
         best_priority = min(h['priority'] for h in horizon_results.values())
@@ -2781,6 +3092,13 @@ class HybridQuantEngine:
             "live_low": live_low,
             "horizons": horizon_results,
             "is_triple_confluence": is_triple_confluence,
+            "confluence_bull_count": bull_count,
+            "confluence_bear_count": bear_count,
+            "confluence_neutral_count": neutral_count,
+            "alignment_score": alignment_score,
+            "confluence_tag": confluence_tag,
+            "market_phase": market_phase,
+            "consistency_index": consistency_index,
             "best_priority": best_priority,
             "overall_score": overall_score,
             "tf_metrics_summary": tf_metrics_summary
@@ -2850,8 +3168,14 @@ class HybridQuantEngine:
                     except Exception as e:
                         print(f"[ERROR] Failed scanning {sym}: {e}")
 
-            # Sort by best priority, triple confluence, and score
-            scanner_results.sort(key=lambda x: (x['best_priority'], not x['is_triple_confluence'], -x['overall_score']))
+            # Sort by best priority, triple confluence, consistency index, and alignment strength
+            scanner_results.sort(key=lambda x: (
+                x['best_priority'],
+                not x['is_triple_confluence'],
+                -x.get('consistency_index', 50.0),
+                -abs(x.get('alignment_score', 0.0)),
+                -x['overall_score']
+            ))
             self.render_multi_horizon_leaderboard(scanner_results)
 
         # 2. Single-Coin Deep Dive
@@ -2889,7 +3213,7 @@ class HybridQuantEngine:
             all_candidates = []
             for r in scanner_results:
                 for h_key, h in r['horizons'].items():
-                    if h['priority'] <= 2 or "EXECUTE" in h['decision'] or "DIP-BUY" in h['decision']:
+                    if h['priority'] <= 2 or "EXECUTE" in h['decision'] or "DIP-BUY" in h['decision'] or "REVERSAL" in h['decision']:
                         all_candidates.append((h, h_key))
 
             # Rank candidates: Prioritize Grade A+, High-Margin Macro, Weekly & Swing setups, and Conviction/Alpha edge
@@ -3224,7 +3548,7 @@ class HybridQuantEngine:
                 
                 # Composite Score combining Conviction, ML Meta-Score, Triple Confluence & Yield
                 triple_bonus = 30.0 if is_triple else 0.0
-                exec_bonus = 20.0 if ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision) else 0.0
+                exec_bonus = 20.0 if ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision or "REVERSAL" in decision) else 0.0
                 composite_score = (conv * 0.4) + (meta_win_prob * 100.0 * 0.4) + (max(0.0, rs_val) * 4.0) + triple_bonus + exec_bonus + (abs(exp_ret) * 50.0)
                 candidate_obj['composite_score'] = composite_score
 

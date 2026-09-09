@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from app.config import settings
 from app.services.db_sync import migrate_files_to_db, init_db
-from app.routers import signals_router, forecast_router, portfolio_router, health_router
+from app.routers import signals_router, forecast_router, portfolio_router, health_router, models_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,6 +41,7 @@ app.include_router(signals_router)
 app.include_router(forecast_router)
 app.include_router(portfolio_router)
 app.include_router(health_router)
+app.include_router(models_router)
 
 @app.get("/")
 def root():
