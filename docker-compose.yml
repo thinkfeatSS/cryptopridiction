@@ -14,7 +14,6 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-crypto_secure_pass_2026}
     volumes:
       - mysql_data:/var/lib/mysql
-    # Mapped to 127.0.0.1:3307 so it doesn't conflict with existing databases on 3306
     ports:
       - "127.0.0.1:3307:3306"
     healthcheck:
@@ -23,11 +22,16 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - crypto_network
 
   # ============================================================================
-  # 2. FastAPI REST Backend Service
+  # 2. FastAPI REST Backend Service (4 Concurrency Workers)
   # ============================================================================
   backend:
     build:
@@ -35,7 +39,7 @@ services:
       dockerfile: Dockerfile.backend
     container_name: crypto_backend
     restart: unless-stopped
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
     environment:
       - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-crypto_user}:${MYSQL_PASSWORD:-crypto_secure_pass_2026}@db:3306/${MYSQL_DATABASE:-crypto_trading}
       - MYSQL_HOST=db
@@ -52,11 +56,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - crypto_network
 
   # ============================================================================
-  # 3. Continuous 8-Horizon ML Prediction Scanner Daemon
+  # 3. Continuous 8-Horizon ML Prediction Scanner Daemon (Top 150 Universe)
   # ============================================================================
   scanner:
     build:
@@ -74,7 +83,9 @@ services:
       - MYSQL_DB=${MYSQL_DATABASE:-crypto_trading}
       - EXPORT_DIR=/app/export_app_data
       - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-15}
-      - SCANNER_TOP_N=${SCANNER_TOP_N:-100}
+      - SCANNER_TOP_N=${SCANNER_TOP_N:-150}
+      - MAX_SCAN_WORKERS=${MAX_SCAN_WORKERS:-32}
+      - HEARTBEAT_SECONDS=${HEARTBEAT_SECONDS:-4}
     volumes:
       - app_exports:/app/export_app_data
       - app_models:/app/models_export_v3
@@ -83,6 +94,11 @@ services:
         condition: service_healthy
       backend:
         condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - crypto_network
 
@@ -104,6 +120,11 @@ services:
       - "127.0.0.1:3005:3000"
     depends_on:
       - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - crypto_network
 

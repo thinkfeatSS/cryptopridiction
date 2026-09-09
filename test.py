@@ -91,7 +91,9 @@ CONFIG = {
     "mode": "both",               # "both", "scanner", or "single"
     "continuous_loop": True,      # 24/7 Background Watcher Loop
     "scanner_mode": "top_volume", # "top_volume" (dynamic auto-discovery of all active Binance coins), "expanded_universe", or "custom_list"
-    "scanner_top_n": 100,         # Number of top volume Binance coins to scan simultaneously
+    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "150")), # Top 150 volume Binance coins
+    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "32")), # Concurrency worker threads
+    "heartbeat_interval_seconds": int(os.getenv("HEARTBEAT_SECONDS", "4")), # Fast intra-candle position monitoring
     "single_symbol": "BTC/USDT",
     "scanner_symbols": [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT",
@@ -3155,7 +3157,7 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
-            max_threads = min(24, len(symbols_to_scan))
+            max_threads = min(int(self.config.get('max_scan_workers', 32)), len(symbols_to_scan))
             with ThreadPoolExecutor(max_workers=max_threads) as executor:
                 future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in symbols_to_scan}
                 for future in as_completed(future_to_sym):
@@ -3288,11 +3290,12 @@ class HybridQuantEngine:
                 minutes_to_next = tf_mins - (current_minute % tf_mins)
                 next_run = (now + timedelta(minutes=minutes_to_next)).replace(second=2, microsecond=0)
 
-                # Real-Time Heartbeat Loop: Monitors prices every 10s between scans
-                print(f"[DAEMON] ⏳ Monitoring active trades in real time (Next full scan: {next_run.strftime('%H:%M:%S UTC')})...")
+                # Real-Time Heartbeat Loop: Monitors prices every 3-4s between scans
+                hb_secs = int(self.config.get('heartbeat_interval_seconds', 4))
+                print(f"[DAEMON] ⏳ Monitoring active trades in real time every {hb_secs}s (Next full scan: {next_run.strftime('%H:%M:%S UTC')})...")
                 while datetime.now(timezone.utc) < next_run:
                     self.check_open_positions_heartbeat()
-                    time.sleep(10)
+                    time.sleep(hb_secs)
 
             except KeyboardInterrupt:
                 print("\n[DAEMON] Continuous Watcher Loop gracefully stopped by user.")

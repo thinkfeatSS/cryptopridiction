@@ -27,7 +27,8 @@ def run_daemon():
         interval_seconds = int(os.getenv("SCAN_INTERVAL_MINUTES")) * 60
     
     run_once = os.getenv("RUN_ONCE", "false").lower() in ("true", "1", "yes")
-    scan_top_n = int(os.getenv("SCANNER_TOP_N", str(CONFIG.get("scanner_top_n", 100))))
+    scan_top_n = int(os.getenv("SCANNER_TOP_N", str(CONFIG.get("scanner_top_n", 150))))
+    heartbeat_secs = int(os.getenv("HEARTBEAT_SECONDS", str(CONFIG.get("heartbeat_interval_seconds", 4))))
     CONFIG["scanner_top_n"] = scan_top_n
     CONFIG["continuous_loop"] = False
 
@@ -35,6 +36,7 @@ def run_daemon():
     print("🚀 QUANTITATIVE 8-HORIZON CRYPTO PREDICTION SCANNER DAEMON")
     print(f"📊 Top Coins Scanning Universe: {scan_top_n} Coins")
     print(f"⏱️  Scan Frequency: Every {interval_seconds} seconds ({interval_seconds // 60} minutes)")
+    print(f"💓 Live Position Heartbeat: Every {heartbeat_secs} seconds")
     print(f"📁 Export Directory: {os.path.abspath(CONFIG.get('app_export_dir', 'export_app_data'))}")
     print("=" * 80)
 
@@ -77,7 +79,7 @@ def run_daemon():
         sleep_time = max(10, interval_seconds - elapsed)
         next_scan_time = datetime.now(timezone.utc).timestamp() + sleep_time
         next_scan_str = datetime.fromtimestamp(next_scan_time, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        print(f"[SCANNER] Next full scan scheduled at: {next_scan_str} (monitoring active trades every 10s)...")
+        print(f"[SCANNER] Next full scan scheduled at: {next_scan_str} (monitoring active trades every {heartbeat_secs}s)...")
 
         end_sleep_ts = time.time() + sleep_time
         while time.time() < end_sleep_ts:
@@ -86,7 +88,7 @@ def run_daemon():
                     engine.check_open_positions_heartbeat()
                 except Exception:
                     pass
-            time.sleep(min(10, max(1, end_sleep_ts - time.time())))
+            time.sleep(min(heartbeat_secs, max(1, end_sleep_ts - time.time())))
 
         scan_cycle += 1
 
