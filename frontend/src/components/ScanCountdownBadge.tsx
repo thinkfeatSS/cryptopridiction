@@ -15,22 +15,34 @@ export default React.memo(function ScanCountdownBadge({
   className = "",
 }: ScanCountdownBadgeProps) {
   const { data: status } = useStatusQuery();
-  const [localSeconds, setLocalSeconds] = useState<number>(0);
+  
+  // Calculate remaining seconds to next 15m candle boundary locally
+  const getNext15MRemaining = () => {
+    const now = new Date();
+    const mins = 15 - (now.getUTCMinutes() % 15);
+    const secs = (mins * 60) - now.getUTCSeconds();
+    return Math.max(1, secs);
+  };
+
+  const [localSeconds, setLocalSeconds] = useState<number>(getNext15MRemaining());
 
   useEffect(() => {
-    if (status?.seconds_to_next_scan !== undefined) {
+    if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan > 0) {
       setLocalSeconds(status.seconds_to_next_scan);
     }
   }, [status?.seconds_to_next_scan]);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setLocalSeconds((prev) => (prev > 0 ? prev - 1 : 0));
+      setLocalSeconds((prev) => {
+        if (prev > 1) return prev - 1;
+        return getNext15MRemaining();
+      });
     }, 1000);
     return () => clearInterval(timer);
   }, []);
 
-  const isScanning = Boolean(status?.is_scanning || localSeconds <= 0);
+  const isScanning = Boolean(status?.is_scanning);
 
   return (
     <div
@@ -55,7 +67,7 @@ export default React.memo(function ScanCountdownBadge({
           {isScanning ? "Quant Daemon Status" : "Next AI Scan & Refresh In"}
         </span>
         <span className="font-mono text-sm font-black text-white">
-          {isScanning ? "⚡ AI Processing 100 Coins..." : formatTimeRemaining(localSeconds)}
+          {isScanning ? "⚡ AI Processing Universe..." : formatTimeRemaining(localSeconds)}
         </span>
       </div>
     </div>

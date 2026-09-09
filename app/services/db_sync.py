@@ -41,18 +41,30 @@ def init_db():
         print(f"[DATABASE ERROR] Table creation error: {e}")
 
 def get_daemon_state():
-    """Reads lightweight scanner daemon state file if available."""
+    """Reads lightweight scanner daemon state file if available with auto-timeout healing."""
     global _IS_SCANNING
     state_file = os.path.join(settings.EXPORT_DIR, "scanner_daemon_state.json")
     if os.path.exists(state_file):
         try:
             with open(state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                _IS_SCANNING = bool(data.get("is_scanning", False))
+                is_sc = bool(data.get("is_scanning", False))
+                # Check for stale scanning flag (> 180s without completion)
+                if is_sc and "scan_started_at" in data:
+                    try:
+                        started_dt = datetime.fromisoformat(data["scan_started_at"])
+                        elapsed_secs = (datetime.now(timezone.utc) - started_dt).total_seconds()
+                        if elapsed_secs > 180:  # If scan started over 3 mins ago, auto-reset stale flag
+                            is_sc = False
+                            data["is_scanning"] = False
+                            data["scan_status"] = "IDLE"
+                    except Exception:
+                        pass
+                _IS_SCANNING = is_sc
                 return data
         except Exception:
             pass
-    return {"is_scanning": _IS_SCANNING, "scan_status": "IDLE"}
+    return {"is_scanning": False, "scan_status": "IDLE"}
 
 def get_sync_state():
     """Returns the current full scan version, portfolio version, scanning state, and last scan timestamp."""

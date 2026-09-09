@@ -7,22 +7,34 @@ import { Radio, Loader2 } from "lucide-react";
 
 export default React.memo(function NavCountdownTimer() {
   const { data: status } = useStatusQuery();
-  const [localSeconds, setLocalSeconds] = useState<number>(0);
+  
+  // Calculate remaining seconds to next 15m candle boundary locally
+  const getNext15MRemaining = () => {
+    const now = new Date();
+    const mins = 15 - (now.getUTCMinutes() % 15);
+    const secs = (mins * 60) - now.getUTCSeconds();
+    return Math.max(1, secs);
+  };
+
+  const [localSeconds, setLocalSeconds] = useState<number>(getNext15MRemaining());
 
   useEffect(() => {
-    if (status?.seconds_to_next_scan !== undefined) {
+    if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan > 0) {
       setLocalSeconds(status.seconds_to_next_scan);
     }
   }, [status?.seconds_to_next_scan]);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setLocalSeconds((prev) => (prev > 0 ? prev - 1 : 0));
+      setLocalSeconds((prev) => {
+        if (prev > 1) return prev - 1;
+        return getNext15MRemaining();
+      });
     }, 1000);
     return () => clearInterval(timer);
   }, []);
 
-  const isScanning = Boolean(status?.is_scanning || localSeconds <= 0);
+  const isScanning = Boolean(status?.is_scanning);
 
   return (
     <div
@@ -46,7 +58,7 @@ export default React.memo(function NavCountdownTimer() {
           {isScanning ? "AI Engine Status" : "Next 15M Scan In"}
         </span>
         <span className="font-mono text-xs font-bold text-white">
-          {isScanning ? "⚡ Scanning 100 Coins..." : formatTimeRemaining(localSeconds)}
+          {isScanning ? "⚡ Scanning Active Universe..." : formatTimeRemaining(localSeconds)}
         </span>
       </div>
     </div>
