@@ -9,7 +9,20 @@
 # 5. Continuous 24/7 Watcher Daemon & Web-App Ready JSON Serializer
 # ==============================================================================
 
+import os
 import sys
+
+# Configure silent CPU & UTF-8 environment before heavy library imports
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 import subprocess
 
 def install_dependencies():
@@ -36,13 +49,6 @@ def install_dependencies():
 
 install_dependencies()
 
-if sys.stdout.encoding != 'utf-8':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
-
-import os
 import json
 import time
 import math
@@ -70,24 +76,13 @@ from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import accuracy_score, roc_auc_score, mean_squared_error
 from sklearn.model_selection import TimeSeriesSplit
 
+warnings.filterwarnings("ignore")
+
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers, callbacks
 import tensorflow.keras.backend as K
 
-warnings.filterwarnings("ignore")
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
-# Hardware Acceleration Check
-gpus = tf.config.list_physical_devices('GPU')
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        print(f"[SYSTEM] Hardware Acceleration Active: {gpus[0].name}")
-    except RuntimeError as e:
-        print(f"[SYSTEM] GPU Warning: {e}")
-else:
-    print("[SYSTEM] Running in High-Performance CPU Mode.")
+print("[SYSTEM] Running in High-Performance CPU Mode.")
 
 # ------------------------------------------------------------------------------
 # 1. CONFIGURATION & MULTI-HORIZON PARAMETERS
@@ -2347,6 +2342,14 @@ class SignalMetaClassifier:
         self.load_model()
 
     def load_model(self):
+        if not os.path.exists(self.model_path):
+            try:
+                from app.services.model_retrainer import run_retraining_pipeline
+                print(f"[META CLASSIFIER 🧠] Model not found at {self.model_path}. Auto-training initial model from dataset...")
+                run_retraining_pipeline(force=True)
+            except Exception as e:
+                pass
+
         if os.path.exists(self.model_path):
             try:
                 mtime = os.path.getmtime(self.model_path)

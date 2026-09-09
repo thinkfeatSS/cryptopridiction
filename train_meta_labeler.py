@@ -5,7 +5,7 @@ import math
 import joblib
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Configure UTF-8 safe stdout
 if sys.stdout.encoding != 'utf-8':
@@ -215,7 +215,7 @@ def train_and_save_meta_classifier():
     bundle = {
         'model': calibrated_clf,
         'feature_cols': feature_cols,
-        'trained_at_utc': datetime.utcnow().isoformat(),
+        'trained_at_utc': datetime.now(timezone.utc).isoformat(),
         'sample_size': len(feat_df),
         'baseline_win_rate': float(y.mean()),
         'auc_score': float(auc)

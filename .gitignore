@@ -37,13 +37,15 @@ catboost_info/
 */catboost_info/
 
 # Machine Learning Models & Heavy Checkpoints (Export directories)
-models_export_*/
+# Heavy DL checkpoints
 *.h5
 *.keras
-*.joblib
-*.pkl
-*.model
 *.cbm
+
+# Allow tracking models_export_v3 production meta-classifier & seed signals
+!models_export_v3/
+!models_export_v3/**
+!user_pasted_signals.csv
 
 # Temporary export data & database files
 export_app_data/*.csv
@@ -52,7 +54,6 @@ export_app_data/*.json
 *.sqlite
 *.sqlite3
 *.db
-user_pasted_signals.csv
 
 # IDE & Editor files
 .vscode/
