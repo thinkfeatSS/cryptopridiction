@@ -1844,127 +1844,7 @@ class PaperTradingLedger:
             ["Peak Balance & Max Drawdown", f"${d.get('peak_balance_usd', d['starting_balance_usd']):,.2f}", f"Max DD: -${d.get('max_drawdown_usd',0.0):,.2f} (-{d.get('max_drawdown_pct',0.0):.2f}%)"]
         ]
 
-        print("\n" + "=" * 135)
-        print(f" 💼 ENHANCED MULTI-HORIZON PAPER TRADING PORTFOLIO & BINANCE FEE AUDIT LEDGER")
-        print(f" Last Updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Fee Schedule: {self.fee_tier_label}")
-        print("=" * 135)
-        print(tabulate(portfolio_summary, headers=["Executive Portfolio Metric", "Live Value", "Analysis Note"], tablefmt="fancy_grid"))
-
-        # Helper for dynamic price formatting
-        def fmt_usd(p):
-            if p >= 50.0:
-                return f"${p:,.2f}"
-            elif p >= 0.10:
-                return f"${p:,.4f}"
-            else:
-                return f"${p:.6g}"
-
-        # 2. Active Open Paper Positions Table
-        if d['open_positions']:
-            open_table = []
-            for p in d['open_positions']:
-                u_pnl = p.get('unrealized_pnl_usd', 0.0)
-                u_pct = p.get('unrealized_pnl_pct', 0.0)
-                u_sign = "+" if u_pnl >= 0 else ""
-                entry_p = p['entry_price']
-                curr_p = p.get('current_price', entry_p)
-                tp_p = p['tp_price']
-                sl_p = p['sl_price']
-                direction = p['direction']
-                fee_est = p.get('unrealized_fee_usd', 0.0)
-
-                # Calculate progress % toward Take-Profit
-                if direction == "BULLISH":
-                    tot_target_dist = max(1e-6, tp_p - entry_p)
-                    curr_progress = ((curr_p - entry_p) / tot_target_dist) * 100.0
-                else:
-                    tot_target_dist = max(1e-6, entry_p - tp_p)
-                    curr_progress = ((entry_p - curr_p) / tot_target_dist) * 100.0
-                curr_progress = max(-100.0, min(100.0, curr_progress))
-
-                # Date & Time formatting
-                opened_dt = datetime.fromisoformat(p['opened_at']) if isinstance(p['opened_at'], str) else p['opened_at']
-                entry_datetime_display = opened_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
-
-                expiry_dt = datetime.fromisoformat(p['expiry_time']) if isinstance(p['expiry_time'], str) else p['expiry_time']
-                now_dt = datetime.now(timezone.utc)
-                rem_secs = max(0, int((expiry_dt - now_dt).total_seconds()))
-                rem_m = rem_secs // 60
-                rem_h = rem_m // 60
-                time_rem_str = f"{rem_h}h {rem_m%60}m" if rem_h > 0 else f"{rem_m} mins"
-
-                open_table.append({
-                    "Asset": p['symbol'],
-                    "Horizon": p.get('horizon', 'scalp').upper(),
-                    "Side": f"{'🟢 LONG' if direction=='BULLISH' else '🔴 SHORT'}",
-                    "Entry Date & Time": entry_datetime_display,
-                    "Entry ➔ Current Price": f"{fmt_usd(entry_p)} ➔ {fmt_usd(curr_p)}",
-                    "Take-Profit": fmt_usd(tp_p),
-                    "Stop-Loss": fmt_usd(sl_p),
-                    "Target Progress": f"{curr_progress:+.1f}% to TP",
-                    "Binance Fee (Est)": f"-${fee_est:,.2f}",
-                    "Net Unrealized PnL": f"{u_sign}${u_pnl:,.2f} ({u_sign}{u_pct:.2f}%)",
-                    "Time Remaining": time_rem_str
-                })
-            print("\n" + "-" * 145)
-            print(f" 🟢 ACTIVE OPEN PAPER POSITIONS ({len(d['open_positions'])} Live Trades Active):")
-            print("-" * 145)
-            print(tabulate(open_table, headers="keys", tablefmt="fancy_grid", showindex=False))
-
-        # 3. Comprehensive Closed Trades History (Won / Lost / Breakeven Details & Closing Reasons)
-        history = d.get('closed_trades_history', [])
-        if history:
-            history_table = []
-            # Display last 12 completed trades in reverse chronological order
-            for idx, c in enumerate(reversed(history[-12:])):
-                net_pnl = c.get('realized_pnl_usd', 0.0)
-                net_pnl_pct = c.get('realized_pnl_pct', 0.0)
-                gross_pnl = c.get('gross_pnl_usd', net_pnl)
-                fee_paid = c.get('binance_fee_usd', 0.0)
-                pnl_sign = "+" if net_pnl >= 0 else ""
-                outcome = c.get('outcome', 'WON' if net_pnl > 0 else ('LOST' if net_pnl < 0 else 'BREAKEVEN'))
-                
-                if outcome == "WON":
-                    badge = f"🟢 WON ({pnl_sign}${net_pnl:,.2f})"
-                elif outcome == "LOST":
-                    badge = f"🔴 LOST ({pnl_sign}${net_pnl:,.2f})"
-                else:
-                    badge = f"⚪ BREAKEVEN ($0.00)"
-
-                # Format entry & exit timestamps with Date and Time
-                entry_dt_obj = datetime.fromisoformat(c['opened_at']) if ('opened_at' in c and isinstance(c['opened_at'], str)) else None
-                exit_dt_obj = datetime.fromisoformat(c['closed_at']) if ('closed_at' in c and isinstance(c['closed_at'], str)) else None
-
-                entry_dt_str = entry_dt_obj.strftime('%Y-%m-%d %H:%M:%S UTC') if entry_dt_obj else c.get('entry_time_str', 'N/A')
-                exit_dt_str = exit_dt_obj.strftime('%Y-%m-%d %H:%M:%S UTC') if exit_dt_obj else c.get('exit_time_str', 'N/A')
-
-                time_span_str = f"{entry_dt_str}\n➔ {exit_dt_str}"
-                
-                entry_p_val = c.get('entry_price', 0.0)
-                exit_p_val = c.get('exit_price', entry_p_val)
-                exit_reason_label = c.get('exit_reason', '🎯 TAKE_PROFIT_HIT')
-
-                history_table.append({
-                    "#": f"T-{len(history) - idx}",
-                    "Asset": c['symbol'],
-                    "Horizon": c.get('horizon', 'scalp').upper(),
-                    "Side": f"{'🟢 LONG' if c['direction']=='BULLISH' else '🔴 SHORT'}",
-                    "Entry ➔ Exit Price": f"{fmt_usd(entry_p_val)} ➔ {fmt_usd(exit_p_val)}",
-                    "Closing Trigger / Reason": exit_reason_label,
-                    "Entry ➔ Exit (Date & Time)": time_span_str,
-                    "Duration": c.get('duration_str', 'N/A'),
-                    "Gross PnL": f"{'+' if gross_pnl>=0 else ''}${gross_pnl:,.2f}",
-                    "Binance Fee": f"-${fee_paid:,.2f}",
-                    "Net Realized Return": f"{pnl_sign}{net_pnl_pct:.2f}%",
-                    "Outcome & Net PnL": badge
-                })
-
-            print("\n" + "-" * 145)
-            print(f" 📜 COMPLETED TRADES AUDIT LOG (Won vs Lost Details - Showing Last {len(history_table)} of {len(history)} Trades):")
-            print("-" * 145)
-            print(tabulate(history_table, headers="keys", tablefmt="fancy_grid", showindex=False))
-
-        print("=" * 145 + "\n")
+        print(f"[PORTFOLIO 💼] Balance: ${d['current_balance_usd']:,.2f} | Net Realized PnL: {pnl_sign}${d['realized_pnl_usd']:,.2f} ({tot_ret_pct:+.2f}%) | Active Positions: {len(d['open_positions'])} | Win Rate: {d['win_rate_pct']:.1f}%")
 
 # ------------------------------------------------------------------------------
 # 7. TRADER SIGNALS AUDIT TRACKER & WIN/LOSS SPREADSHEET ENGINE
@@ -2310,21 +2190,7 @@ class SignalAuditTracker:
         decisive = kpi['won_signals_count'] + kpi['lost_signals_count']
         sign = "+" if kpi['cumulative_return_pct'] >= 0 else ""
 
-        kpi_table = [
-            ["Total Trader Signals Tracked", f"{kpi['total_trader_signals']}", "Exact signals presented to traders in console/app"],
-            ["Resolved Outcomes (Won / Lost)", f"🟢 {kpi['won_signals_count']} Won | 🔴 {kpi['lost_signals_count']} Lost", f"Pending: ⏳ {kpi['pending_signals_count']} | Expired: {kpi['expired_signals_count']}"],
-            ["Decisive Win Rate", f"{kpi['win_rate_pct']:.1f}%", f"Grade A+ WR: {kpi['grade_a_plus_win_rate_pct']:.1f}% | Grade A WR: {kpi['grade_a_win_rate_pct']:.1f}%"],
-            ["Cumulative Tracked Return", f"{sign}{kpi['cumulative_return_pct']:.2f}%", f"Average Return per Signal: {kpi['average_return_pct']:+.2f}%"],
-            ["Spreadsheet CSV Files", "trader_signals_tracker.csv", "trader_signals_performance.csv (Excel / Sheets Ready)"]
-        ]
-
-        print("\n" + "=" * 135)
-        print(" 📊 TRADER SIGNALS PERFORMANCE & WIN/LOSS CSV AUDIT LEDGER")
-        print(f" Detailed CSV: {os.path.abspath(self.csv_path)}")
-        print(f" Summary CSV:  {os.path.abspath(self.summary_csv_path)}")
-        print("=" * 135)
-        print(tabulate(kpi_table, headers=["Audit Metric", "Value", "Notes"], tablefmt="fancy_grid"))
-        print("=" * 135 + "\n")
+        print(f"[AUDIT LEDGER 📊] Tracked Signals: {kpi['total_trader_signals']} | Won: {kpi['won_signals_count']} | Lost: {kpi['lost_signals_count']} | Win Rate: {kpi['win_rate_pct']:.1f}% | Return: {sign}{kpi['cumulative_return_pct']:.2f}%")
 
 # ------------------------------------------------------------------------------
 # 7.5 SECONDARY MACHINE LEARNING META-LABELING CLASSIFIER
@@ -3169,9 +3035,10 @@ class HybridQuantEngine:
                             live_prices[sym] = res['current_price']
                             live_highs[sym] = res['live_high']
                             live_lows[sym] = res['live_low']
-                            print(f"[SCAN ⚡] Processed 15M, 1H & 24H for: {sym}")
                     except Exception as e:
                         print(f"[ERROR] Failed scanning {sym}: {e}")
+
+            print(f"[SCANNER ✅] Processed all 8 horizons for {len(scanner_results)} assets.")
 
             # Sort by best priority, triple confluence, consistency index, and alignment strength
             scanner_results.sort(key=lambda x: (
@@ -3335,13 +3202,10 @@ class HybridQuantEngine:
                 "🚀 Macro (24H) Setup": f"{'🟢' if m['direction']=='BULLISH' else '🔴'} {m['direction']} ({m['conviction']:.1f}%)\nTP: {fmt_p(m['tp_price'])} | SL: {fmt_p(m['sl_price'])}\n{m['decision']}"
             })
 
-        print("\n" + "=" * 175)
-        print(f" 🛰️ MULTI-HORIZON OPPORTUNITY LEADERBOARD: MINUTES (15M) | HOURS (1H) | DAYS (24H)")
-        print(f" Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Strategy: Multi-Horizon Quantum Super-Learner")
-        print("=" * 175)
-        df_scan = pd.DataFrame(table_rows)
-        print(tabulate(df_scan, headers="keys", tablefmt="fancy_grid", showindex=False))
-        print("=" * 175 + "\n")
+        # Display Top 5 Ranked Assets in console (complete 150-asset matrix synced to Web UI)
+        df_scan = pd.DataFrame(table_rows[:5])
+        print(f"\n[LEADERBOARD 🛰️] Top 5 Market Opportunities (Full 150-Asset Matrix on Web UI):")
+        print(tabulate(df_scan, headers="keys", tablefmt="simple", showindex=False) + "\n")
 
     def render_top_round_signals(self, scanner_results: list, deep_dive_result: dict = None) -> list:
         """
@@ -3684,27 +3548,7 @@ class HybridQuantEngine:
             })
 
         df_selected = pd.DataFrame(summary_rows)
-        print(tabulate(df_selected, headers="keys", tablefmt="fancy_grid", showindex=False))
-
-        # Render complete Actionable Signal Setup Cards for all selected signals
-        for idx, sig in enumerate(selected_signals):
-            rank_str = rank_medals[idx] if idx < len(rank_medals) else f"SIGNAL #{idx+1}"
-            print(f"\n--- [{rank_str} | {sig['grade']} | {sig['symbol']} {sig['horizon_name'].upper()}] ---")
-            print(sig['card'])
-            print(f"🧠 Secondary ML Meta-Labeling Win Probability: {sig.get('meta_win_prob', 0.70)*100:.1f}%")
-            print("\n📊 MULTI-TIMEFRAME CONFIRMATION BREAKDOWN (1D, 4H, 1H, 15M, 5M):")
-            if sig['tf_summary']:
-                df_tf = pd.DataFrame(sig['tf_summary'])
-                print(tabulate(df_tf, headers="keys", tablefmt="simple", showindex=False))
-
-            invalidation_side = "below" if sig['direction'] in ["BULLISH", "LONG"] else "above"
-            sl_fmt = fmt_p(sig['sl_price'])
-            print(f"\n⚠️ KEY INVALIDATION & TRADE MANAGEMENT RULES:")
-            print(f"• Invalidation: A sustained 1H/4H candle close {invalidation_side} {sl_fmt} invalidates this setup structure.")
-            print(f"• Dynamic Break-Even: Move Stop-Loss to Breakeven (${fmt_p(sig['entry_price'])}) immediately upon touching TP1.")
-            print(f"• Risk Management: Strict 1–2% portfolio risk per trade.")
-            print(f"• Paper Trading State: {sig['paper_trading_status']}")
-            print("-" * 115)
+        print(tabulate(df_selected, headers="keys", tablefmt="simple", showindex=False))
         print("=" * 145 + "\n")
 
         return selected_signals
@@ -3715,47 +3559,7 @@ class HybridQuantEngine:
 
     def render_multi_horizon_deep_dive(self, data: dict):
         sym = data['symbol']
-        def fmt_usd(p):
-            if p >= 50.0:
-                return f"${p:,.2f}"
-            elif p >= 0.10:
-                return f"${p:,.4f}"
-            else:
-                return f"${p:.6g}"
-
-        print("\n" + "=" * 135)
-        print(f" 🚀 MASTER MULTI-HORIZON DEEP DIVE TERMINAL: {sym}")
-        print(f" Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Triple Confluence: {'💎 YES' if data['is_triple_confluence'] else '⚡ INDEPENDENT'}")
-        print("=" * 135)
-
-        h_rows = []
-        for h_key, h in data['horizons'].items():
-            h_rows.append([
-                h['horizon_name'],
-                f"{h['trade_open_str']} -> {h['trade_close_str']} ({h['duration_label']})",
-                f"{'🟢' if h['direction']=='BULLISH' else '🔴'} {h['direction']} ({h['conviction']:.1f}%)",
-                f"{'+' if h['exp_return']>=0 else ''}{h['exp_return']*100:.2f}% (Target: {fmt_usd(h['projected_target'])})",
-                fmt_usd(h['tp_price']),
-                fmt_usd(h['sl_price']),
-                f"{h['elite_precision']*100:.1f}%",
-                h['decision']
-            ])
-
-        print(tabulate(h_rows, headers=["Horizon", "Trade Window (Open -> Close)", "Direction & Conviction", "Exp Return", "Take-Profit", "Stop-Loss", "Elite Precision", "Decision"], tablefmt="fancy_grid"))
-
-        print("\n" + "-" * 135)
-        print(" 📊 MULTI-SCALE CHART CONFLUENCE BREAKDOWN:")
-        print("-" * 135)
-        df_breakdown = pd.DataFrame(data['tf_metrics_summary'])
-        print(tabulate(df_breakdown, headers="keys", tablefmt="fancy_grid", showindex=False))
-
-        print("\n" + "-" * 135)
-        print(f" 🎯 PROFESSIONAL SIGNAL SETUP CARDS FOR {sym} (1:2 RISK TO REWARD):")
-        print("-" * 135)
-        for h_key, h in data['horizons'].items():
-            print(h.get('pro_signal_text', ''))
-            print("-" * 65)
-        print("=" * 135 + "\n")
+        print(f"[DEEP DIVE 🔬] {sym} Multi-Horizon Analysis Complete (Triple Confluence: {'💎 YES' if data['is_triple_confluence'] else '⚡ INDEPENDENT'})\n")
 
     def export_web_app_json(self, scanner_results: list, deep_dive_result: dict, top_signals: list = None):
         payload = {
