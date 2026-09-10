@@ -54,7 +54,7 @@ def get_daemon_state():
                     try:
                         started_dt = datetime.fromisoformat(data["scan_started_at"])
                         elapsed_secs = (datetime.now(timezone.utc) - started_dt).total_seconds()
-                        if elapsed_secs > 300:  # If scan started over 5 mins ago, auto-reset stale flag
+                        if elapsed_secs > 900:  # If scan started over 15 mins ago, auto-reset stale flag
                             is_sc = False
                             data["is_scanning"] = False
                             data["scan_status"] = "IDLE"

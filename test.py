@@ -1553,15 +1553,15 @@ class PaperTradingLedger:
             low_p = min(curr_p, raw_low)
 
             direction = pos['direction']
-            entry_p = pos['entry_price']
-            tp1_p = pos.get('tp1_price', pos['tp_price'])
-            tp2_p = pos.get('tp2_price', pos['tp_price'])
-            tp3_p = pos.get('tp3_price', pos['tp_price'])
-            tp_p = pos['tp_price']
-            sl_p = pos['sl_price']
+            entry_p = float(pos.get('entry_price', curr_p))
+            tp1_p = float(pos.get('tp1_price', pos.get('tp_price', entry_p)))
+            tp2_p = float(pos.get('tp2_price', pos.get('tp_price', entry_p)))
+            tp3_p = float(pos.get('tp3_price', pos.get('tp_price', entry_p)))
+            tp_p = float(pos.get('tp_price', entry_p))
+            sl_p = float(pos.get('sl_price', entry_p))
             
-            init_size = pos.get('initial_position_size_usd', pos['position_size_usd'])
-            rem_size = pos.get('remaining_position_size_usd', init_size)
+            init_size = float(pos.get('initial_position_size_usd', pos.get('position_size_usd', 0.0)))
+            rem_size = float(pos.get('remaining_position_size_usd', init_size))
             stage = pos.get('stage', 'OPEN')
             
             opened_dt = datetime.fromisoformat(pos['opened_at']) if isinstance(pos['opened_at'], str) else pos['opened_at']
@@ -3328,6 +3328,8 @@ class HybridQuantEngine:
                             live_prices[sym] = res['current_price']
                             live_highs[sym] = res['live_high']
                             live_lows[sym] = res['live_low']
+                            if len(scanner_results) % 10 == 0 or len(scanner_results) == len(symbols_to_scan):
+                                print(f"[SCANNER 🛰️] Completed {len(scanner_results)}/{len(symbols_to_scan)} assets (Latest: {sym}) - Elapsed: {time.time()-self.last_scan_started_ts:.1f}s", flush=True)
                     except Exception as e:
                         pass
             finally:
