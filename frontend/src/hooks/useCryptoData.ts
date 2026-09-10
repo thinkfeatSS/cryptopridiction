@@ -9,6 +9,7 @@ import {
   fetchPortfolio,
   fetchForecast,
   fetchStatus,
+  fetchLivePrices,
 } from "@/lib/api";
 
 export function useKpiQuery() {
@@ -80,5 +81,14 @@ export function useStatusQuery() {
     queryFn: fetchStatus,
     refetchInterval: 2500,
     staleTime: 1500,
+  });
+}
+
+export function useLivePricesQuery() {
+  return useQuery({
+    queryKey: ["livePrices"],
+    queryFn: fetchLivePrices,
+    refetchInterval: 4000,
+    staleTime: 2000,
   });
 }

@@ -8,9 +8,42 @@ import os
 import json
 import numpy as np
 
+import time
+import requests
+
 from app.config import settings
 from app.models import SignalAudit, PaperPosition, ClosedTrade, MarketForecast
 from app.services.db_sync import sync_files_to_db_live, get_sync_state, get_cached_forecast, set_cached_forecast
+
+_LIVE_PRICES_CACHE: Dict[str, float] = {}
+_LIVE_PRICES_TS: float = 0.0
+
+def fetch_live_binance_prices(max_age_seconds: float = 2.5) -> Dict[str, float]:
+    """Fetches real-time Binance spot prices with high-speed memory TTL cache."""
+    global _LIVE_PRICES_CACHE, _LIVE_PRICES_TS
+    now = time.time()
+    if _LIVE_PRICES_CACHE and (now - _LIVE_PRICES_TS) < max_age_seconds:
+        return _LIVE_PRICES_CACHE
+
+    try:
+        url = "https://data-api.binance.vision/api/v3/ticker/price"
+        resp = requests.get(url, timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            p_dict = {}
+            for item in data:
+                raw_s = item['symbol']
+                p_val = float(item['price'])
+                p_dict[raw_s] = p_val
+                if raw_s.endswith('USDT'):
+                    base = raw_s[:-4]
+                    p_dict[f"{base}/USDT"] = p_val
+            _LIVE_PRICES_CACHE = p_dict
+            _LIVE_PRICES_TS = now
+            return p_dict
+    except Exception:
+        pass
+    return _LIVE_PRICES_CACHE or {}
 
 class SignalService:
     def get_kpi_summary(self, db: Session) -> Dict[str, Any]:
@@ -317,22 +350,78 @@ class SignalService:
             "portfolio": clean_ledger
         }
 
+    def get_all_live_prices(self) -> Dict[str, Any]:
+        """Returns real-time prices dictionary for all pairs."""
+        prices = fetch_live_binance_prices(max_age_seconds=2.5)
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "prices": prices
+        }
+
+    def overlay_live_prices(self, forecast_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Dynamically overlays current real-time prices on top of forecast data."""
+        if not forecast_data:
+            return forecast_data
+
+        live_prices = fetch_live_binance_prices(max_age_seconds=3.0)
+        if not live_prices:
+            return forecast_data
+
+        # Clone payload
+        res = dict(forecast_data)
+        
+        # Overlay on scanner leaderboard
+        leaderboard = res.get("scanner_leaderboard", [])
+        if leaderboard:
+            updated_board = []
+            for item in leaderboard:
+                coin_dict = dict(item)
+                sym = coin_dict.get("symbol", "")
+                raw_sym = sym.replace("/", "").replace(":USDT", "")
+                p = live_prices.get(sym) or live_prices.get(raw_sym)
+                if p and p > 0:
+                    coin_dict["current_price"] = p
+                    coin_dict["live_price"] = p
+                    if "live_high" in coin_dict:
+                        coin_dict["live_high"] = max(coin_dict["live_high"], p)
+                    if "live_low" in coin_dict:
+                        coin_dict["live_low"] = min(coin_dict["live_low"], p)
+                updated_board.append(coin_dict)
+            res["scanner_leaderboard"] = updated_board
+
+        # Overlay on top round signals
+        top_signals = res.get("top_round_signals", [])
+        if top_signals:
+            updated_top = []
+            for sig in top_signals:
+                s_dict = dict(sig)
+                sym = s_dict.get("symbol", "")
+                raw_sym = sym.replace("/", "").replace(":USDT", "")
+                p = live_prices.get(sym) or live_prices.get(raw_sym)
+                if p and p > 0:
+                    s_dict["current_price"] = p
+                    s_dict["live_price"] = p
+                updated_top.append(s_dict)
+            res["top_round_signals"] = updated_top
+
+        return res
+
     def get_latest_forecast(self, db: Session) -> Dict[str, Any]:
-        """Retrieves the most recent market forecast scan with in-memory cache."""
+        """Retrieves the most recent market forecast scan with in-memory cache and live price overlay."""
         cached = get_cached_forecast()
         if cached:
-            return cached
+            return self.overlay_live_prices(cached)
 
         sync_files_to_db_live()
         cached = get_cached_forecast()
         if cached:
-            return cached
+            return self.overlay_live_prices(cached)
 
         latest = db.query(MarketForecast).order_by(desc(MarketForecast.id)).first()
         if latest:
             res = latest.to_dict()
             set_cached_forecast(res)
-            return res
+            return self.overlay_live_prices(res)
         
         # Fallback to direct file read if available
         try:
@@ -341,7 +430,7 @@ class SignalService:
                 with open(forecast_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     set_cached_forecast(data)
-                    return data
+                    return self.overlay_live_prices(data)
         except Exception:
             pass
 

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useMemo, useCallback } from "react";
-import { useForecastQuery, useStatusQuery } from "@/hooks/useCryptoData";
+import { useForecastQuery, useStatusQuery, useLivePricesQuery } from "@/hooks/useCryptoData";
 import { formatPercent, formatUsd } from "@/lib/utils";
 import CoinSignalHistoryModal from "@/components/CoinSignalHistoryModal";
 import ScanCountdownBadge from "@/components/ScanCountdownBadge";
@@ -185,6 +185,8 @@ function renderSignalCell(h?: any) {
 export default function AssetPredictionMatrix() {
   const { data: forecast, isLoading } = useForecastQuery();
   const { data: status } = useStatusQuery();
+  const { data: livePricesData } = useLivePricesQuery();
+  const livePrices = useMemo(() => livePricesData?.prices || {}, [livePricesData?.prices]);
   const { isStarred, toggleWatchlist, watchlist } = useWatchlist();
   const [selectedHorizon, setSelectedHorizon] = useState<HorizonKey>("all");
   const [search, setSearch] = useState("");
@@ -280,6 +282,10 @@ export default function AssetPredictionMatrix() {
             </h2>
             <span className="rounded-md bg-dark-900 px-2.5 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50">
               {leaderboard.length || 100} Assets Scanned
+            </span>
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-bold text-emerald-400 border border-emerald-500/30">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
+              LIVE TICKER SYNC
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
@@ -396,11 +402,12 @@ export default function AssetPredictionMatrix() {
                       ? Math.min(94.5, Math.max(48.0, h.conviction * 0.86))
                       : 72.0);
                   const expRet = h.exp_return ? h.exp_return * 100 : 0.0;
+                  const livePrice = livePrices[item.symbol] || livePrices[item.symbol.replace('/', '')] || item.current_price;
 
                   return (
                     <tr
                       key={item.symbol}
-                      onClick={() => setSelectedCoin({ symbol: item.symbol, price: item.current_price })}
+                      onClick={() => setSelectedCoin({ symbol: item.symbol, price: livePrice })}
                       className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
                       title="Click to view 15-minute historical signal records for this coin"
                     >
@@ -437,7 +444,7 @@ export default function AssetPredictionMatrix() {
                                 <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
                               </span>
                               <span className="text-xs font-mono font-semibold text-cyan-400">
-                                ({formatUsd(item.current_price)})
+                                ({formatUsd(livePrice)})
                               </span>
                             </div>
                           </div>
@@ -498,10 +505,12 @@ export default function AssetPredictionMatrix() {
                 }
 
                 // All-Horizon / Confluence Overview Row
+                const livePrice = livePrices[item.symbol] || livePrices[item.symbol.replace('/', '')] || item.current_price;
+
                 return (
                   <tr
                     key={item.symbol}
-                    onClick={() => setSelectedCoin({ symbol: item.symbol, price: item.current_price })}
+                    onClick={() => setSelectedCoin({ symbol: item.symbol, price: livePrice })}
                     className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
                     title="Click to view 15-minute historical signal records for this coin"
                   >
@@ -543,7 +552,7 @@ export default function AssetPredictionMatrix() {
                               <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
                             </span>
                             <span className="text-xs font-mono font-semibold text-cyan-400">
-                              ({formatUsd(item.current_price)})
+                              ({formatUsd(livePrice)})
                             </span>
                           </div>
                         </div>

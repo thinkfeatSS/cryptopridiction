@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useMemo } from "react";
-import { useForecastQuery } from "@/hooks/useCryptoData";
+import { useForecastQuery, useLivePricesQuery } from "@/hooks/useCryptoData";
 import { formatUsd } from "@/lib/utils";
 import { useWatchlist } from "@/hooks/useWatchlist";
 import CoinSignalHistoryModal from "@/components/CoinSignalHistoryModal";
@@ -9,6 +9,8 @@ import { Layers, Sparkles, ArrowUpRight, ArrowDownRight, Target, History, Star }
 
 export default function RadarTable() {
   const { data: forecast, isLoading } = useForecastQuery();
+  const { data: livePricesData } = useLivePricesQuery();
+  const livePrices = useMemo(() => livePricesData?.prices || {}, [livePricesData?.prices]);
   const { isStarred, toggleWatchlist } = useWatchlist();
   const [selectedCoin, setSelectedCoin] = useState<{ symbol: string; price?: number } | null>(null);
   const leaderboard = forecast?.scanner_leaderboard || [];
@@ -100,10 +102,12 @@ export default function RadarTable() {
                   );
                 };
 
+                const livePrice = livePrices[item.symbol] || livePrices[item.symbol.replace('/', '')] || item.current_price;
+
                 return (
                   <tr
                     key={item.symbol || idx}
-                    onClick={() => setSelectedCoin({ symbol: item.symbol, price: item.current_price })}
+                    onClick={() => setSelectedCoin({ symbol: item.symbol, price: livePrice })}
                     className={`cursor-pointer transition-colors group ${
                       starred
                         ? "bg-amber-950/20 hover:bg-amber-950/35 border-l-2 border-l-amber-500"
@@ -135,7 +139,7 @@ export default function RadarTable() {
                             <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
                           </span>
                           <span className="text-xs text-cyan-400 font-mono font-semibold">
-                            {formatUsd(item.current_price)}
+                            ({formatUsd(livePrice)})
                           </span>
                         </div>
                       </div>

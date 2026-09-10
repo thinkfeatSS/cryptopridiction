@@ -246,3 +246,18 @@ export async function fetchStatus(): Promise<EngineStatus> {
   if (!res.ok) throw new Error("Failed fetching status");
   return res.json();
 }
+
+export interface LivePricesResponse {
+  timestamp: string;
+  prices: Record<string, number>;
+}
+
+export async function fetchLivePrices(): Promise<LivePricesResponse> {
+  try {
+    const res = await fetch(`${API_BASE}/api/prices`);
+    if (!res.ok) return { timestamp: new Date().toISOString(), prices: {} };
+    return res.json();
+  } catch {
+    return { timestamp: new Date().toISOString(), prices: {} };
+  }
+}

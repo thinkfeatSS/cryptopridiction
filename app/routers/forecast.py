@@ -33,3 +33,8 @@ def get_deep_dive(db: Session = Depends(get_db)):
     """Retrieve multi-scale deep dive confirmation metrics."""
     forecast = signal_service.get_latest_forecast(db)
     return forecast.get("deep_dive", {})
+
+@router.get("/live-prices")
+def get_live_prices():
+    """Retrieve instantaneous real-time spot prices for all pairs."""
+    return signal_service.get_all_live_prices()

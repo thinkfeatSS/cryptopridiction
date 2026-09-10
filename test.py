@@ -316,6 +316,8 @@ class CryptoDataLoader:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
         self.is_binance_vision_direct = False
+        self._live_tickers_cache = {}
+        self._live_tickers_ts = 0.0
         self.init_resilient_exchange()
 
     def init_resilient_exchange(self):
@@ -437,7 +439,7 @@ class CryptoDataLoader:
         self.active_exchange_id = 'binance'
         self.is_binance_vision_direct = True
 
-    def _fetch_binance_vision_klines(self, symbol: str, timeframe: str, since: int = None, limit: int = 1000) -> list:
+    def _fetch_binance_vision_klines(self, symbol: str, timeframe: str, since: int = None, endTime: int = None, limit: int = 1000) -> list:
         """Direct, ultra-resilient Binance Vision REST klines fetcher with zero geo-blocking."""
         try:
             raw_sym = symbol.replace('/', '').replace(':USDT', '')
@@ -449,6 +451,8 @@ class CryptoDataLoader:
             }
             if since is not None and since > 0:
                 params["startTime"] = int(since)
+            if endTime is not None and endTime > 0:
+                params["endTime"] = int(endTime)
             
             resp = self.session.get(url, params=params, timeout=12)
             if resp.status_code == 200:
@@ -508,34 +512,36 @@ class CryptoDataLoader:
             '1w': 7 * 24 * 60 * 60 * 1000,
             '1M': 30 * 24 * 60 * 60 * 1000
         }
-        
         step_ms = tf_ms_map.get(timeframe, 60 * 1000)
         curr_time = int(datetime.now(timezone.utc).timestamp() * 1000)
-        calculated_since = curr_time - int(total_candles * step_ms)
-        genesis_ms = 1501545600000
-        since = max(genesis_ms, int(calculated_since))
-        
-        # 1. Primary Fetch: Binance Vision or CCXT Exchange
+
+        # 1. Primary Fetch: Backward Pagination Guarantee
+        # We start by fetching the latest 1,000 candles up to the current second (endTime=None).
+        # This guarantees that all_ohlcv always contains the live, in-progress candle.
         if self.is_binance_vision_direct or self.active_exchange_id == 'binance':
-            # Paginate forward via Binance (1000 candles per batch)
+            current_end_time = None
             while len(all_ohlcv) < total_candles:
-                batch = self._fetch_binance_vision_klines(symbol, timeframe, since=since, limit=1000)
+                req_limit = min(1000, total_candles - len(all_ohlcv) + 50)
+                batch = self._fetch_binance_vision_klines(symbol, timeframe, since=None, endTime=current_end_time, limit=req_limit)
                 if not batch and self.exchange:
                     try:
-                        raw_ccxt = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=1000)
+                        params = {'endTime': current_end_time} if current_end_time else {}
+                        raw_ccxt = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=req_limit, params=params)
                         batch = [[c[0], c[1], c[2], c[3], c[4], c[5], c[5]*0.5] for c in raw_ccxt] if raw_ccxt else []
                     except Exception:
                         batch = []
                 if not batch:
                     break
                 all_ohlcv.extend(batch)
-                last_candle_time = batch[-1][0]
-                if last_candle_time >= curr_time or len(batch) < 10:
+                oldest_in_batch = batch[0][0]
+                if current_end_time is not None and oldest_in_batch >= current_end_time:
                     break
-                since = int(last_candle_time + step_ms)
-                time.sleep(0.05)
+                current_end_time = int(oldest_in_batch - 1)
+                if len(batch) < 10:
+                    break
+                time.sleep(0.03)
         else:
-            # Multi-exchange resilient pagination
+            # Multi-exchange resilient pagination: Get latest first, then paginate back
             limit_per_req = 1000
             if self.active_exchange_id == 'okx':
                 limit_per_req = 100
@@ -544,40 +550,43 @@ class CryptoDataLoader:
             elif self.active_exchange_id == 'kucoin':
                 limit_per_req = 1500
 
-            while len(all_ohlcv) < total_candles:
-                try:
-                    ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=int(since), limit=limit_per_req)
-                    if not ohlcv:
-                        break
-                    for c in ohlcv:
+            try:
+                raw_recent = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=min(limit_per_req, total_candles))
+                if raw_recent:
+                    for c in raw_recent:
                         all_ohlcv.append([c[0], c[1], c[2], c[3], c[4], c[5], c[5]*0.5])
-                    last_candle_time = ohlcv[-1][0]
-                    if last_candle_time >= curr_time or len(ohlcv) == 0:
-                        break
-                    since = int(last_candle_time + step_ms)
-                    time.sleep(self.exchange.rateLimit / 1000.0 if hasattr(self.exchange, 'rateLimit') else 0.05)
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if "451" in err_str or "restricted" in err_str:
-                        print(f"[FAILOVER] Restriction encountered during fetch. Re-routing...")
-                        self.priority_exchanges = [ex for ex in self.priority_exchanges if ex != self.active_exchange_id]
-                        self.init_resilient_exchange()
-                        return self.fetch_ohlcv_extended(symbol, timeframe, total_candles)
-                    break
+            except Exception:
+                pass
 
-        # 2. Real-Time Freshness Guarantee: Ensure the most recent live candle is included
-        try:
-            recent_candles = []
-            if self.is_binance_vision_direct or self.active_exchange_id == 'binance':
-                recent_candles = self._fetch_binance_vision_klines(symbol, timeframe, since=None, limit=min(500, total_candles))
-            elif self.exchange:
-                raw_recent = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=min(500, total_candles))
-                recent_candles = [[c[0], c[1], c[2], c[3], c[4], c[5], c[5]*0.5] for c in raw_recent] if raw_recent else []
-            
-            if recent_candles:
-                all_ohlcv.extend(recent_candles)
-        except Exception:
-            pass
+            if len(all_ohlcv) < total_candles and all_ohlcv:
+                oldest_ts = all_ohlcv[0][0]
+                while len(all_ohlcv) < total_candles:
+                    try:
+                        since_ts = oldest_ts - (limit_per_req * step_ms)
+                        batch = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=int(since_ts), limit=limit_per_req)
+                        if not batch:
+                            break
+                        for c in batch:
+                            all_ohlcv.append([c[0], c[1], c[2], c[3], c[4], c[5], c[5]*0.5])
+                        first_ts = batch[0][0]
+                        if first_ts >= oldest_ts:
+                            break
+                        oldest_ts = first_ts
+                        time.sleep(self.exchange.rateLimit / 1000.0 if hasattr(self.exchange, 'rateLimit') else 0.05)
+                    except Exception as e:
+                        err_str = str(e).lower()
+                        if "451" in err_str or "restricted" in err_str:
+                            print(f"[FAILOVER] Restriction encountered during fetch. Re-routing...")
+                            self.priority_exchanges = [ex for ex in self.priority_exchanges if ex != self.active_exchange_id]
+                            self.init_resilient_exchange()
+                            return self.fetch_ohlcv_extended(symbol, timeframe, total_candles)
+                        break
+
+        # Fallback to direct Binance Vision if still empty
+        if not all_ohlcv:
+            batch = self._fetch_binance_vision_klines(symbol, timeframe, since=None, limit=min(1000, total_candles))
+            if batch:
+                all_ohlcv.extend(batch)
 
         if not all_ohlcv:
             raise ValueError(f"No OHLCV records returned for {symbol} on {timeframe}")
@@ -632,6 +641,55 @@ class CryptoDataLoader:
             }
         except Exception:
             return {"funding_rate": 0.0001, "open_interest": 0.0, "regime": "⚪ NEUTRAL"}
+
+    def fetch_all_tickers(self, max_age_seconds: float = 3.0) -> dict:
+        """
+        Fetches real-time instantaneous prices for all Binance pairs in a single HTTP request (~150ms).
+        Cached for max_age_seconds to prevent redundant network calls during concurrent scans.
+        """
+        now = time.time()
+        if hasattr(self, '_live_tickers_cache') and self._live_tickers_cache and (now - getattr(self, '_live_tickers_ts', 0.0)) < max_age_seconds:
+            return self._live_tickers_cache
+
+        try:
+            url = "https://data-api.binance.vision/api/v3/ticker/price"
+            resp = self.session.get(url, timeout=6)
+            if resp.status_code == 200:
+                data = resp.json()
+                price_dict = {}
+                for item in data:
+                    raw_s = item['symbol']
+                    price_val = float(item['price'])
+                    price_dict[raw_s] = price_val
+                    if raw_s.endswith('USDT'):
+                        base = raw_s[:-4]
+                        price_dict[f"{base}/USDT"] = price_val
+                self._live_tickers_cache = price_dict
+                self._live_tickers_ts = now
+                return price_dict
+        except Exception:
+            pass
+
+        return getattr(self, '_live_tickers_cache', {})
+
+    def get_live_price(self, symbol: str) -> float:
+        """
+        Gets instantaneous real-time spot price for a given symbol with fallback to fetch_ticker.
+        """
+        raw_sym = symbol.replace('/', '').replace(':USDT', '')
+        tickers = self.fetch_all_tickers(max_age_seconds=4.0)
+        if symbol in tickers:
+            return float(tickers[symbol])
+        if raw_sym in tickers:
+            return float(tickers[raw_sym])
+        
+        try:
+            t = self.fetch_ticker(symbol)
+            if t and 'last' in t and float(t['last']) > 0:
+                return float(t['last'])
+        except Exception:
+            pass
+        return 0.0
 
     def fetch_ticker(self, symbol: str) -> dict:
         """Fetches the latest real-time ticker data."""
@@ -2392,7 +2450,7 @@ class HybridQuantEngine:
         else:
             print(f"[SHIELD 🛡️] Market Beta Status: {self.btc_shield_reason}")
 
-    def evaluate_single_horizon(self, symbol: str, horizon_key: str, h_cfg: dict, raw_dfs: dict, tf_features: dict, d1_macro_bull: bool, funding_info: dict = None) -> dict:
+    def evaluate_single_horizon(self, symbol: str, horizon_key: str, h_cfg: dict, raw_dfs: dict, tf_features: dict, d1_macro_bull: bool, funding_info: dict = None, live_price: float = None) -> dict:
         anchor_tf = h_cfg['anchor_tf']
         bars = h_cfg['bars']
         tp_mult = h_cfg['tp_mult']
@@ -2417,7 +2475,11 @@ class HybridQuantEngine:
         labeled_df = self.labeler.apply_barriers(fused_df, horizon_bars=bars, base_pt=tp_mult, base_sl=sl_mult)
 
         live_candle = labeled_df.iloc[-1:].copy()
-        current_price = live_candle['close'].values[0]
+        if live_price is not None and live_price > 0:
+            current_price = float(live_price)
+            live_candle.at[live_candle.index[0], 'close'] = current_price
+        else:
+            current_price = float(live_candle['close'].values[0])
         live_timestamp = live_candle['datetime'].iloc[0]
         live_raw_atr = live_candle['primary_raw_atr'].values[0]
         live_norm_atr = live_candle['primary_norm_atr'].values[0]
@@ -2884,6 +2946,18 @@ class HybridQuantEngine:
             "Regime": funding_info['regime']
         })
 
+        # Instantaneous live ticker price directly from exchange
+        live_price = self.loader.get_live_price(symbol)
+        if live_price <= 0:
+            live_price = float(raw_dfs['15m']['close'].iloc[-1]) if '15m' in raw_dfs else float(last_c)
+
+        # Synchronize latest candle close across timeframes to match live tick price
+        for tf_str in raw_dfs:
+            try:
+                raw_dfs[tf_str].at[raw_dfs[tf_str].index[-1], 'close'] = live_price
+            except Exception:
+                pass
+
         # Macro Daily Trend Check
         d1_c = raw_dfs['1d']['close'].values
         d1_ema50 = pd.Series(d1_c).ewm(span=50).mean().values[-1]
@@ -2893,7 +2967,9 @@ class HybridQuantEngine:
         # Evaluate all horizons simultaneously: Scalp (15M), Swing (1H), Macro (24H), etc.
         horizon_results = {}
         for h_key, h_cfg in self.config['horizons'].items():
-            horizon_results[h_key] = self.evaluate_single_horizon(symbol, h_key, h_cfg, raw_dfs, tf_features, d1_macro_bull, funding_info)
+            horizon_results[h_key] = self.evaluate_single_horizon(
+                symbol, h_key, h_cfg, raw_dfs, tf_features, d1_macro_bull, funding_info, live_price=live_price
+            )
 
         # Multi-Horizon Alignment & Confluence Diagnostics
         bull_horizons = [k for k, h in horizon_results.items() if h['direction'] == "BULLISH" and "CONSOLIDATION" not in h['decision']]
@@ -2953,12 +3029,12 @@ class HybridQuantEngine:
         overall_score = sum(h['conviction'] * abs(h['exp_return']) for h in horizon_results.values())
 
         # 15m candle high and low for intra-candle wick verification
-        live_high = float(raw_dfs['15m']['high'].iloc[-1]) if '15m' in raw_dfs else horizon_results['scalp']['current_price']
-        live_low = float(raw_dfs['15m']['low'].iloc[-1]) if '15m' in raw_dfs else horizon_results['scalp']['current_price']
+        live_high = max(float(raw_dfs['15m']['high'].iloc[-1]) if '15m' in raw_dfs else live_price, live_price)
+        live_low = min(float(raw_dfs['15m']['low'].iloc[-1]) if '15m' in raw_dfs else live_price, live_price)
 
         return {
             "symbol": symbol,
-            "current_price": horizon_results['scalp']['current_price'],
+            "current_price": live_price,
             "live_high": live_high,
             "live_low": live_low,
             "horizons": horizon_results,
@@ -3039,6 +3115,25 @@ class HybridQuantEngine:
                         print(f"[ERROR] Failed scanning {sym}: {e}")
 
             print(f"[SCANNER ✅] Processed all 8 horizons for {len(scanner_results)} assets.")
+
+            # Bulk Live Ticker Price Sync: Guarantees zero scan-latency drift on all scanned coins
+            try:
+                latest_all_tickers = self.loader.fetch_all_tickers(max_age_seconds=1.0)
+                if latest_all_tickers:
+                    for r in scanner_results:
+                        s_sym = r['symbol']
+                        s_raw = s_sym.replace('/', '').replace(':USDT', '')
+                        fresh_p = latest_all_tickers.get(s_sym) or latest_all_tickers.get(s_raw)
+                        if fresh_p and fresh_p > 0:
+                            fresh_p = float(fresh_p)
+                            r['current_price'] = fresh_p
+                            live_prices[s_sym] = fresh_p
+                            r['live_high'] = max(r.get('live_high', fresh_p), fresh_p)
+                            r['live_low'] = min(r.get('live_low', fresh_p), fresh_p)
+                            if 'scalp' in r.get('horizons', {}):
+                                r['horizons']['scalp']['current_price'] = fresh_p
+            except Exception:
+                pass
 
             # Sort by best priority, triple confluence, consistency index, and alignment strength
             scanner_results.sort(key=lambda x: (

@@ -43,11 +43,19 @@ app.include_router(portfolio_router)
 app.include_router(health_router)
 app.include_router(models_router)
 
+from app.services.signal_service import signal_service
+
+@app.get("/api/prices")
+def get_live_prices():
+    """Direct real-time Binance prices endpoint for instant frontend ticker sync."""
+    return signal_service.get_all_live_prices()
+
 @app.get("/")
 def root():
     return {
         "message": "Quantitative Crypto Trading Engine API is Running",
         "docs": "/api/docs",
         "status_endpoint": "/api/status",
+        "prices_endpoint": "/api/prices",
         "kpi_endpoint": "/api/signals/kpi",
     }
