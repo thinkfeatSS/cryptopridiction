@@ -21,15 +21,16 @@ export default React.memo(function ScanCountdownBadge({
   const getRemainingSeconds = React.useCallback(() => {
     if (status?.next_scan_timestamp && status.next_scan_timestamp > 0) {
       const nowSec = Math.floor(Date.now() / 1000);
-      return Math.max(0, status.next_scan_timestamp - nowSec);
+      const diff = status.next_scan_timestamp - nowSec;
+      if (diff > 0) return diff;
     }
-    if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan >= 0) {
+    if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan > 0) {
       return status.seconds_to_next_scan;
     }
     const now = new Date();
     const mins = 15 - (now.getUTCMinutes() % 15);
     const secs = (mins * 60) - now.getUTCSeconds();
-    return Math.max(0, secs);
+    return Math.max(1, secs);
   }, [status?.next_scan_timestamp, status?.seconds_to_next_scan]);
 
   const [localSeconds, setLocalSeconds] = useState<number>(900);

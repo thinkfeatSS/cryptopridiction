@@ -83,8 +83,8 @@ services:
       - MYSQL_DB=${MYSQL_DATABASE:-crypto_trading}
       - EXPORT_DIR=/app/export_app_data
       - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-15}
-      - SCANNER_TOP_N=${SCANNER_TOP_N:-150}
-      - MAX_SCAN_WORKERS=${MAX_SCAN_WORKERS:-32}
+      - SCANNER_TOP_N=${SCANNER_TOP_N:-30}
+      - MAX_SCAN_WORKERS=${MAX_SCAN_WORKERS:-8}
       - HEARTBEAT_SECONDS=${HEARTBEAT_SECONDS:-4}
     volumes:
       - app_exports:/app/export_app_data

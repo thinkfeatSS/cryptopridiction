@@ -107,8 +107,8 @@ CONFIG = {
     "mode": "both",               # "both", "scanner", or "single"
     "continuous_loop": True,      # 24/7 Background Watcher Loop
     "scanner_mode": "top_volume", # "top_volume" (dynamic auto-discovery of all active Binance coins), "expanded_universe", or "custom_list"
-    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "150")), # Top 150 volume Binance coins
-    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "32")), # Concurrency worker threads
+    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "30")), # Top 30 volume Binance coins (clean & responsive)
+    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "8")), # Concurrency worker threads
     "heartbeat_interval_seconds": int(os.getenv("HEARTBEAT_SECONDS", "4")), # Fast intra-candle position monitoring
     "single_symbol": "BTC/USDT",
     "scanner_symbols": [
@@ -163,22 +163,6 @@ CONFIG = {
             "tp_mult": 3.0,
             "sl_mult": 1.5
         },
-        "horizon_2d": {
-            "name": "🔮 2-Day (48H)",
-            "anchor_tf": "1d",
-            "bars": 2,
-            "duration_label": "48 Hours",
-            "tp_mult": 3.5,
-            "sl_mult": 1.8
-        },
-        "horizon_3d": {
-            "name": "🔭 3-Day (72H)",
-            "anchor_tf": "1d",
-            "bars": 3,
-            "duration_label": "3 Days",
-            "tp_mult": 4.0,
-            "sl_mult": 2.0
-        },
         "weekly": {
             "name": "🗓️ Weekly (7D)",
             "anchor_tf": "1d",
@@ -186,14 +170,6 @@ CONFIG = {
             "duration_label": "7 Days",
             "tp_mult": 5.0,
             "sl_mult": 2.5
-        },
-        "biweekly": {
-            "name": "🌕 Bi-Weekly (15D)",
-            "anchor_tf": "1d",
-            "bars": 15,
-            "duration_label": "15 Days",
-            "tp_mult": 6.0,
-            "sl_mult": 3.0
         },
         "monthly": {
             "name": "🪐 Monthly (30D)",
@@ -3314,28 +3290,31 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
-            scan_deadline_seconds = 180.0
-            max_threads = min(int(self.config.get('max_scan_workers', 12)), len(symbols_to_scan))
-            with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            scan_deadline_seconds = 120.0
+            max_threads = min(int(self.config.get('max_scan_workers', 8)), len(symbols_to_scan))
+            executor = ThreadPoolExecutor(max_workers=max_threads)
+            try:
                 future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in symbols_to_scan}
                 for future in as_completed(future_to_sym):
                     if (time.time() - self.last_scan_started_ts) > scan_deadline_seconds:
                         print(f"[DEADLINE ⏳] Total scan time reached {scan_deadline_seconds}s limit. Safely completing cycle with {len(scanner_results)} assets.")
+                        for f in future_to_sym:
+                            f.cancel()
                         break
                     sym = future_to_sym[future]
                     try:
-                        res = future.result(timeout=30.0)
+                        res = future.result(timeout=20.0)
                         if res:
                             scanner_results.append(res)
                             live_prices[sym] = res['current_price']
                             live_highs[sym] = res['live_high']
                             live_lows[sym] = res['live_low']
-                    except TimeoutError:
-                        print(f"[TIMEOUT ⚠️] Asset {sym} exceeded 30s scan limit. Skipped safely to preserve scanner momentum.")
                     except Exception as e:
-                        print(f"[ERROR] Failed scanning {sym}: {e}")
+                        pass
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
-            print(f"[SCANNER ✅] Processed all 8 horizons for {len(scanner_results)} assets.")
+            print(f"[SCANNER ✅] Processed active horizons for {len(scanner_results)} assets.")
 
             # Bulk Live Ticker Price Sync: Guarantees zero scan-latency drift on all scanned coins
             try:

@@ -585,17 +585,17 @@ class SignalService:
         current_minute = now.minute
         current_second = now.second
         now_ts = now.timestamp()
-        if sync_state.get("next_scan_timestamp"):
+        if sync_state.get("next_scan_timestamp") and int(sync_state["next_scan_timestamp"]) > now_ts:
             target_ts = int(sync_state["next_scan_timestamp"])
-            secs_remaining = max(0, int(target_ts - now_ts))
-            next_scan_time = sync_state.get("next_scan_time_utc") or (now + timedelta(seconds=secs_remaining)).strftime("%H:%M:%S UTC")
+            secs_remaining = max(1, int(target_ts - now_ts))
+            next_scan_time = sync_state.get("next_scan_time_utc") or (now + timedelta(seconds=secs_remaining)).strftime("%Y-%m-%d %H:%M:%S UTC")
         else:
             mins_remaining = 15 - (current_minute % 15)
             secs_remaining = (mins_remaining * 60) - current_second + 2
             if secs_remaining <= 5:
                 secs_remaining += 900
             target_ts = int((now + timedelta(seconds=secs_remaining)).timestamp())
-            next_scan_time = (now + timedelta(seconds=secs_remaining)).strftime("%H:%M:%S UTC")
+            next_scan_time = (now + timedelta(seconds=secs_remaining)).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         shield_status = {"active": False, "reason": "NORMAL (Market Stable)"}
         cached = get_cached_forecast()
