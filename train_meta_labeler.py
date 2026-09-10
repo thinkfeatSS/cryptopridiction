@@ -183,6 +183,7 @@ def train_and_save_meta_classifier():
             colsample_bytree=0.80,
             min_child_samples=5,
             random_state=42,
+            n_jobs=2,
             verbose=-1
         )
     else:
@@ -195,7 +196,7 @@ def train_and_save_meta_classifier():
         )
         
     # Fit base classifier & calibrate probabilities via Sigmoid / Isotonic
-    calibrated_clf = CalibratedClassifierCV(estimator=base_clf, method='sigmoid', cv=3)
+    calibrated_clf = CalibratedClassifierCV(estimator=base_clf, method='sigmoid', cv=3, n_jobs=1)
     calibrated_clf.fit(X, y)
     
     # In-sample & cross-validation metrics

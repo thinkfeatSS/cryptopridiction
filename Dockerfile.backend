@@ -32,9 +32,8 @@ COPY test.py .
 COPY train_meta_labeler.py .
 COPY run_scanner_daemon.py .
 
-# Create directories and pre-train seed meta-classifier if not present
-RUN mkdir -p /app/export_app_data /app/models_export_v3 && \
-    python train_meta_labeler.py || true
+# Create directories for app data and models
+RUN mkdir -p /app/export_app_data /app/models_export_v3
 
 EXPOSE 8000
 
