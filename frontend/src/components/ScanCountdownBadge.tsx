@@ -73,7 +73,9 @@ export default React.memo(function ScanCountdownBadge({
           {isScanning ? "Quant Daemon Status" : "Next AI Scan & Refresh In"}
         </span>
         <span className="font-mono text-sm font-black text-white" suppressHydrationWarning>
-          {isScanning ? "⚡ AI Processing Universe..." : (!mounted ? "15:00" : formatTimeRemaining(localSeconds))}
+          {isScanning
+            ? (status?.scanned_assets_count ? `⚡ Streaming: ${status.scanned_assets_count}/100 Coins...` : "⚡ Streaming Universe...")
+            : (!mounted ? "15:00" : formatTimeRemaining(localSeconds))}
         </span>
       </div>
     </div>

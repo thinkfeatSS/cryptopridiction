@@ -619,6 +619,8 @@ class SignalService:
             "is_engine_active": True,
             "is_scanning": is_scanning,
             "scan_status": sync_state.get("scan_status", "IDLE"),
+            "scanned_assets_count": sync_state.get("scanned_assets_count", 0),
+            "total_assets_count": sync_state.get("total_assets_count", 100),
             "current_time_utc": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "next_scan_utc": next_scan_time,
             "next_scan_timestamp": target_ts,

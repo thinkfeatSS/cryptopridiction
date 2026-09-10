@@ -64,7 +64,9 @@ export default React.memo(function NavCountdownTimer() {
           {isScanning ? "AI Engine Status" : "Next 15M Scan In"}
         </span>
         <span className="font-mono text-xs font-bold text-white" suppressHydrationWarning>
-          {isScanning ? "⚡ Scanning Active Universe..." : (!mounted ? "15:00" : formatTimeRemaining(localSeconds))}
+          {isScanning
+            ? (status?.scanned_assets_count ? `⚡ Streaming: ${status.scanned_assets_count}/100 Coins...` : "⚡ Streaming Active Universe...")
+            : (!mounted ? "15:00" : formatTimeRemaining(localSeconds))}
         </span>
       </div>
     </div>

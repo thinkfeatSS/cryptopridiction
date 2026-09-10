@@ -76,6 +76,8 @@ def get_sync_state():
         "portfolio_version": _PORTFOLIO_VERSION,
         "is_scanning": d_state.get("is_scanning", _IS_SCANNING),
         "scan_status": d_state.get("scan_status", "IDLE"),
+        "scanned_assets_count": d_state.get("scanned_assets_count", 0),
+        "total_assets_count": d_state.get("total_assets_count", 100),
         "last_scan_timestamp": d_state.get("last_scan_completed_at_utc", _LAST_SCAN_TIMESTAMP),
         "last_scan_completed_at": d_state.get("last_scan_completed_at", None),
         "last_scan_duration_seconds": d_state.get("last_scan_duration_seconds", None),

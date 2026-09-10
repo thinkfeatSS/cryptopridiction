@@ -3323,6 +3323,8 @@ class HybridQuantEngine:
             print("=" * 95)
 
             scan_deadline_seconds = 180.0
+            last_partial_sync_ts = time.time()
+            last_synced_count = 0
             max_threads = min(int(self.config.get('max_scan_workers', 16)), len(symbols_to_scan))
             executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
@@ -3341,10 +3343,16 @@ class HybridQuantEngine:
                             live_prices[sym] = res['current_price']
                             live_highs[sym] = res['live_high']
                             live_lows[sym] = res['live_low']
-                            if len(scanner_results) % 10 == 0 or len(scanner_results) == len(symbols_to_scan):
+                            
+                            # High-frequency Concurrent Streaming to Web UI and Database
+                            should_sync = (
+                                (len(scanner_results) - last_synced_count >= 3 and (time.time() - last_partial_sync_ts) >= 1.5)
+                                or len(scanner_results) == 1
+                                or len(scanner_results) == len(symbols_to_scan)
+                            )
+                            if should_sync:
                                 elapsed_now = time.time() - self.last_scan_started_ts
-                                print(f"[SCANNER 🛰️] Completed {len(scanner_results)}/{len(symbols_to_scan)} assets (Latest: {sym}) - Elapsed: {elapsed_now:.1f}s", flush=True)
-                                # Incremental Streaming Export: Keeps Web UI & Database fresh in real time
+                                print(f"[SCANNER 🛰️ STREAM] Streamed {len(scanner_results)}/{len(symbols_to_scan)} assets to UI (Latest: {sym}) - Elapsed: {elapsed_now:.1f}s", flush=True)
                                 try:
                                     partial_sorted = sorted(scanner_results, key=lambda x: (
                                         x['best_priority'],
@@ -3354,9 +3362,17 @@ class HybridQuantEngine:
                                         -x['overall_score']
                                     ))
                                     partial_signals = self.render_top_round_signals(partial_sorted, verbose=False)
-                                    self.export_web_app_json(partial_sorted, deep_dive_result=None, top_signals=partial_signals, is_partial=True)
+                                    self.export_web_app_json(
+                                        partial_sorted,
+                                        deep_dive_result=None,
+                                        top_signals=partial_signals,
+                                        is_partial=True,
+                                        total_count=len(symbols_to_scan)
+                                    )
                                     if HAS_DB_SYNC:
                                         sync_files_to_db_live(force=True)
+                                    last_synced_count = len(scanner_results)
+                                    last_partial_sync_ts = time.time()
                                 except Exception:
                                     pass
                     except Exception as e:
@@ -3925,7 +3941,7 @@ class HybridQuantEngine:
         sym = data['symbol']
         print(f"[DEEP DIVE 🔬] {sym} Multi-Horizon Analysis Complete (Triple Confluence: {'💎 YES' if data['is_triple_confluence'] else '⚡ INDEPENDENT'})\n")
 
-    def export_web_app_json(self, scanner_results: list, deep_dive_result: dict = None, top_signals: list = None, is_partial: bool = False):
+    def export_web_app_json(self, scanner_results: list, deep_dive_result: dict = None, top_signals: list = None, is_partial: bool = False, total_count: int = 100):
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "strategy": "Multi-Horizon Quantitative Engine (V16.0)",
@@ -3969,6 +3985,8 @@ class HybridQuantEngine:
                     json.dump({
                         "is_scanning": False,
                         "scan_status": "IDLE",
+                        "scanned_assets_count": len(scanner_results),
+                        "total_assets_count": len(scanner_results),
                         "last_scan_completed_at": now_done.isoformat(),
                         "last_scan_completed_at_utc": now_done.strftime("%Y-%m-%d %H:%M:%S UTC"),
                         "last_scan_duration_seconds": scan_duration,
@@ -3988,6 +4006,7 @@ class HybridQuantEngine:
                     with open(state_path, "r", encoding="utf-8") as f:
                         curr_state = json.load(f)
                     curr_state["scanned_assets_count"] = len(scanner_results)
+                    curr_state["total_assets_count"] = total_count
                     with open(state_path + ".tmp", "w", encoding="utf-8") as f:
                         json.dump(curr_state, f)
                     os.replace(state_path + ".tmp", state_path)

@@ -74,6 +74,8 @@ export interface EngineStatus {
   is_engine_active: boolean;
   is_scanning?: boolean;
   scan_status?: string;
+  scanned_assets_count?: number;
+  total_assets_count?: number;
   current_time_utc: string;
   next_scan_utc: string;
   next_scan_timestamp?: number;
