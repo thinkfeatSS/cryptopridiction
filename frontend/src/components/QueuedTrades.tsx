@@ -35,7 +35,7 @@ export default function QueuedTrades() {
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            100% Qualified Spot Long setups (&ge;+$0.80 profit on $5 trade &amp; Past Won &gt; Lost) held while active queue is at full capacity (3/3)
+            100% Qualified Spot Long setups (&ge;+5.0% net profit under Convert spread &amp; Past Won &gt; Lost) held while active queue is at full capacity (3/3)
           </p>
         </div>
 
@@ -58,7 +58,7 @@ export default function QueuedTrades() {
           </div>
           <h3 className="text-xs font-bold text-white">No Queued Trades Waiting</h3>
           <p className="text-[11px] text-slate-500 mt-0.5 max-w-md mx-auto">
-            All currently qualified trades have either been admitted directly into the 3 active slots, or the engine is waiting for setups that satisfy both the &ge;+$0.80 profit hurdle and positive historical track record.
+            All currently qualified trades have either been admitted directly into the 3 active slots, or the engine is waiting for 4H/24H/Daily setups that satisfy both the &ge;+5.0% net return hurdle (under Convert spread) and positive historical track record.
           </p>
         </div>
       ) : (

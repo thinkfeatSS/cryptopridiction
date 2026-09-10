@@ -90,8 +90,10 @@ export interface OpenPosition {
   symbol: string;
   horizon: string;
   direction: "BULLISH" | "BEARISH" | "LONG" | "SHORT" | string;
+  execution_engine?: string;
   allocated_usd: number;
   entry_price: number;
+  raw_entry_price?: number;
   current_price: number;
   tp_price: number;
   sl_price: number;
@@ -109,7 +111,9 @@ export interface ClosedTradeItem {
   symbol: string;
   horizon: string;
   direction: "BULLISH" | "BEARISH" | "LONG" | "SHORT" | string;
+  execution_engine?: string;
   entry_price: number;
+  raw_entry_price?: number;
   exit_price: number;
   exit_reason: string;
   outcome: "WON" | "LOST" | "BREAKEVEN" | string;
@@ -127,7 +131,9 @@ export interface QueuedTrade {
   symbol: string;
   horizon: string;
   direction: string;
+  execution_engine?: string;
   entry_price: number;
+  raw_entry_price?: number;
   tp_price: number;
   tp1_price: number;
   tp2_price?: number;

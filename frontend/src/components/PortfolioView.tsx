@@ -68,7 +68,8 @@ export default function PortfolioView() {
               <li>Close &amp; delete all active open positions</li>
               <li>Wipe previous closed trade history</li>
               <li>Reset wallet capital back to clean <span className="text-emerald-400 font-bold">$15.00</span></li>
-              <li>Activate $5 max 3 spot trades rules</li>
+              <li>Activate 4H / 24H / Daily spot trades ($5 max 3 trades)</li>
+              <li>Enforce &ge; 5.0% net profit return under Binance Convert (0% fee, &plusmn;0.10% spread)</li>
             </ul>
 
             <div className="mt-5 flex items-center justify-end gap-3">
@@ -128,7 +129,7 @@ export default function PortfolioView() {
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            Monitored 24/7 with 10-second price ticks &amp; automated take-profit executions
+            Monitored 24/7 with 4-second price ticks &amp; automated take-profit executions
           </p>
         </div>
 
@@ -137,11 +138,14 @@ export default function PortfolioView() {
             <span className="rounded-md bg-purple-950/60 px-2 py-1 text-purple-300 border border-purple-800/60">
               💰 $15.00 Wallet ($5 / trade)
             </span>
+            <span className="rounded-md bg-indigo-950/60 px-2 py-1 text-indigo-300 border border-indigo-800/60">
+              📅 4H / 24H / Daily
+            </span>
             <span className="rounded-md bg-cyan-950/60 px-2 py-1 text-cyan-300 border border-cyan-800/60">
-              🎯 Min +$0.80 (+16%) Target
+              🎯 Min +5.0% Net Profit
             </span>
             <span className="rounded-md bg-amber-950/60 px-2 py-1 text-amber-300 border border-amber-800/60">
-              🛡️ Past Won &gt; Lost Only
+              🔄 Convert (±0.1% Spread, 0% Fee)
             </span>
           </div>
 
@@ -168,7 +172,7 @@ export default function PortfolioView() {
           </div>
           <h3 className="text-sm font-bold text-white">No Open Positions Active</h3>
           <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-            The trading engine will automatically open virtual positions when Grade A+ setups fire on the 15-minute candle close.
+            The trading engine will automatically open virtual positions when Grade A+ setups fire on 4-hour, 24-hour, and daily candle horizons with &ge; 5.0% net expected return under Binance Convert.
           </p>
         </div>
       ) : (
@@ -248,8 +252,12 @@ export default function PortfolioView() {
                 {/* Bottom PnL & Fee Bar */}
                 <div className="mt-4 flex items-center justify-between border-t border-slate-800/60 pt-2.5 text-xs">
                   <div>
-                    <span className="text-[10px] text-slate-400">Fee (Est):</span>{" "}
-                    <span className="text-slate-300 font-mono">-${pos.unrealized_fee_usd?.toFixed(2) || "0.00"}</span>
+                    <span className="text-[10px] text-slate-400">
+                      {pos.execution_engine === "binance_convert" ? "Convert Fee:" : "Fee (Est):"}
+                    </span>{" "}
+                    <span className="text-slate-300 font-mono">
+                      {pos.execution_engine === "binance_convert" ? "$0.00 (Zero Fee)" : `-$${pos.unrealized_fee_usd?.toFixed(2) || "0.00"}`}
+                    </span>
                   </div>
                   <div className="text-right">
                     <span

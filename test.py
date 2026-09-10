@@ -205,11 +205,18 @@ CONFIG = {
         "dynamic_sizing": False,            # Fixed $5.00 per trade (no over-leveraging)
         "min_position_size_usd": 5.0,
         "max_concurrent_positions": 3,      # Up to 3 active trades ($5.00 x 3 = $15.00 total capital)
-        "min_net_profit_usd": 0.80,         # Minimum $0.80 net profit target on $5.00 trades (>= 16% net gain)
+        # Targeted Execution Horizons: 4H, 24H (1D), and Multi-Day Daily Setups
+        "allowed_horizons": ["horizon_4h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"],
+        "min_expected_return_pct": 5.0,     # Strict minimum 5.0% net profit target on trades (>= 5.0% gain to TP1)
+        "min_net_profit_usd": 0.25,         # Minimum $0.25 net profit target on $5.00 trades (5% of $5.00)
         "require_positive_track_record": True, # Must have past winning signals > past losing signals
-        "binance_fee_rate": 0.0010,         # Standard Binance Spot fee: 0.10% (taker/maker)
-        "use_bnb_fee_discount": True,       # 25% discount when paying fees with BNB (0.075% net fee rate)
-        "slippage_rate": 0.0002             # 0.02% realistic market order execution slippage
+        # Binance Convert Rate Difference Engine (Zero Explicit Fee + Bid/Ask Spread Differential)
+        "execution_engine": "binance_convert", # "binance_convert" (0% fee, realistic ±0.10% buy/sell rate difference)
+        "convert_buy_spread_rate": 0.0010,  # +0.10% conversion ask rate markup when buying
+        "convert_sell_spread_rate": 0.0010, # -0.10% conversion bid rate markdown when selling
+        "binance_fee_rate": 0.0000,         # Zero explicit fee on Binance Convert
+        "use_bnb_fee_discount": False,
+        "slippage_rate": 0.0000
     },
     "signal_engine": {
         "dynamic_signal_count": True,       # Adaptive signal count based on true market edge
@@ -1374,12 +1381,26 @@ class PaperTradingLedger:
         self.config = config['paper_trading']
         self.export_dir = config['app_export_dir']
         self.ledger_file = os.path.join(self.export_dir, "paper_trading_ledger.json")
-        self.base_fee_rate = self.config.get('binance_fee_rate', 0.0010)
-        self.use_bnb_discount = self.config.get('use_bnb_fee_discount', True)
-        self.slippage_rate = self.config.get('slippage_rate', 0.0002)
-        # Effective fee per trade leg (e.g. 0.075% BNB discount + 0.02% slippage = 0.095%)
-        self.effective_fee_rate = (self.base_fee_rate * (0.75 if self.use_bnb_discount else 1.0)) + self.slippage_rate
-        self.fee_tier_label = f"Binance Spot ({'0.075% BNB Discount' if self.use_bnb_discount else '0.10% Standard'}) + {self.slippage_rate*100:.2f}% Slippage"
+        self.execution_engine = self.config.get('execution_engine', 'binance_convert')
+        self.convert_buy_spread_rate = float(self.config.get('convert_buy_spread_rate', 0.0010))
+        self.convert_sell_spread_rate = float(self.config.get('convert_sell_spread_rate', 0.0010))
+        self.allowed_horizons = set(self.config.get('allowed_horizons', [
+            "horizon_4h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"
+        ]))
+        self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 5.0))
+        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.25))
+
+        self.base_fee_rate = float(self.config.get('binance_fee_rate', 0.0))
+        self.use_bnb_discount = self.config.get('use_bnb_fee_discount', False)
+        self.slippage_rate = float(self.config.get('slippage_rate', 0.0))
+
+        if self.execution_engine == 'binance_convert':
+            self.effective_fee_rate = 0.0
+            self.fee_tier_label = f"Binance Convert (Zero Fee | +{self.convert_buy_spread_rate*100:.2f}% Buy / -{self.convert_sell_spread_rate*100:.2f}% Sell Spread)"
+        else:
+            self.effective_fee_rate = (self.base_fee_rate * (0.75 if self.use_bnb_discount else 1.0)) + self.slippage_rate
+            self.fee_tier_label = f"Binance Spot ({'0.075% BNB Discount' if self.use_bnb_discount else '0.10% Standard'}) + {self.slippage_rate*100:.2f}% Slippage"
+
         self.cooldown_tracker = {}  # {symbol: datetime_of_last_breakeven_or_loss}
         self.data = self.load_or_initialize()
 
@@ -1527,11 +1548,13 @@ class PaperTradingLedger:
             is_hit_sl = (direction == "BULLISH" and low_p <= sl_p) or (direction == "BEARISH" and high_p >= sl_p)
             
             # Minimum holding window safeguard (prevents premature exits)
-            h_name = pos.get('horizon', 'scalp')
+            h_name = pos.get('horizon', 'horizon_4h')
             if h_name == 'scalp':
                 min_dur_secs = 10 * 60
             elif h_name == 'swing':
                 min_dur_secs = 60 * 60
+            elif h_name == 'horizon_4h':
+                min_dur_secs = 2 * 3600
             elif h_name == 'macro':
                 min_dur_secs = 12 * 3600
             elif h_name == 'horizon_2d':
@@ -1545,7 +1568,7 @@ class PaperTradingLedger:
             elif h_name == 'monthly':
                 min_dur_secs = 14 * 86400
             else:
-                min_dur_secs = 10 * 60
+                min_dur_secs = 2 * 3600
             is_expired = (now_dt >= expiry_dt) and (dur_secs >= min_dur_secs)
 
             # 1. PARTIAL TP1 SCALE (50% locked + Trail SL to Breakeven)
@@ -1553,10 +1576,15 @@ class PaperTradingLedger:
                 scale_size = round(rem_size * 0.50, 2)
                 rem_size = round(rem_size - scale_size, 2)
                 
-                # Calculate True Binance Fees for TP1 Exit Leg
-                gross_tp1_gain = scale_size * (abs(tp1_p - entry_p) / entry_p)
-                exit_nominal = scale_size + gross_tp1_gain
-                exit_fee = round(exit_nominal * self.effective_fee_rate, 4)
+                # Calculate True Binance Fees & Convert Execution for TP1 Exit Leg
+                if self.execution_engine == 'binance_convert':
+                    eff_tp1_exit = round(tp1_p * (1.0 - self.convert_sell_spread_rate), 8)
+                    gross_tp1_gain = scale_size * ((eff_tp1_exit - entry_p) / entry_p)
+                    exit_fee = 0.0
+                else:
+                    gross_tp1_gain = scale_size * (abs(tp1_p - entry_p) / entry_p)
+                    exit_nominal = scale_size + gross_tp1_gain
+                    exit_fee = round(exit_nominal * self.effective_fee_rate, 4)
                 net_tp1_realized = round(gross_tp1_gain - exit_fee, 4)
 
                 pos['realized_gross_pnl'] = round(pos.get('realized_gross_pnl', 0.0) + gross_tp1_gain, 4)
@@ -1572,9 +1600,14 @@ class PaperTradingLedger:
                 scale_size = round(init_size * 0.30, 2)
                 rem_size = round(rem_size - scale_size, 2)
 
-                gross_tp2_gain = scale_size * (abs(tp2_p - entry_p) / entry_p)
-                exit_nominal = scale_size + gross_tp2_gain
-                exit_fee = round(exit_nominal * self.effective_fee_rate, 4)
+                if self.execution_engine == 'binance_convert':
+                    eff_tp2_exit = round(tp2_p * (1.0 - self.convert_sell_spread_rate), 8)
+                    gross_tp2_gain = scale_size * ((eff_tp2_exit - entry_p) / entry_p)
+                    exit_fee = 0.0
+                else:
+                    gross_tp2_gain = scale_size * (abs(tp2_p - entry_p) / entry_p)
+                    exit_nominal = scale_size + gross_tp2_gain
+                    exit_fee = round(exit_nominal * self.effective_fee_rate, 4)
                 net_tp2_realized = round(gross_tp2_gain - exit_fee, 4)
 
                 pos['realized_gross_pnl'] = round(pos.get('realized_gross_pnl', 0.0) + gross_tp2_gain, 4)
@@ -1589,13 +1622,20 @@ class PaperTradingLedger:
             is_final_exit = is_hit_sl or is_expired or (stage == 'TP2_LOCKED_TRAIL' and is_hit_tp2)
 
             if is_final_exit:
-                exit_p = sl_p if is_hit_sl else (tp2_p if (stage == 'TP2_LOCKED_TRAIL' and is_hit_tp2) else curr_p)
+                raw_exit_p = sl_p if is_hit_sl else (tp2_p if (stage == 'TP2_LOCKED_TRAIL' and is_hit_tp2) else curr_p)
                 
-                # Calculate return on remaining allocated size
-                raw_rem_return = (exit_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - exit_p) / entry_p
-                gross_rem_pnl = rem_size * raw_rem_return
-                exit_rem_nominal = max(0.0, rem_size + gross_rem_pnl)
-                exit_rem_fee = round(exit_rem_nominal * self.effective_fee_rate, 4)
+                # Calculate return on remaining allocated size with Convert markdown if applicable
+                if self.execution_engine == 'binance_convert':
+                    exit_p = round(raw_exit_p * (1.0 - self.convert_sell_spread_rate), 8)
+                    raw_rem_return = (exit_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - exit_p) / entry_p
+                    gross_rem_pnl = rem_size * raw_rem_return
+                    exit_rem_fee = 0.0
+                else:
+                    exit_p = raw_exit_p
+                    raw_rem_return = (exit_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - exit_p) / entry_p
+                    gross_rem_pnl = rem_size * raw_rem_return
+                    exit_rem_nominal = max(0.0, rem_size + gross_rem_pnl)
+                    exit_rem_fee = round(exit_rem_nominal * self.effective_fee_rate, 4)
                 net_rem_realized = gross_rem_pnl - exit_rem_fee
 
                 # Total Combined Trade Accounting
@@ -1671,11 +1711,17 @@ class PaperTradingLedger:
                 closed_this_tick.append(pos)
             else:
                 # Update Open Position with Real-Time Estimated Exit Fees & Net PnL
-                raw_ret = (curr_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - curr_p) / entry_p
-                est_exit_nominal = max(0.0, rem_size * (1.0 + raw_ret))
-                est_exit_fee = round(est_exit_nominal * self.effective_fee_rate, 4)
-                est_entry_fee = round(rem_size * self.effective_fee_rate, 4)
-                est_total_fee = round(est_entry_fee + est_exit_fee, 4)
+                if self.execution_engine == 'binance_convert':
+                    eff_curr_exit = round(curr_p * (1.0 - self.convert_sell_spread_rate), 8)
+                    raw_ret = (eff_curr_exit - entry_p) / entry_p if direction == "BULLISH" else (entry_p - eff_curr_exit) / entry_p
+                    est_total_fee = 0.0
+                    pos['convert_sell_rate'] = eff_curr_exit
+                else:
+                    raw_ret = (curr_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - curr_p) / entry_p
+                    est_exit_nominal = max(0.0, rem_size * (1.0 + raw_ret))
+                    est_exit_fee = round(est_exit_nominal * self.effective_fee_rate, 4)
+                    est_entry_fee = round(rem_size * self.effective_fee_rate, 4)
+                    est_total_fee = round(est_entry_fee + est_exit_fee, 4)
 
                 gross_u_pnl = round(raw_ret * rem_size, 4)
                 net_u_pnl = round(gross_u_pnl - est_total_fee, 4)
@@ -1706,6 +1752,10 @@ class PaperTradingLedger:
 
     def consider_new_trade(self, result: dict, horizon_key: str, signal_history: list = None):
         if not self.config['enabled']:
+            return
+
+        # 0. Targeted Execution Horizons Guard: Only execute trades on allowed horizons (4H, 24H/1D, 2D, 3D, Weekly, Biweekly, Monthly)
+        if horizon_key not in self.allowed_horizons:
             return
 
         decision = result['decision']
@@ -1752,13 +1802,21 @@ class PaperTradingLedger:
         # 4. Fixed Position Size: $5.00 per trade ($15 total capital / 3 trades)
         pos_size = float(self.config.get('position_size_usd', 5.0))
 
-        # 5. Strict Profit Requirement: Minimum $0.80 net profit target on a $5.00 trade (>= 16.0% net gain)
-        expected_gain_pct = abs(tp1_p - entry_p) / entry_p
-        est_nominal_fees = pos_size * (self.effective_fee_rate * 2)
-        est_net_profit_usd = (pos_size * expected_gain_pct) - est_nominal_fees
-        min_required_profit = float(self.config.get('min_net_profit_usd', 0.80))
-        if est_net_profit_usd < min_required_profit:
-            return  # Skip trade: Expected net profit on $5.00 trade is below $0.80
+        # 5. Strict Profit Hurdle: Minimum 5.0% Net Return after Binance Convert Buy/Sell Rate Difference
+        if self.execution_engine == 'binance_convert':
+            eff_buy_entry = round(entry_p * (1.0 + self.convert_buy_spread_rate), 8)
+            eff_tp1_exit = round(tp1_p * (1.0 - self.convert_sell_spread_rate), 8)
+            expected_net_gain_pct = (eff_tp1_exit - eff_buy_entry) / eff_buy_entry
+            est_net_profit_usd = round(pos_size * expected_net_gain_pct, 4)
+        else:
+            eff_buy_entry = entry_p
+            expected_gain_pct = abs(tp1_p - entry_p) / entry_p
+            est_nominal_fees = pos_size * (self.effective_fee_rate * 2)
+            est_net_profit_usd = (pos_size * expected_gain_pct) - est_nominal_fees
+            expected_net_gain_pct = est_net_profit_usd / pos_size
+
+        if (expected_net_gain_pct * 100.0) < self.min_expected_return_pct or est_net_profit_usd < self.min_net_profit_usd:
+            return  # Skip trade: Expected net profit is below 5.0% ($0.25 on $5.00)
 
         # 6. Strict Track Record Requirement: Selected trade MUST have past winning signals > signals lost
         past_won = 0
@@ -1789,7 +1847,9 @@ class PaperTradingLedger:
                     "symbol": sym,
                     "horizon": horizon_key,
                     "direction": "SPOT LONG",
-                    "entry_price": entry_p,
+                    "execution_engine": self.execution_engine,
+                    "entry_price": eff_buy_entry,
+                    "raw_entry_price": entry_p,
                     "tp_price": tp_p,
                     "tp1_price": tp1_p,
                     "tp2_price": tp2_p,
@@ -1797,7 +1857,7 @@ class PaperTradingLedger:
                     "sl_price": sl_p,
                     "position_size_usd": pos_size,
                     "est_net_profit_usd": round(est_net_profit_usd, 2),
-                    "est_net_gain_pct": round((est_net_profit_usd / pos_size) * 100.0, 2),
+                    "est_net_gain_pct": round(expected_net_gain_pct * 100.0, 2),
                     "past_won": past_won,
                     "past_lost": past_lost,
                     "win_ratio_label": f"{past_won}W / {past_lost}L",
@@ -1814,6 +1874,7 @@ class PaperTradingLedger:
         tf_delta_map = {
             'scalp': timedelta(minutes=15),
             'swing': timedelta(hours=2),
+            'horizon_4h': timedelta(hours=4),
             'macro': timedelta(hours=24),
             'horizon_2d': timedelta(days=2),
             'horizon_3d': timedelta(days=3),
@@ -1821,18 +1882,26 @@ class PaperTradingLedger:
             'biweekly': timedelta(days=15),
             'monthly': timedelta(days=30)
         }
-        duration = tf_delta_map.get(horizon_key, timedelta(minutes=15))
+        duration = tf_delta_map.get(horizon_key, timedelta(hours=4))
         expiry_dt = now_utc + duration
 
-        # Calculate exact Binance entry fee on opening nominal size ($5.00)
-        entry_fee = round(pos_size * self.effective_fee_rate, 4)
+        if self.execution_engine == 'binance_convert':
+            fill_entry_p = eff_buy_entry
+            entry_fee = 0.0
+            spread_cost_entry = round(pos_size * self.convert_buy_spread_rate, 4)
+        else:
+            fill_entry_p = entry_p
+            entry_fee = round(pos_size * self.effective_fee_rate, 4)
+            spread_cost_entry = 0.0
 
         new_pos = {
             "trade_id": f"PAPER_{sym.replace('/', '_')}_{horizon_key}_{int(time.time())}",
             "symbol": sym,
             "horizon": horizon_key,
             "direction": "BULLISH",
-            "entry_price": entry_p,
+            "execution_engine": self.execution_engine,
+            "entry_price": fill_entry_p,
+            "raw_entry_price": entry_p,
             "tp_price": tp_p,
             "tp1_price": tp1_p,
             "tp2_price": tp2_p,
@@ -1854,9 +1923,9 @@ class PaperTradingLedger:
             "expiry_time": expiry_dt.isoformat(),
             "signal_decision": decision,
             "unrealized_gross_pnl_usd": 0.0,
-            "unrealized_fee_usd": entry_fee * 2,
-            "unrealized_pnl_usd": -round(entry_fee * 2, 4),
-            "unrealized_pnl_pct": -round((entry_fee * 2 / pos_size) * 100.0, 2),
+            "unrealized_fee_usd": 0.0 if self.execution_engine == 'binance_convert' else entry_fee * 2,
+            "unrealized_pnl_usd": -round(spread_cost_entry, 4) if self.execution_engine == 'binance_convert' else -round(entry_fee * 2, 4),
+            "unrealized_pnl_pct": -round(self.convert_buy_spread_rate * 100.0, 2) if self.execution_engine == 'binance_convert' else -round((entry_fee * 2 / pos_size) * 100.0, 2),
             "current_price": entry_p
         }
 
@@ -3176,14 +3245,17 @@ class HybridQuantEngine:
             # Order Execution Manager: Process Real-Time Tick & Admit Top Ranked Candidates
             self.ledger.on_tick(live_prices, live_highs, live_lows)
 
-            # Extract executable candidate signals from Alpha Signal Engine
+            # Extract executable candidate signals from Alpha Signal Engine (Filtered to Allowed Horizons)
+            allowed_pt_horizons = self.ledger.allowed_horizons
             all_candidates = []
             for r in scanner_results:
                 for h_key, h in r['horizons'].items():
+                    if h_key not in allowed_pt_horizons:
+                        continue
                     if h['priority'] <= 2 or "EXECUTE" in h['decision'] or "DIP-BUY" in h['decision'] or "REVERSAL" in h['decision']:
                         all_candidates.append((h, h_key))
 
-            # Rank candidates: Prioritize Grade A+, High-Margin Macro, Weekly & Swing setups, and Conviction/Alpha edge
+            # Rank candidates: Prioritize Grade A+, Macro/Daily/4H setups, and Conviction/Alpha edge
             horizon_tier = {
                 'monthly': 8,
                 'biweekly': 7,
@@ -3191,8 +3263,9 @@ class HybridQuantEngine:
                 'horizon_3d': 5,
                 'horizon_2d': 4,
                 'macro': 3,
-                'swing': 2,
-                'scalp': 1
+                'horizon_4h': 2,
+                'swing': 1,
+                'scalp': 0
             }
             all_candidates.sort(key=lambda x: (
                 x[0]['priority'],
