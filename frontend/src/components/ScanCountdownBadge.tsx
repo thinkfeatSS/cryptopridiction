@@ -15,6 +15,7 @@ export default React.memo(function ScanCountdownBadge({
   className = "",
 }: ScanCountdownBadgeProps) {
   const { data: status } = useStatusQuery();
+  const [mounted, setMounted] = useState(false);
   
   // Calculate remaining seconds to next 15m candle boundary locally
   const getNext15MRemaining = () => {
@@ -24,7 +25,12 @@ export default React.memo(function ScanCountdownBadge({
     return Math.max(1, secs);
   };
 
-  const [localSeconds, setLocalSeconds] = useState<number>(getNext15MRemaining());
+  const [localSeconds, setLocalSeconds] = useState<number>(900);
+
+  useEffect(() => {
+    setMounted(true);
+    setLocalSeconds(getNext15MRemaining());
+  }, []);
 
   useEffect(() => {
     if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan > 0) {
@@ -66,8 +72,8 @@ export default React.memo(function ScanCountdownBadge({
         <span className="text-[10px] uppercase font-bold tracking-wider text-cyan-300">
           {isScanning ? "Quant Daemon Status" : "Next AI Scan & Refresh In"}
         </span>
-        <span className="font-mono text-sm font-black text-white">
-          {isScanning ? "⚡ AI Processing Universe..." : formatTimeRemaining(localSeconds)}
+        <span className="font-mono text-sm font-black text-white" suppressHydrationWarning>
+          {isScanning ? "⚡ AI Processing Universe..." : (!mounted ? "15:00" : formatTimeRemaining(localSeconds))}
         </span>
       </div>
     </div>

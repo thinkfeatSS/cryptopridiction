@@ -7,6 +7,7 @@ import { Radio, Loader2 } from "lucide-react";
 
 export default React.memo(function NavCountdownTimer() {
   const { data: status } = useStatusQuery();
+  const [mounted, setMounted] = useState(false);
   
   // Calculate remaining seconds to next 15m candle boundary locally
   const getNext15MRemaining = () => {
@@ -16,7 +17,12 @@ export default React.memo(function NavCountdownTimer() {
     return Math.max(1, secs);
   };
 
-  const [localSeconds, setLocalSeconds] = useState<number>(getNext15MRemaining());
+  const [localSeconds, setLocalSeconds] = useState<number>(900);
+
+  useEffect(() => {
+    setMounted(true);
+    setLocalSeconds(getNext15MRemaining());
+  }, []);
 
   useEffect(() => {
     if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan > 0) {
@@ -57,8 +63,8 @@ export default React.memo(function NavCountdownTimer() {
         >
           {isScanning ? "AI Engine Status" : "Next 15M Scan In"}
         </span>
-        <span className="font-mono text-xs font-bold text-white">
-          {isScanning ? "⚡ Scanning Active Universe..." : formatTimeRemaining(localSeconds)}
+        <span className="font-mono text-xs font-bold text-white" suppressHydrationWarning>
+          {isScanning ? "⚡ Scanning Active Universe..." : (!mounted ? "15:00" : formatTimeRemaining(localSeconds))}
         </span>
       </div>
     </div>
