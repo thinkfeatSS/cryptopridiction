@@ -40,6 +40,10 @@ def run_daemon():
     print(f"📁 Export Directory: {os.path.abspath(CONFIG.get('app_export_dir', 'export_app_data'))}")
     print("=" * 80)
 
+    # Initialize Engine once outside loop so self.model_cache persists across cycles
+    print("[SCANNER DAEMON 🧠] Initializing HybridQuantEngine & warming model cache...")
+    engine = HybridQuantEngine(CONFIG)
+
     scan_cycle = 1
 
     while True:
@@ -47,10 +51,8 @@ def run_daemon():
         start_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         print(f"\n[SCANNER CYCLE #{scan_cycle}] Starting full market scan at {start_utc_str}...")
 
-        engine = None
         try:
-            # Instantiate engine and execute 8-horizon multi-coin scan
-            engine = HybridQuantEngine(CONFIG)
+            # Execute 8-horizon multi-coin scan (reusing warm model cache)
             engine.run_single_iteration()
 
             # Trigger live database synchronization immediately
@@ -82,12 +84,21 @@ def run_daemon():
         print(f"[SCANNER] Next full scan scheduled at: {next_scan_str} (monitoring active trades every {heartbeat_secs}s)...")
 
         end_sleep_ts = time.time() + sleep_time
+        last_signal_eval_ts = 0.0
+
         while time.time() < end_sleep_ts:
-            if engine is not None:
-                try:
-                    engine.check_open_positions_heartbeat()
-                except Exception:
-                    pass
+            try:
+                # 1. Real-time paper trading orderbook & wick fills
+                engine.check_open_positions_heartbeat()
+
+                # 2. Real-time audit tracker evaluation for pending signals
+                if time.time() - last_signal_eval_ts >= 15.0:
+                    engine.signal_tracker.evaluate_signals({})
+                    last_signal_eval_ts = time.time()
+                    if HAS_DB_SYNC:
+                        sync_files_to_db_live(force=False)
+            except Exception:
+                pass
             time.sleep(min(heartbeat_secs, max(1, end_sleep_ts - time.time())))
 
         scan_cycle += 1

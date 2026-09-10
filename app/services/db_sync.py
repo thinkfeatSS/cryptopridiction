@@ -156,6 +156,13 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                         except Exception:
                             return fallback
 
+                    pred_close = str(r.get("predicted_close_utc", "")).strip()
+                    if not pred_close or pred_close == "N/A":
+                        p_win = str(r.get("predicted_window", ""))
+                        if "➔" in p_win:
+                            after_arrow = p_win.split("➔")[-1].strip()
+                            pred_close = after_arrow.split("(")[0].strip() if "(" in after_arrow else after_arrow.strip()
+
                     existing = existing_signals.get(sig_id)
                     if not existing:
                         sig_obj = SignalAudit(
@@ -179,7 +186,7 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                             decision=str(r.get("decision", "")),
                             paper_trading_status=str(r.get("paper_trading_status", "")),
                             predicted_window=str(r.get("predicted_window", "")),
-                            predicted_close_utc=str(r.get("predicted_close_utc", "")),
+                            predicted_close_utc=pred_close or "N/A",
                             status=str(r.get("status", "PENDING_EVALUATION")),
                             outcome_label=str(r.get("outcome_label", "PENDING")),
                             peak_price_seen=safe_f(r.get("peak_price_seen"), 0.0),
@@ -203,6 +210,8 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                             existing.realized_return_pct = ret_num
                         if r.get("evaluated_at_utc"):
                             existing.evaluated_at_utc = str(r.get("evaluated_at_utc"))
+                        if pred_close and (not existing.predicted_close_utc or existing.predicted_close_utc == "N/A"):
+                            existing.predicted_close_utc = pred_close
 
                 db.commit()
                 _LAST_SYNC_TIMES["csv"] = csv_mtime

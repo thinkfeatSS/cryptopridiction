@@ -189,13 +189,13 @@ CONFIG = {
         }
     },
     "history_limit_per_tf": {
-        "1d": 1500,
-        "4h": 2000,
-        "1h": 2500,
-        "30m": 2500,
-        "15m": 2500,
-        "5m": 3000,
-        "1m": 3000
+        "1d": 1000,
+        "4h": 1000,
+        "1h": 500,
+        "30m": 500,
+        "15m": 500,
+        "5m": 200,
+        "1m": 100
     },
     "paper_trading": {
         "enabled": True,
@@ -319,6 +319,9 @@ class CryptoDataLoader:
         self.exchange = None
         self._cache = {}
         self.session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=2)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         })
@@ -2127,7 +2130,7 @@ class SignalAuditTracker:
                 "decision": sig.get('decision', 'EXECUTE'),
                 "paper_trading_status": "EXECUTED (PAPER WALLET)" if sym in open_syms else "MONITORED SCAN SIGNAL",
                 "predicted_window": sig.get('predicted_window_str', 'N/A'),
-                "predicted_close_utc": sig.get('predicted_close_utc', 'N/A'),
+                "predicted_close_utc": sig.get('predicted_close_utc') or sig.get('trade_close_str') or 'N/A',
                 "status": "PENDING_EVALUATION",
                 "outcome_label": "PENDING ⏳",
                 "peak_price_seen": round(curr_p, 6),
@@ -2166,6 +2169,26 @@ class SignalAuditTracker:
         now_str = now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
         updated = False
         resolved_count = 0
+
+        # Auto-fetch bulk ticker prices if any pending signals are not covered by live_prices
+        live_prices = dict(live_prices or {})
+        pending_missing_syms = {
+            r['symbol'] for r in self.records
+            if r.get('status') in ["PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
+            and r.get('symbol') not in live_prices
+        }
+        if pending_missing_syms:
+            try:
+                resp = requests.get("https://data-api.binance.vision/api/v3/ticker/price", timeout=4)
+                if resp.status_code == 200:
+                    for item in resp.json():
+                        raw_s = item['symbol']
+                        p_val = float(item['price'])
+                        live_prices[raw_s] = p_val
+                        if raw_s.endswith('USDT'):
+                            live_prices[f"{raw_s[:-4]}/USDT"] = p_val
+            except Exception:
+                pass
 
         for r in self.records:
             status = r.get('status', 'PENDING_EVALUATION')
@@ -2217,14 +2240,27 @@ class SignalAuditTracker:
             is_hit_sl = (direction == "LONG" and low_p <= sl_p) or (direction == "SHORT" and high_p >= sl_p)
 
             is_expired = False
-            pred_close_str = r.get('predicted_close_utc', '')
+            pred_close_str = str(r.get('predicted_close_utc', '')).strip()
+            # Resilient fallback: parse predicted close from predicted_window (e.g. "... ➔ 2026-09-09 19:15 UTC (15 Mins)")
+            if not pred_close_str or pred_close_str == 'N/A':
+                pred_win = str(r.get('predicted_window', ''))
+                if '➔' in pred_win:
+                    after_arrow = pred_win.split('➔')[-1].strip()
+                    if '(' in after_arrow:
+                        pred_close_str = after_arrow.split('(')[0].strip()
+                    else:
+                        pred_close_str = after_arrow.strip()
+
             try:
                 if pred_close_str and pred_close_str != 'N/A':
-                    close_dt = datetime.fromisoformat(pred_close_str) if 'T' in pred_close_str else datetime.strptime(pred_close_str.replace(' UTC', ''), '%Y-%m-%d %H:%M')
+                    clean_dt_str = pred_close_str.replace(' UTC', '').strip()
+                    close_dt = datetime.fromisoformat(clean_dt_str) if 'T' in clean_dt_str else datetime.strptime(clean_dt_str, '%Y-%m-%d %H:%M')
                     if close_dt.tzinfo is None:
                         close_dt = close_dt.replace(tzinfo=timezone.utc)
                     if now_utc >= close_dt:
                         is_expired = True
+                        if r.get('predicted_close_utc') in ('', 'N/A', None):
+                            r['predicted_close_utc'] = pred_close_str
             except Exception:
                 pass
 
@@ -2928,6 +2964,7 @@ class HybridQuantEngine:
             "rs_btc": rs_btc,
             "trade_open_str": trade_open_str,
             "trade_close_str": trade_close_str,
+            "predicted_close_utc": trade_close_str,
             "predicted_window_str": predicted_window_str,
             "direction": h_dir,
             "conviction": h_conf,
@@ -3168,18 +3205,20 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
-            max_threads = min(int(self.config.get('max_scan_workers', 32)), len(symbols_to_scan))
+            max_threads = min(int(self.config.get('max_scan_workers', 12)), len(symbols_to_scan))
             with ThreadPoolExecutor(max_workers=max_threads) as executor:
                 future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in symbols_to_scan}
                 for future in as_completed(future_to_sym):
                     sym = future_to_sym[future]
                     try:
-                        res = future.result()
+                        res = future.result(timeout=35.0)
                         if res:
                             scanner_results.append(res)
                             live_prices[sym] = res['current_price']
                             live_highs[sym] = res['live_high']
                             live_lows[sym] = res['live_low']
+                    except TimeoutError:
+                        print(f"[TIMEOUT ⚠️] Asset {sym} exceeded 35s scan limit. Skipped safely to preserve scanner momentum.")
                     except Exception as e:
                         print(f"[ERROR] Failed scanning {sym}: {e}")
 
@@ -3569,6 +3608,8 @@ class HybridQuantEngine:
                     "elite_precision": elite_prec,
                     "duration_label": h.get('duration_label', 'N/A'),
                     "predicted_window_str": h.get('predicted_window_str', 'N/A'),
+                    "predicted_close_utc": h.get('predicted_close_utc', h.get('trade_close_str', 'N/A')),
+                    "trade_close_str": h.get('trade_close_str', 'N/A'),
                     "is_triple_confluence": is_triple,
                     "is_in_cooldown": is_in_cooldown,
                     "is_asset_locked": is_asset_locked,

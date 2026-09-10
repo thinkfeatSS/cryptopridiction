@@ -46,9 +46,141 @@ def fetch_live_binance_prices(max_age_seconds: float = 2.5) -> Dict[str, float]:
     return _LIVE_PRICES_CACHE or {}
 
 class SignalService:
+    def resolve_pending_signals_live(self, db: Session):
+        """
+        Evaluates pending signals in the database against live Binance spot prices:
+        - Resolves expired signals when predicted_close_utc has passed.
+        - Resolves TP1 / TP2 / TP3 / SL hits in real time.
+        """
+        try:
+            pending = db.query(SignalAudit).filter(
+                or_(
+                    SignalAudit.status.in_(["PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]),
+                    SignalAudit.outcome_label.like("%PENDING%")
+                )
+            ).all()
+            if not pending:
+                return
+
+            live_prices = fetch_live_binance_prices(max_age_seconds=2.0)
+            if not live_prices:
+                return
+
+            now_utc = datetime.now(timezone.utc)
+            now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+            updated = False
+
+            for s in pending:
+                sym = s.symbol
+                curr_p = live_prices.get(sym) or live_prices.get(sym.replace('/', ''))
+                if not curr_p:
+                    continue
+
+                entry_p = float(s.entry_price or curr_p)
+                tp1_p = float(s.tp1_price or entry_p)
+                tp2_p = float(s.tp2_price or entry_p)
+                tp3_p = float(s.tp3_price or entry_p)
+                sl_p = float(s.sl_price or entry_p)
+                direction = str(s.direction or "LONG").upper()
+
+                s.peak_price_seen = max(float(s.peak_price_seen or curr_p), curr_p)
+                s.trough_price_seen = min(float(s.trough_price_seen or curr_p), curr_p)
+                max_gain = ((s.peak_price_seen - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - s.trough_price_seen) / entry_p) * 100.0
+                s.max_potential_gain_pct = round(max_gain, 2)
+
+                is_hit_tp3 = (direction == "LONG" and curr_p >= tp3_p) or (direction == "SHORT" and curr_p <= tp3_p)
+                is_hit_tp2 = (direction == "LONG" and curr_p >= tp2_p) or (direction == "SHORT" and curr_p <= tp2_p)
+                is_hit_tp1 = (direction == "LONG" and curr_p >= tp1_p) or (direction == "SHORT" and curr_p <= tp1_p)
+                is_hit_sl = (direction == "LONG" and curr_p <= sl_p) or (direction == "SHORT" and curr_p >= sl_p)
+
+                is_expired = False
+                pred_close = str(s.predicted_close_utc or "").strip()
+                if not pred_close or pred_close == "N/A":
+                    p_win = str(s.predicted_window or "")
+                    if "➔" in p_win:
+                        after_arrow = p_win.split("➔")[-1].strip()
+                        pred_close = after_arrow.split("(")[0].strip() if "(" in after_arrow else after_arrow.strip()
+
+                if pred_close and pred_close != "N/A":
+                    try:
+                        clean_str = pred_close.replace(" UTC", "").strip()
+                        close_dt = datetime.fromisoformat(clean_str) if "T" in clean_str else datetime.strptime(clean_str, "%Y-%m-%d %H:%M")
+                        if close_dt.tzinfo is None:
+                            close_dt = close_dt.replace(tzinfo=timezone.utc)
+                        if now_utc >= close_dt:
+                            is_expired = True
+                            s.predicted_close_utc = pred_close
+                    except Exception:
+                        pass
+
+                if is_hit_tp3:
+                    s.status = "WON_TP3"
+                    s.exit_price = round(tp3_p, 6)
+                    ret_pct = ((tp3_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp3_p) / entry_p) * 100.0
+                    s.realized_return_pct = round(ret_pct, 2)
+                    s.outcome_label = "🟢 WON (TP3 HIT)"
+                    s.evaluated_at_utc = now_str
+                    updated = True
+                elif is_hit_tp2 and s.status != "TP2_LOCKED_TRAIL":
+                    s.status = "TP2_LOCKED_TRAIL"
+                    s.sl_price = round(tp1_p, 6)
+                    s.outcome_label = "🟢 TP2 HIT (TRAILING SL @ TP1)"
+                    updated = True
+                elif is_hit_tp1 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"] and not is_hit_sl:
+                    s.status = "TP1_LOCKED_BREAKEVEN"
+                    s.sl_price = round(entry_p, 6)
+                    s.outcome_label = "🟢 TP1 HIT (SL @ BREAKEVEN)"
+                    updated = True
+                elif is_hit_sl:
+                    if s.status == "TP2_LOCKED_TRAIL":
+                        ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                        ret_tp2 = ((tp2_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp2_p) / entry_p) * 100.0
+                        blended_ret = (0.50 * ret_tp1) + (0.30 * ret_tp2) + (0.20 * ret_tp1)
+                        s.status = "WON_TP2_TRAIL"
+                        s.exit_price = round(tp1_p, 6)
+                        s.realized_return_pct = round(blended_ret, 2)
+                        s.outcome_label = "🟢 WON (TP2 + TRAILING RUNNER)"
+                    elif s.status == "TP1_LOCKED_BREAKEVEN":
+                        ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                        blended_ret = 0.50 * ret_tp1
+                        s.status = "WON_TP1_BE"
+                        s.exit_price = round(entry_p, 6)
+                        s.realized_return_pct = round(blended_ret, 2)
+                        s.outcome_label = "🟢 WON (TP1 + BE RUNNER)"
+                    else:
+                        s.status = "LOST_SL"
+                        s.exit_price = round(sl_p, 6)
+                        ret_pct = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                        s.realized_return_pct = round(ret_pct, 2)
+                        s.outcome_label = "🔴 LOST (SL HIT)"
+                    s.evaluated_at_utc = now_str
+                    updated = True
+                elif is_expired:
+                    ret_current = ((curr_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - curr_p) / entry_p) * 100.0
+                    if s.status == "TP1_LOCKED_BREAKEVEN":
+                        ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                        blended_ret = (0.50 * ret_tp1) + (0.50 * max(0.0, ret_current))
+                        s.status = "WON_TP1_EXP"
+                        s.exit_price = round(curr_p, 6)
+                        s.realized_return_pct = round(blended_ret, 2)
+                        s.outcome_label = f"🟢 WON (TP1 + EXP {blended_ret:+.2f}%)"
+                    else:
+                        s.status = "EXPIRED_PROFIT" if ret_current > 0 else ("EXPIRED_LOSS" if ret_current < 0 else "EXPIRED_FLAT")
+                        s.exit_price = round(curr_p, 6)
+                        s.realized_return_pct = round(ret_current, 2)
+                        s.outcome_label = f"{'🟢' if ret_current>=0 else '🔴'} EXPIRED ({ret_current:+.2f}%)"
+                    s.evaluated_at_utc = now_str
+                    updated = True
+
+            if updated:
+                db.commit()
+        except Exception:
+            db.rollback()
+
     def get_kpi_summary(self, db: Session) -> Dict[str, Any]:
         """Calculates executive KPI metrics in a single optimized pass."""
         sync_files_to_db_live()
+        self.resolve_pending_signals_live(db)
         signals = db.query(
             SignalAudit.outcome_label,
             SignalAudit.status,
@@ -151,6 +283,7 @@ class SignalService:
     ) -> Dict[str, Any]:
         """Queries signals with search, filters, date filtering, and pagination."""
         sync_files_to_db_live()
+        self.resolve_pending_signals_live(db)
         query = db.query(SignalAudit)
 
         if symbol:
