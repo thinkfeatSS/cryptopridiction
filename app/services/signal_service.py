@@ -581,17 +581,21 @@ class SignalService:
         """Calculates 15-minute countdown, market shield status, and server state."""
         sync_files_to_db_live()
         sync_state = get_sync_state()
-
         now = datetime.now(timezone.utc)
         current_minute = now.minute
         current_second = now.second
-        
-        mins_remaining = 15 - (current_minute % 15)
-        secs_remaining = (mins_remaining * 60) - current_second
-        if secs_remaining <= 0:
-            secs_remaining = 15 * 60
-
-        next_scan_time = (now + timedelta(seconds=secs_remaining)).strftime("%H:%M:%S UTC")
+        now_ts = now.timestamp()
+        if sync_state.get("next_scan_timestamp"):
+            target_ts = int(sync_state["next_scan_timestamp"])
+            secs_remaining = max(0, int(target_ts - now_ts))
+            next_scan_time = sync_state.get("next_scan_time_utc") or (now + timedelta(seconds=secs_remaining)).strftime("%H:%M:%S UTC")
+        else:
+            mins_remaining = 15 - (current_minute % 15)
+            secs_remaining = (mins_remaining * 60) - current_second + 2
+            if secs_remaining <= 5:
+                secs_remaining += 900
+            target_ts = int((now + timedelta(seconds=secs_remaining)).timestamp())
+            next_scan_time = (now + timedelta(seconds=secs_remaining)).strftime("%H:%M:%S UTC")
 
         shield_status = {"active": False, "reason": "NORMAL (Market Stable)"}
         cached = get_cached_forecast()
@@ -617,7 +621,9 @@ class SignalService:
             "scan_status": sync_state.get("scan_status", "IDLE"),
             "current_time_utc": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "next_scan_utc": next_scan_time,
+            "next_scan_timestamp": target_ts,
             "seconds_to_next_scan": secs_remaining,
+            "last_scan_duration_seconds": sync_state.get("last_scan_duration_seconds"),
             "scan_version": sync_state["full_scan_version"],
             "full_scan_version": sync_state["full_scan_version"],
             "portfolio_version": sync_state["portfolio_version"],

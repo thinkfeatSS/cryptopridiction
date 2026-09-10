@@ -128,7 +128,7 @@ CONFIG = {
         "W/USDT", "SAFE/USDT", "ZK/USDT", "BANANA/USDT", "AKT/USDT", "ZETA/USDT", "BB/USDT",
         "LISTA/USDT", "VOXEL/USDT", "TRX/USDT", "BCH/USDT", "HBAR/USDT"
     ],
-    "timeframes": ["1d", "4h", "1h", "30m", "15m", "5m", "1m"],
+    "timeframes": ["1d", "4h", "1h", "15m"],
     # Multi-Horizon Definitions: Minutes, Hours, Days, Weeks, and Months
     "horizons": {
         "scalp": {
@@ -208,10 +208,7 @@ CONFIG = {
         "1d": 1000,
         "4h": 1000,
         "1h": 500,
-        "30m": 500,
-        "15m": 500,
-        "5m": 200,
-        "1m": 100
+        "15m": 500
     },
     "paper_trading": {
         "enabled": True,
@@ -3259,6 +3256,16 @@ class HybridQuantEngine:
         self.loader._cache.clear()
         self._prune_model_cache()
 
+        self.last_scan_started_ts = time.time()
+        now_start = datetime.now(timezone.utc)
+        mins_past = now_start.minute % 15
+        secs_to_next = ((15 - mins_past) * 60) - now_start.second + 2
+        if secs_to_next <= 5:
+            secs_to_next += 900
+        next_scan_dt = now_start + timedelta(seconds=secs_to_next)
+        next_scan_ts = int(next_scan_dt.timestamp())
+        next_scan_utc = next_scan_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
         # Publish scanner daemon state: SCANNING
         try:
             state_path = os.path.join(self.config['app_export_dir'], "scanner_daemon_state.json")
@@ -3266,7 +3273,11 @@ class HybridQuantEngine:
                 json.dump({
                     "is_scanning": True,
                     "scan_status": "SCANNING",
-                    "scan_started_at": datetime.now(timezone.utc).isoformat(),
+                    "scan_started_at": now_start.isoformat(),
+                    "next_scan_time_utc": next_scan_utc,
+                    "next_scan_timestamp": next_scan_ts,
+                    "seconds_to_next_scan": secs_to_next,
+                    "scan_interval_seconds": 900
                 }, f)
             os.replace(state_path + ".tmp", state_path)
         except Exception:
@@ -3303,20 +3314,24 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
+            scan_deadline_seconds = 180.0
             max_threads = min(int(self.config.get('max_scan_workers', 12)), len(symbols_to_scan))
             with ThreadPoolExecutor(max_workers=max_threads) as executor:
                 future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in symbols_to_scan}
                 for future in as_completed(future_to_sym):
+                    if (time.time() - self.last_scan_started_ts) > scan_deadline_seconds:
+                        print(f"[DEADLINE ⏳] Total scan time reached {scan_deadline_seconds}s limit. Safely completing cycle with {len(scanner_results)} assets.")
+                        break
                     sym = future_to_sym[future]
                     try:
-                        res = future.result(timeout=35.0)
+                        res = future.result(timeout=30.0)
                         if res:
                             scanner_results.append(res)
                             live_prices[sym] = res['current_price']
                             live_highs[sym] = res['live_high']
                             live_lows[sym] = res['live_low']
                     except TimeoutError:
-                        print(f"[TIMEOUT ⚠️] Asset {sym} exceeded 35s scan limit. Skipped safely to preserve scanner momentum.")
+                        print(f"[TIMEOUT ⚠️] Asset {sym} exceeded 30s scan limit. Skipped safely to preserve scanner momentum.")
                     except Exception as e:
                         print(f"[ERROR] Failed scanning {sym}: {e}")
 
@@ -3896,14 +3911,30 @@ class HybridQuantEngine:
         os.replace(temp_path, json_path)
         print(f"📦 Web-App Ready JSON Data Exported to: {os.path.abspath(json_path)}\n")
 
-        # Publish scanner daemon state: IDLE
+        # Publish scanner daemon state: IDLE with authoritative next 15-minute prediction timestamp
         try:
+            now_done = datetime.now(timezone.utc)
+            scan_duration = round(time.time() - getattr(self, "last_scan_started_ts", time.time()), 2)
+            mins_past = now_done.minute % 15
+            secs_to_next = ((15 - mins_past) * 60) - now_done.second + 2
+            if secs_to_next <= 5:
+                secs_to_next += 900
+            next_scan_dt = now_done + timedelta(seconds=secs_to_next)
+            next_scan_ts = int(next_scan_dt.timestamp())
+            next_scan_utc = next_scan_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
             state_path = os.path.join(self.config['app_export_dir'], "scanner_daemon_state.json")
             with open(state_path + ".tmp", "w", encoding="utf-8") as f:
                 json.dump({
                     "is_scanning": False,
                     "scan_status": "IDLE",
-                    "last_scan_completed_at": datetime.now(timezone.utc).isoformat(),
+                    "last_scan_completed_at": now_done.isoformat(),
+                    "last_scan_completed_at_utc": now_done.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "last_scan_duration_seconds": scan_duration,
+                    "next_scan_time_utc": next_scan_utc,
+                    "next_scan_timestamp": next_scan_ts,
+                    "seconds_to_next_scan": secs_to_next,
+                    "scan_interval_seconds": 900
                 }, f)
             os.replace(state_path + ".tmp", state_path)
         except Exception:

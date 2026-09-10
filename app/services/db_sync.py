@@ -49,12 +49,12 @@ def get_daemon_state():
             with open(state_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 is_sc = bool(data.get("is_scanning", False))
-                # Check for stale scanning flag (> 180s without completion)
+                # Check for stale scanning flag (> 300s without completion)
                 if is_sc and "scan_started_at" in data:
                     try:
                         started_dt = datetime.fromisoformat(data["scan_started_at"])
                         elapsed_secs = (datetime.now(timezone.utc) - started_dt).total_seconds()
-                        if elapsed_secs > 180:  # If scan started over 3 mins ago, auto-reset stale flag
+                        if elapsed_secs > 300:  # If scan started over 5 mins ago, auto-reset stale flag
                             is_sc = False
                             data["is_scanning"] = False
                             data["scan_status"] = "IDLE"
@@ -76,7 +76,12 @@ def get_sync_state():
         "portfolio_version": _PORTFOLIO_VERSION,
         "is_scanning": d_state.get("is_scanning", _IS_SCANNING),
         "scan_status": d_state.get("scan_status", "IDLE"),
-        "last_scan_timestamp": _LAST_SCAN_TIMESTAMP,
+        "last_scan_timestamp": d_state.get("last_scan_completed_at_utc", _LAST_SCAN_TIMESTAMP),
+        "last_scan_completed_at": d_state.get("last_scan_completed_at", None),
+        "last_scan_duration_seconds": d_state.get("last_scan_duration_seconds", None),
+        "next_scan_time_utc": d_state.get("next_scan_time_utc", None),
+        "next_scan_timestamp": d_state.get("next_scan_timestamp", None),
+        "seconds_to_next_scan": d_state.get("seconds_to_next_scan", None),
     }
 
 def get_cached_forecast():

@@ -2,7 +2,7 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # Ensure workspace root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -80,13 +80,18 @@ def run_daemon():
             print("[SCANNER] RUN_ONCE is enabled. Exiting.")
             break
 
-        # Calculate sleep time until next 15m candle boundary
-        sleep_time = max(10, interval_seconds - elapsed)
-        next_scan_time = datetime.now(timezone.utc).timestamp() + sleep_time
-        next_scan_str = datetime.fromtimestamp(next_scan_time, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        print(f"[SCANNER] Next full scan scheduled at: {next_scan_str} (monitoring active trades every {heartbeat_secs}s)...")
+        # Exact Zero-Drift 15M Candle Boundary Alignment (:00:02, :15:02, :30:02, :45:02 UTC)
+        now_cycle = datetime.now(timezone.utc)
+        mins_past = now_cycle.minute % 15
+        secs_to_boundary = ((15 - mins_past) * 60) - now_cycle.second + 2
+        if secs_to_boundary <= 10:
+            secs_to_boundary += 900
+        next_scan_dt = now_cycle + timedelta(seconds=secs_to_boundary)
+        next_scan_ts = int(next_scan_dt.timestamp())
+        next_scan_str = next_scan_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        print(f"[SCANNER] Next full scan scheduled at: {next_scan_str} (in {secs_to_boundary}s, monitoring active trades every {heartbeat_secs}s)...")
 
-        end_sleep_ts = time.time() + sleep_time
+        end_sleep_ts = next_scan_ts
         last_signal_eval_ts = 0.0
 
         while time.time() < end_sleep_ts:

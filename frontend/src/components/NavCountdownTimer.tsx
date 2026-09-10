@@ -9,41 +9,40 @@ export default React.memo(function NavCountdownTimer() {
   const { data: status } = useStatusQuery();
   const [mounted, setMounted] = useState(false);
   
-  // Calculate remaining seconds to next 15m candle boundary locally
-  const getNext15MRemaining = () => {
+  // Calculate remaining seconds directly against the engine's authoritative next_scan_timestamp
+  const getRemainingSeconds = React.useCallback(() => {
+    if (status?.next_scan_timestamp && status.next_scan_timestamp > 0) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      return Math.max(0, status.next_scan_timestamp - nowSec);
+    }
+    if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan >= 0) {
+      return status.seconds_to_next_scan;
+    }
     const now = new Date();
     const mins = 15 - (now.getUTCMinutes() % 15);
     const secs = (mins * 60) - now.getUTCSeconds();
-    return Math.max(1, secs);
-  };
+    return Math.max(0, secs);
+  }, [status?.next_scan_timestamp, status?.seconds_to_next_scan]);
 
   const [localSeconds, setLocalSeconds] = useState<number>(900);
 
   useEffect(() => {
     setMounted(true);
-    setLocalSeconds(getNext15MRemaining());
-  }, []);
-
-  useEffect(() => {
-    if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan > 0) {
-      setLocalSeconds(status.seconds_to_next_scan);
-    }
-  }, [status?.seconds_to_next_scan]);
+    setLocalSeconds(getRemainingSeconds());
+  }, [getRemainingSeconds]);
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setLocalSeconds((prev) => {
-        if (prev > 1) return prev - 1;
-        return getNext15MRemaining();
-      });
+      setLocalSeconds(getRemainingSeconds());
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [getRemainingSeconds]);
 
   const isScanning = Boolean(status?.is_scanning);
 
   return (
     <div
+      title={status?.next_scan_utc ? `Authoritative Engine Target: ${status.next_scan_utc}` : "Targeting next 15M candle boundary"}
       className={`hidden lg:flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs shadow-sm transition-all ${
         isScanning
           ? "border-cyan-500/60 bg-cyan-950/60 text-cyan-300 shadow-cyan-500/20 animate-pulse"

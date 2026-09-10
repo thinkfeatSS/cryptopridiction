@@ -76,7 +76,9 @@ export interface EngineStatus {
   scan_status?: string;
   current_time_utc: string;
   next_scan_utc: string;
+  next_scan_timestamp?: number;
   seconds_to_next_scan: number;
+  last_scan_duration_seconds?: number;
   scan_version?: number;
   full_scan_version?: number;
   portfolio_version?: number;
