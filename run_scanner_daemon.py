@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 # Ensure workspace root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from test import HybridQuantEngine, CONFIG
+from test import HybridQuantEngine, CONFIG, trim_process_memory
 
 try:
     from app.services.db_sync import migrate_files_to_db, sync_files_to_db_live
@@ -65,6 +65,9 @@ def run_daemon():
             if HAS_MODEL_RETRAINER:
                 print(f"[SCANNER CYCLE #{scan_cycle}] Checking automated model retraining threshold...")
                 check_and_trigger_async(force=False, min_new_samples=5)
+
+            # OS Memory Guard: Reclaim heap arenas back to operating system
+            trim_process_memory()
 
         except Exception as e:
             print(f"[SCANNER CYCLE #{scan_cycle} ERROR ❌] Exception during market scan: {e}")

@@ -82,6 +82,22 @@ import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers, callbacks
 import tensorflow.keras.backend as K
 
+import gc
+import ctypes
+
+def trim_process_memory():
+    """
+    OS Memory Guard: Forces Python cyclic garbage collection and invokes glibc malloc_trim
+    on Linux/Docker environments to immediately return unmapped heap pages to the OS kernel.
+    Safely no-ops on Windows.
+    """
+    gc.collect()
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception:
+        pass
+
 print("[SYSTEM] Running in High-Performance CPU Mode.")
 
 # ------------------------------------------------------------------------------
@@ -257,7 +273,8 @@ CONFIG = {
         "gamma": 0.15,
         "reg_alpha": 0.1,
         "reg_lambda": 1.0,
-        "random_state": 42
+        "random_state": 42,
+        "n_jobs": 1
     },
     "lgb_clf": {
         "max_depth": 4,
@@ -267,14 +284,15 @@ CONFIG = {
         "subsample": 0.85,
         "colsample_bytree": 0.80,
         "random_state": 42,
-        "verbose": -1
+        "verbose": -1,
+        "n_jobs": 1
     },
     "extra_trees": {
         "n_estimators": 200,
         "max_depth": 6,
         "min_samples_split": 5,
         "random_state": 42,
-        "n_jobs": -1
+        "n_jobs": 1
     },
     "xgb_reg": {
         "max_depth": 4,
@@ -283,7 +301,8 @@ CONFIG = {
         "subsample": 0.85,
         "colsample_bytree": 0.80,
         "objective": "reg:pseudohubererror",
-        "random_state": 42
+        "random_state": 42,
+        "n_jobs": 1
     },
     "catboost": {
         "iterations": 250,
@@ -292,7 +311,8 @@ CONFIG = {
         "l2_leaf_reg": 4.0,
         "auto_class_weights": "Balanced",
         "verbose": False,
-        "random_seed": 42
+        "random_seed": 42,
+        "thread_count": 1
     },
     "models_export_dir": "./models_export_v3",
     "app_export_dir": "./export_app_data"
@@ -610,7 +630,7 @@ class CryptoDataLoader:
         df = df.drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
         
         for col in ['open', 'high', 'low', 'close', 'volume', 'taker_buy_vol']:
-            df[col] = df[col].astype(float)
+            df[col] = df[col].astype(np.float32)
 
         # Slice to requested total_candles (keeping the most recent candles)
         if len(df) > total_candles:
@@ -1212,7 +1232,11 @@ class AdvancedFeatureEngineer:
         feats[f'{prefix}_bull_reversal_score'] = bull_rev_score.fillna(0.0)
         feats[f'{prefix}_bear_reversal_score'] = bear_rev_score.fillna(0.0)
 
-        return feats.ffill().bfill()
+        feats = feats.ffill().bfill()
+        float_cols = feats.select_dtypes(include=['float64']).columns
+        if len(float_cols) > 0:
+            feats[float_cols] = feats[float_cols].astype(np.float32)
+        return feats
 
     def inject_cross_asset_btc_beta(self, target_df: pd.DataFrame, btc_dfs: dict) -> pd.DataFrame:
         df = target_df.copy()
@@ -1226,7 +1250,11 @@ class AdvancedFeatureEngineer:
             btc_1h['btc_swing_ret_1h'] = np.log(btc_1h['close'] / btc_1h['close'].shift(1).clip(lower=1e-10)).fillna(0.0)
             df = pd.merge_asof(df.sort_values('timestamp'), btc_1h[['timestamp', 'btc_swing_ret_1h']], on='timestamp', direction='backward')
 
-        return df.ffill().bfill()
+        df = df.ffill().bfill()
+        float_cols = df.select_dtypes(include=['float64']).columns
+        if len(float_cols) > 0:
+            df[float_cols] = df[float_cols].astype(np.float32)
+        return df
 
 # ------------------------------------------------------------------------------
 # 4. CONTINUOUS TRIPLE BARRIER LABELER
@@ -1285,10 +1313,10 @@ class TripleBarrierLabeler:
                 excursion_score[i] = (fav_excursion + 1e-10) / (adv_excursion + 1e-10)
                 meta_label[i] = 1 if (hit_pt and not hit_sl) or (exp_ret <= -min_gain_hurdle and fav_excursion >= (adv_excursion * 1.5)) else 0
 
-        data['Target_Primary'] = primary_direction
-        data['Target_Meta'] = meta_label
-        data['Target_Return'] = forward_return
-        data['Excursion_Score'] = excursion_score
+        data['Target_Primary'] = primary_direction.astype(np.float32)
+        data['Target_Meta'] = meta_label.astype(np.float32)
+        data['Target_Return'] = forward_return.astype(np.float32)
+        data['Excursion_Score'] = excursion_score.astype(np.float32)
         
         invalid_len = horizon_bars + 1
         data.iloc[-invalid_len:, data.columns.get_loc('Target_Primary')] = np.nan
@@ -1349,25 +1377,71 @@ class QuantModelFactory:
 
     @staticmethod
     def build_primary_catboost(cfg: dict) -> CatBoostClassifier:
-        return CatBoostClassifier(iterations=cfg['iterations'], depth=cfg['depth'], learning_rate=cfg['learning_rate'], l2_leaf_reg=cfg['l2_leaf_reg'], auto_class_weights=cfg.get('auto_class_weights', None), verbose=False, random_seed=42)
+        return CatBoostClassifier(
+            iterations=cfg['iterations'],
+            depth=cfg['depth'],
+            learning_rate=cfg['learning_rate'],
+            l2_leaf_reg=cfg['l2_leaf_reg'],
+            auto_class_weights=cfg.get('auto_class_weights', None),
+            verbose=False,
+            random_seed=42,
+            thread_count=cfg.get('thread_count', 1)
+        )
 
     @staticmethod
     def build_primary_xgboost(cfg: dict) -> xgb.XGBClassifier:
-        return xgb.XGBClassifier(n_estimators=cfg['n_estimators'], max_depth=cfg['max_depth'], learning_rate=cfg['learning_rate'], subsample=cfg['subsample'], colsample_bytree=cfg['colsample_bytree'], gamma=cfg['gamma'], random_state=cfg['random_state'], n_jobs=-1, tree_method='hist', eval_metric='logloss')
+        return xgb.XGBClassifier(
+            n_estimators=cfg['n_estimators'],
+            max_depth=cfg['max_depth'],
+            learning_rate=cfg['learning_rate'],
+            subsample=cfg['subsample'],
+            colsample_bytree=cfg['colsample_bytree'],
+            gamma=cfg['gamma'],
+            random_state=cfg['random_state'],
+            n_jobs=cfg.get('n_jobs', 1),
+            tree_method='hist',
+            eval_metric='logloss'
+        )
 
     @staticmethod
     def build_primary_lightgbm(cfg: dict):
         if HAS_LIGHTGBM:
-            return lgb.LGBMClassifier(n_estimators=cfg['n_estimators'], max_depth=cfg['max_depth'], num_leaves=cfg['num_leaves'], learning_rate=cfg['learning_rate'], subsample=cfg['subsample'], colsample_bytree=cfg['colsample_bytree'], random_state=cfg['random_state'], verbose=cfg['verbose'])
+            return lgb.LGBMClassifier(
+                n_estimators=cfg['n_estimators'],
+                max_depth=cfg['max_depth'],
+                num_leaves=cfg['num_leaves'],
+                learning_rate=cfg['learning_rate'],
+                subsample=cfg['subsample'],
+                colsample_bytree=cfg['colsample_bytree'],
+                random_state=cfg['random_state'],
+                verbose=cfg['verbose'],
+                n_jobs=cfg.get('n_jobs', 1)
+            )
         return None
 
     @staticmethod
     def build_primary_extra_trees(cfg: dict) -> ExtraTreesClassifier:
-        return ExtraTreesClassifier(n_estimators=cfg['n_estimators'], max_depth=cfg['max_depth'], min_samples_split=cfg['min_samples_split'], random_state=cfg['random_state'], n_jobs=cfg['n_jobs'])
+        return ExtraTreesClassifier(
+            n_estimators=cfg['n_estimators'],
+            max_depth=cfg['max_depth'],
+            min_samples_split=cfg['min_samples_split'],
+            random_state=cfg['random_state'],
+            n_jobs=cfg.get('n_jobs', 1)
+        )
 
     @staticmethod
     def build_xgb_regressor(cfg: dict) -> xgb.XGBRegressor:
-        return xgb.XGBRegressor(n_estimators=cfg['n_estimators'], max_depth=cfg['max_depth'], learning_rate=cfg['learning_rate'], subsample=cfg['subsample'], colsample_bytree=cfg['colsample_bytree'], objective=cfg['objective'], random_state=cfg['random_state'], n_jobs=-1, tree_method='hist')
+        return xgb.XGBRegressor(
+            n_estimators=cfg['n_estimators'],
+            max_depth=cfg['max_depth'],
+            learning_rate=cfg['learning_rate'],
+            subsample=cfg['subsample'],
+            colsample_bytree=cfg['colsample_bytree'],
+            objective=cfg['objective'],
+            random_state=cfg['random_state'],
+            n_jobs=cfg.get('n_jobs', 1),
+            tree_method='hist'
+        )
 
 # ------------------------------------------------------------------------------
 # 6. ENHANCED MULTI-HORIZON PAPER TRADING LEDGER & BINANCE FEE ENGINE
@@ -2482,6 +2556,23 @@ class HybridQuantEngine:
         os.makedirs(self.config['models_export_dir'], exist_ok=True)
         os.makedirs(self.config['app_export_dir'], exist_ok=True)
 
+    def _prune_model_cache(self, max_size: int = 250, max_age_seconds: float = 21600):
+        """
+        OS Memory Guard: Prunes expired and excess models from RAM cache.
+        Prevents unbounded growth across continuous multi-day scanning cycles.
+        """
+        now_ts = time.time()
+        # 1. Prune expired entries
+        expired_keys = [k for k, v in self.model_cache.items() if (now_ts - v.get('ts', 0)) >= max_age_seconds]
+        for k in expired_keys:
+            self.model_cache.pop(k, None)
+        # 2. If still exceeds max_size, drop oldest entries by timestamp
+        if len(self.model_cache) > max_size:
+            sorted_keys = sorted(self.model_cache.keys(), key=lambda k: self.model_cache[k].get('ts', 0))
+            excess = len(self.model_cache) - max_size
+            for k in sorted_keys[:excess]:
+                self.model_cache.pop(k, None)
+
     def preload_btc_reference(self):
         print("[DATA] Preloading Bitcoin multi-scale data for cross-asset beta calculations...")
         for tf in self.config['timeframes']:
@@ -2629,6 +2720,7 @@ class HybridQuantEngine:
 
             if cache_key in self.model_cache and (now_ts - self.model_cache[cache_key]['ts'] < 21600):
                 cached = self.model_cache[cache_key]
+                cached['ts'] = now_ts  # Update LRU access timestamp
                 scaler = cached['scaler']
                 cat = cached['cat']
                 xgb_m = cached['xgb_m']
@@ -2726,6 +2818,8 @@ class HybridQuantEngine:
                         'elite_acc': elite_acc,
                         'ts': now_ts
                     }
+                    if len(self.model_cache) > 260:
+                        self._prune_model_cache(max_size=250)
 
         # 1. Base ML Direction & Calibrated Probability with Hysteresis Smoothing
         h_prob = (p_cat_live * w_cat) + (p_xgb_live * w_xgb) + (p_lgb_live * w_lgb) + (p_et_live * w_et)
@@ -3138,7 +3232,7 @@ class HybridQuantEngine:
         live_high = max(float(raw_dfs['15m']['high'].iloc[-1]) if '15m' in raw_dfs else live_price, live_price)
         live_low = min(float(raw_dfs['15m']['low'].iloc[-1]) if '15m' in raw_dfs else live_price, live_price)
 
-        return {
+        out_dict = {
             "symbol": symbol,
             "current_price": live_price,
             "live_high": live_high,
@@ -3156,10 +3250,14 @@ class HybridQuantEngine:
             "overall_score": overall_score,
             "tf_metrics_summary": tf_metrics_summary
         }
+        del raw_dfs
+        del tf_features
+        return out_dict
 
     def run_single_iteration(self):
         # Clear cache to guarantee fresh live candles from exchange
         self.loader._cache.clear()
+        self._prune_model_cache()
 
         # Publish scanner daemon state: SCANNING
         try:
@@ -3323,6 +3421,9 @@ class HybridQuantEngine:
 
         # 6. Export JSON Data
         self.export_web_app_json(scanner_results, deep_dive_result, top_round_signals)
+
+        # 7. OS-Level Memory Guard: Trim Process Memory & Defragment Heap
+        trim_process_memory()
 
     def check_open_positions_heartbeat(self):
         """Fast real-time ticker check: closes trade instantly if target touched within seconds."""
