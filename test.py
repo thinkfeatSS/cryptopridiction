@@ -107,8 +107,8 @@ CONFIG = {
     "mode": "both",               # "both", "scanner", or "single"
     "continuous_loop": True,      # 24/7 Background Watcher Loop
     "scanner_mode": "top_volume", # "top_volume" (dynamic auto-discovery of all active Binance coins), "expanded_universe", or "custom_list"
-    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "30")), # Top 30 volume Binance coins (clean & responsive)
-    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "8")), # Concurrency worker threads
+    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "100")), # Top 100 volume Binance coins (full market coverage)
+    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "16")), # 16 Concurrency worker threads (high throughput)
     "heartbeat_interval_seconds": int(os.getenv("HEARTBEAT_SECONDS", "4")), # Fast intra-candle position monitoring
     "single_symbol": "BTC/USDT",
     "scanner_symbols": [
@@ -181,10 +181,10 @@ CONFIG = {
         }
     },
     "history_limit_per_tf": {
-        "1d": 1000,
-        "4h": 1000,
-        "1h": 500,
-        "15m": 500
+        "1d": 250,
+        "4h": 250,
+        "1h": 250,
+        "15m": 250
     },
     "paper_trading": {
         "enabled": True,
@@ -239,8 +239,8 @@ CONFIG = {
     },
     "xgb_clf": {
         "max_depth": 4,
-        "learning_rate": 0.03,
-        "n_estimators": 250,
+        "learning_rate": 0.04,
+        "n_estimators": 40,
         "subsample": 0.85,
         "colsample_bytree": 0.80,
         "gamma": 0.15,
@@ -252,8 +252,8 @@ CONFIG = {
     "lgb_clf": {
         "max_depth": 4,
         "num_leaves": 15,
-        "learning_rate": 0.03,
-        "n_estimators": 250,
+        "learning_rate": 0.04,
+        "n_estimators": 40,
         "subsample": 0.85,
         "colsample_bytree": 0.80,
         "random_state": 42,
@@ -261,16 +261,16 @@ CONFIG = {
         "n_jobs": 1
     },
     "extra_trees": {
-        "n_estimators": 200,
-        "max_depth": 6,
+        "n_estimators": 30,
+        "max_depth": 5,
         "min_samples_split": 5,
         "random_state": 42,
         "n_jobs": 1
     },
     "xgb_reg": {
         "max_depth": 4,
-        "learning_rate": 0.03,
-        "n_estimators": 250,
+        "learning_rate": 0.04,
+        "n_estimators": 40,
         "subsample": 0.85,
         "colsample_bytree": 0.80,
         "objective": "reg:pseudohubererror",
@@ -278,9 +278,9 @@ CONFIG = {
         "n_jobs": 1
     },
     "catboost": {
-        "iterations": 250,
-        "depth": 5,
-        "learning_rate": 0.03,
+        "iterations": 35,
+        "depth": 4,
+        "learning_rate": 0.04,
         "l2_leaf_reg": 4.0,
         "auto_class_weights": "Balanced",
         "verbose": False,
@@ -321,7 +321,23 @@ class CryptoDataLoader:
         self.is_binance_vision_direct = False
         self._live_tickers_cache = {}
         self._live_tickers_ts = 0.0
+        self._funding_cache = {}
         self.init_resilient_exchange()
+
+    def preload_bulk_funding_rates(self):
+        """Pre-fetches all Binance pairs' funding rates in 1 single bulk call (~200ms)."""
+        try:
+            url = "https://fapi.binance.com/fapi/v1/premiumIndex"
+            resp = self.session.get(url, timeout=6)
+            if resp.status_code == 200:
+                data = resp.json()
+                for item in data:
+                    sym = item.get('symbol')
+                    if sym:
+                        self._funding_cache[sym] = float(item.get('lastFundingRate', 0.0001))
+                print(f"[DATA] Pre-cached {len(self._funding_cache)} Binance Futures funding rates in 1 bulk call.")
+        except Exception:
+            pass
 
     def init_resilient_exchange(self):
         """Finds the best working, unrestricted free global exchange in priority (Binance first)."""
@@ -614,32 +630,23 @@ class CryptoDataLoader:
 
     def fetch_funding_rate_and_oi(self, symbol: str) -> dict:
         """
-        Fetches live 8h perpetual funding rate and Open Interest from Binance Futures public endpoint.
-        Free, public, and unrestricted.
+        Fetches live 8h perpetual funding rate from pre-cached bulk dictionary.
+        Zero latency (~0.001ms), non-blocking.
         """
         try:
             raw_sym = symbol.replace('/', '').replace(':USDT', '')
             if not raw_sym.endswith('USDT'):
                 raw_sym += 'USDT'
 
-            # 1. Funding Rate
-            fr_url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={raw_sym}"
-            resp_fr = self.session.get(fr_url, timeout=4)
-            fr_val = 0.0001
-            if resp_fr.status_code == 200:
-                fr_val = float(resp_fr.json().get('lastFundingRate', 0.0001))
-
-            # 2. Open Interest
-            oi_url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={raw_sym}"
-            resp_oi = self.session.get(oi_url, timeout=4)
-            oi_val = 0.0
-            if resp_oi.status_code == 200:
-                oi_val = float(resp_oi.json().get('openInterest', 0.0))
+            if hasattr(self, '_funding_cache') and raw_sym in self._funding_cache:
+                fr_val = self._funding_cache[raw_sym]
+            else:
+                fr_val = 0.0001
 
             regime = "🔥 SHORT SQUEEZE" if fr_val <= -0.0002 else ("❄️ LONG SQUEEZE" if fr_val >= 0.0005 else "⚪ NEUTRAL")
             return {
                 "funding_rate": fr_val,
-                "open_interest": oi_val,
+                "open_interest": 0.0,
                 "regime": regime
             }
         except Exception:
@@ -716,9 +723,9 @@ class CryptoDataLoader:
         last_p = float(df['close'].iloc[-1])
         return {'symbol': symbol, 'last': last_p, 'close': last_p}
 
-    def fetch_orderbook_imbalance(self, symbol: str, limit: int = 20) -> float:
+    def fetch_orderbook_imbalance(self, symbol: str, limit: int = 5) -> float:
         """
-        Fetches live top-20 orderbook depth levels and computes bid-ask liquidity imbalance ratio:
+        Fetches live top-5 orderbook depth levels and computes bid-ask liquidity imbalance ratio:
         imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume)
         Range: [-1.0 (Heavy Sell Wall), +1.0 (Heavy Buy Wall)]
         """
@@ -726,7 +733,7 @@ class CryptoDataLoader:
             if self.is_binance_vision_direct or self.active_exchange_id == 'binance':
                 raw_sym = symbol.replace('/', '').replace(':USDT', '')
                 url = f"https://data-api.binance.vision/api/v3/depth?symbol={raw_sym}&limit={limit}"
-                resp = self.session.get(url, timeout=4)
+                resp = self.session.get(url, timeout=2)
                 if resp.status_code == 200:
                     data = resp.json()
                     bids = data.get('bids', [])
@@ -2515,8 +2522,16 @@ class HybridQuantEngine:
         self.loader = CryptoDataLoader()
         self.fe = AdvancedFeatureEngineer()
         self.labeler = TripleBarrierLabeler()
-        self.btc_cache = {}
-        self.model_cache = {}
+        self.model_cache_path = os.path.join(self.config.get('models_export_dir', './models_export_v3'), "models_cache.joblib")
+        if os.path.exists(self.model_cache_path):
+            try:
+                self.model_cache = joblib.load(self.model_cache_path)
+                print(f"[MODEL CACHE 🧠] Loaded {len(self.model_cache)} pre-warmed models from persistent cache: {self.model_cache_path}")
+            except Exception as e:
+                print(f"[MODEL CACHE ⚠️] Cache notice: {e}")
+                self.model_cache = {}
+        else:
+            self.model_cache = {}
         self.btc_shield_active = False
         self.btc_shield_reason = "NORMAL (Market Stable)"
         self.signal_cooldown_tracker = {}
@@ -2529,7 +2544,7 @@ class HybridQuantEngine:
         os.makedirs(self.config['models_export_dir'], exist_ok=True)
         os.makedirs(self.config['app_export_dir'], exist_ok=True)
 
-    def _prune_model_cache(self, max_size: int = 250, max_age_seconds: float = 21600):
+    def _prune_model_cache(self, max_size: int = 1500, max_age_seconds: float = 86400):
         """
         OS Memory Guard: Prunes expired and excess models from RAM cache.
         Prevents unbounded growth across continuous multi-day scanning cycles.
@@ -3274,6 +3289,9 @@ class HybridQuantEngine:
 
         # 1. Multi-Asset Opportunity Scanner (Parallel Multithreaded Execution)
         if mode in ["scanner", "both"]:
+            # Pre-fetch all Binance futures funding rates in 1 single bulk API call (~200ms)
+            self.loader.preload_bulk_funding_rates()
+
             # Determine universe of coins to scan
             scan_mode = self.config.get("scanner_mode", "top_volume")
             if scan_mode == "top_volume":
@@ -3290,8 +3308,8 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
-            scan_deadline_seconds = 120.0
-            max_threads = min(int(self.config.get('max_scan_workers', 8)), len(symbols_to_scan))
+            scan_deadline_seconds = 720.0
+            max_threads = min(int(self.config.get('max_scan_workers', 16)), len(symbols_to_scan))
             executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
                 future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in symbols_to_scan}
@@ -3303,7 +3321,7 @@ class HybridQuantEngine:
                         break
                     sym = future_to_sym[future]
                     try:
-                        res = future.result(timeout=20.0)
+                        res = future.result(timeout=45.0)
                         if res:
                             scanner_results.append(res)
                             live_prices[sym] = res['current_price']
@@ -3315,6 +3333,14 @@ class HybridQuantEngine:
                 executor.shutdown(wait=False, cancel_futures=True)
 
             print(f"[SCANNER ✅] Processed active horizons for {len(scanner_results)} assets.")
+
+            # Persist warmed model cache to disk so subsequent scans load hot in zero seconds
+            try:
+                if hasattr(self, 'model_cache') and self.model_cache:
+                    joblib.dump(self.model_cache, self.model_cache_path + ".tmp")
+                    os.replace(self.model_cache_path + ".tmp", self.model_cache_path)
+            except Exception:
+                pass
 
             # Bulk Live Ticker Price Sync: Guarantees zero scan-latency drift on all scanned coins
             try:
