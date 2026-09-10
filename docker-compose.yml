@@ -39,7 +39,7 @@ services:
       dockerfile: Dockerfile.backend
     container_name: crypto_backend
     restart: unless-stopped
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     environment:
       - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-crypto_user}:${MYSQL_PASSWORD:-crypto_secure_pass_2026}@db:3306/${MYSQL_DATABASE:-crypto_trading}
       - MYSQL_HOST=db
