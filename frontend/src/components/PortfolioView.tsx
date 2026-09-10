@@ -36,7 +36,7 @@ export default function PortfolioView() {
       queryClient.invalidateQueries({ queryKey: ["kpi"] });
       queryClient.invalidateQueries({ queryKey: ["forecast"] });
       setShowConfirmModal(false);
-      setResetMessage(res.message || "Paper trading successfully reset to $15.00!");
+      setResetMessage(res.message || "Paper trading successfully reset to $100.00!");
       setTimeout(() => setResetMessage(null), 5000);
     } catch (err: any) {
       alert("Failed to reset paper trading: " + (err.message || err));
@@ -67,8 +67,8 @@ export default function PortfolioView() {
             <ul className="text-xs text-slate-400 list-disc list-inside mt-2 space-y-1 font-mono">
               <li>Close &amp; delete all active open positions</li>
               <li>Wipe previous closed trade history</li>
-              <li>Reset wallet capital back to clean <span className="text-emerald-400 font-bold">$15.00</span></li>
-              <li>Activate 4H / 24H / Daily spot trades ($5 max 3 trades)</li>
+              <li>Reset wallet capital back to clean <span className="text-emerald-400 font-bold">$100.00</span></li>
+              <li>Activate 4H / 24H / Daily spot trades ($10 max 10 trades)</li>
               <li>Enforce &ge; 5.0% net profit return under Binance Convert (0% fee, &plusmn;0.10% spread)</li>
             </ul>
 
@@ -95,7 +95,7 @@ export default function PortfolioView() {
                 ) : (
                   <>
                     <RotateCcw className="h-3.5 w-3.5" />
-                    Confirm Reset to $15.00
+                    Confirm Reset to $100.00
                   </>
                 )}
               </button>
@@ -125,7 +125,7 @@ export default function PortfolioView() {
           <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
             💼 Active Open Paper Positions
             <span className="rounded-md bg-emerald-950 px-2 py-0.5 text-xs font-semibold text-emerald-400 border border-emerald-800">
-              {openPositions.length} / 3 Active Trades
+              {openPositions.length} / 10 Active Trades
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
@@ -136,7 +136,7 @@ export default function PortfolioView() {
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
             <span className="rounded-md bg-purple-950/60 px-2 py-1 text-purple-300 border border-purple-800/60">
-              💰 $15.00 Wallet ($5 / trade)
+              💰 $100.00 Wallet ($10 / trade)
             </span>
             <span className="rounded-md bg-indigo-950/60 px-2 py-1 text-indigo-300 border border-indigo-800/60">
               📅 4H / 24H / Daily
@@ -153,10 +153,10 @@ export default function PortfolioView() {
             type="button"
             onClick={() => setShowConfirmModal(true)}
             className="rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 px-3 py-1.5 text-xs font-semibold flex items-center gap-1.5 transition-all hover:border-rose-500/60 ml-auto"
-            title="Wipe previous open positions and reset paper trading wallet to $15.00"
+            title="Wipe previous open positions and reset paper trading wallet to $100.00"
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            Reset Paper Trading ($15)
+            Reset Paper Trading ($100)
           </button>
         </div>
       </div>

@@ -200,15 +200,15 @@ CONFIG = {
     "paper_trading": {
         "enabled": True,
         "spot_only": True,                  # Only SPOT trades (BULLISH / LONG positions only)
-        "start_balance_usd": 15.0,          # $15.00 Virtual Wallet
-        "position_size_usd": 5.0,           # Fixed $5.00 position size per trade
-        "dynamic_sizing": False,            # Fixed $5.00 per trade (no over-leveraging)
-        "min_position_size_usd": 5.0,
-        "max_concurrent_positions": 3,      # Up to 3 active trades ($5.00 x 3 = $15.00 total capital)
+        "start_balance_usd": 100.0,         # $100.00 Virtual Wallet
+        "position_size_usd": 10.0,          # Fixed $10.00 position size per trade
+        "dynamic_sizing": False,            # Fixed $10.00 per trade (no over-leveraging)
+        "min_position_size_usd": 10.0,
+        "max_concurrent_positions": 10,     # Up to 10 active trades ($10.00 x 10 = $100.00 total capital)
         # Targeted Execution Horizons: 4H, 24H (1D), and Multi-Day Daily Setups
         "allowed_horizons": ["horizon_4h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"],
         "min_expected_return_pct": 5.0,     # Strict minimum 5.0% net profit target on trades (>= 5.0% gain to TP1)
-        "min_net_profit_usd": 0.25,         # Minimum $0.25 net profit target on $5.00 trades (5% of $5.00)
+        "min_net_profit_usd": 0.50,         # Minimum $0.50 net profit target on $10.00 trades (5% of $10.00)
         "require_positive_track_record": True, # Must have past winning signals > past losing signals
         # Binance Convert Rate Difference Engine (Zero Explicit Fee + Bid/Ask Spread Differential)
         "execution_engine": "binance_convert", # "binance_convert" (0% fee, realistic ±0.10% buy/sell rate difference)
@@ -1388,7 +1388,7 @@ class PaperTradingLedger:
             "horizon_4h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"
         ]))
         self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 5.0))
-        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.25))
+        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.50))
 
         self.base_fee_rate = float(self.config.get('binance_fee_rate', 0.0))
         self.use_bnb_discount = self.config.get('use_bnb_fee_discount', False)
@@ -1405,7 +1405,7 @@ class PaperTradingLedger:
         self.data = self.load_or_initialize()
 
     def load_or_initialize(self) -> dict:
-        target_start = float(self.config.get('start_balance_usd', 15.0))
+        target_start = float(self.config.get('start_balance_usd', 100.0))
         if os.path.exists(self.ledger_file):
             try:
                 with open(self.ledger_file, 'r') as f:
@@ -1799,8 +1799,8 @@ class PaperTradingLedger:
             if pos['symbol'] == sym:
                 return
 
-        # 4. Fixed Position Size: $5.00 per trade ($15 total capital / 3 trades)
-        pos_size = float(self.config.get('position_size_usd', 5.0))
+        # 4. Fixed Position Size: $10.00 per trade ($100 total capital / 10 trades)
+        pos_size = float(self.config.get('position_size_usd', 10.0))
 
         # 5. Strict Profit Hurdle: Minimum 5.0% Net Return after Binance Convert Buy/Sell Rate Difference
         if self.execution_engine == 'binance_convert':
@@ -1816,7 +1816,7 @@ class PaperTradingLedger:
             expected_net_gain_pct = est_net_profit_usd / pos_size
 
         if (expected_net_gain_pct * 100.0) < self.min_expected_return_pct or est_net_profit_usd < self.min_net_profit_usd:
-            return  # Skip trade: Expected net profit is below 5.0% ($0.25 on $5.00)
+            return  # Skip trade: Expected net profit is below 5.0% ($0.50 on $10.00)
 
         # 6. Strict Track Record Requirement: Selected trade MUST have past winning signals > signals lost
         past_won = 0
@@ -1833,13 +1833,13 @@ class PaperTradingLedger:
                 return  # Skip trade: Coin does not have past winning signals > signals lost
 
         # Check Active Queue Capacity & Liquid Cash
-        max_concurrent = int(self.config.get('max_concurrent_positions', 3))
-        total_open_collateral = sum(p.get('remaining_position_size_usd', p.get('position_size_usd', 5.0)) for p in self.data.get('open_positions', []))
+        max_concurrent = int(self.config.get('max_concurrent_positions', 10))
+        total_open_collateral = sum(p.get('remaining_position_size_usd', p.get('position_size_usd', 10.0)) for p in self.data.get('open_positions', []))
         avail_cash = max(0.0, self.data['current_balance_usd'] - total_open_collateral)
         queue_is_full = (len(self.data.get('open_positions', [])) >= max_concurrent) or (avail_cash < pos_size)
 
         if queue_is_full:
-            # 7. Qualified Waitlist: Trade meets 100% of criteria, but active queue is currently full (3/3)
+            # 7. Qualified Waitlist: Trade meets 100% of criteria, but active queue is currently full (10/10)
             queued_list = self.data.setdefault('queued_trades', [])
             if not any(q['symbol'] == sym for q in queued_list):
                 queued_list.append({

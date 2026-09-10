@@ -35,14 +35,14 @@ export default function QueuedTrades() {
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            100% Qualified Spot Long setups (&ge;+5.0% net profit under Convert spread &amp; Past Won &gt; Lost) held while active queue is at full capacity (3/3)
+            100% Qualified Spot Long setups (&ge;+5.0% net profit under Convert spread &amp; Past Won &gt; Lost) held while active queue is at full capacity (10/10)
           </p>
         </div>
 
         <div className="flex items-center gap-2">
           <span className="rounded-md bg-cyan-950/60 px-2.5 py-1 text-xs font-mono text-cyan-300 border border-cyan-800/60 flex items-center gap-1.5">
             <Layers className="h-3.5 w-3.5" />
-            Active Slots: {openPositionsCount} / 3
+            Active Slots: {openPositionsCount} / 10
           </span>
         </div>
       </div>
@@ -58,7 +58,7 @@ export default function QueuedTrades() {
           </div>
           <h3 className="text-xs font-bold text-white">No Queued Trades Waiting</h3>
           <p className="text-[11px] text-slate-500 mt-0.5 max-w-md mx-auto">
-            All currently qualified trades have either been admitted directly into the 3 active slots, or the engine is waiting for 4H/24H/Daily setups that satisfy both the &ge;+5.0% net return hurdle (under Convert spread) and positive historical track record.
+            All currently qualified trades have either been admitted directly into the 10 active slots, or the engine is waiting for 4H/24H/Daily setups that satisfy both the &ge;+5.0% net return hurdle (under Convert spread) and positive historical track record.
           </p>
         </div>
       ) : (
@@ -70,7 +70,7 @@ export default function QueuedTrades() {
                 <th className="py-3 px-4">Horizon / Strategy</th>
                 <th className="py-3 px-4">Entry ➔ Target (TP1)</th>
                 <th className="py-3 px-4">Historical Win/Loss</th>
-                <th className="py-3 px-4">Est. Net Profit ($5 Size)</th>
+                <th className="py-3 px-4">Est. Net Profit ($10 Size)</th>
                 <th className="py-3 px-4">Status / Waitlist Reason</th>
               </tr>
             </thead>

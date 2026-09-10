@@ -274,7 +274,7 @@ class SignalService:
         net_profit = ledger_data.get("realized_pnl_usd", sum(c.realized_pnl_usd for c in closed_trades))
         decisive = winning_trades + losing_trades
         win_rate = ledger_data.get("win_rate_pct", round((winning_trades / max(1, decisive)) * 100.0, 2) if decisive > 0 else 0.0)
-        start_balance = float(ledger_data.get("starting_balance_usd", 15.0))
+        start_balance = float(ledger_data.get("starting_balance_usd", 100.0))
         current_balance = float(ledger_data.get("current_balance_usd", start_balance + net_profit))
 
         return {
@@ -295,11 +295,11 @@ class SignalService:
             "peak_balance_usd": round(float(ledger_data.get("peak_balance_usd", start_balance)), 2),
             "max_drawdown_usd": round(float(ledger_data.get("max_drawdown_usd", 0.0)), 2),
             "max_drawdown_pct": round(float(ledger_data.get("max_drawdown_pct", 0.0)), 2),
-            "fee_tier_label": str(ledger_data.get("fee_tier_label", "Binance Spot (0.075% BNB Discount) + 0.02% Slippage")),
+            "fee_tier_label": str(ledger_data.get("fee_tier_label", "Binance Convert (Zero Fee | +0.10% Buy / -0.10% Sell Spread)")),
             "queued_trades": ledger_data.get("queued_trades", []),
         }
 
-    def reset_portfolio_data(self, db: Session, target_start_balance: float = 15.0) -> Dict[str, Any]:
+    def reset_portfolio_data(self, db: Session, target_start_balance: float = 100.0) -> Dict[str, Any]:
         """Completely wipes open positions and closed trades from DB and resets paper trading ledger JSON to clean state."""
         try:
             db.query(PaperPosition).delete()
@@ -312,7 +312,8 @@ class SignalService:
         clean_ledger = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "last_updated": datetime.now(timezone.utc).isoformat(),
-            "fee_tier_label": "Binance Spot (0.075% BNB Discount) + 0.02% Slippage",
+            "fee_tier_label": "Binance Convert (Zero Fee | +0.10% Buy / -0.10% Sell Spread)",
+            "execution_engine": "binance_convert",
             "starting_balance_usd": target_start_balance,
             "current_balance_usd": target_start_balance,
             "realized_pnl_usd": 0.0,

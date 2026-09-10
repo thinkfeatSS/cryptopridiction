@@ -24,6 +24,6 @@ def get_closed_trades(db: Session = Depends(get_db)):
 
 @router.post("/reset")
 def reset_portfolio(db: Session = Depends(get_db)):
-    """Wipe all open positions, closed trades, and reset paper trading capital to $15.00."""
-    return signal_service.reset_portfolio_data(db, target_start_balance=15.0)
+    """Wipe all open positions, closed trades, and reset paper trading capital to $100.00."""
+    return signal_service.reset_portfolio_data(db, target_start_balance=100.0)
 
