@@ -3322,7 +3322,7 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
-            scan_deadline_seconds = 180.0
+            scan_deadline_seconds = 750.0
             last_partial_sync_ts = time.time()
             last_synced_count = 0
             max_threads = min(int(self.config.get('max_scan_workers', 16)), len(symbols_to_scan))
