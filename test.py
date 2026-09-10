@@ -72,6 +72,12 @@ try:
 except ImportError:
     HAS_LIGHTGBM = False
 
+try:
+    from app.services.db_sync import sync_files_to_db_live
+    HAS_DB_SYNC = True
+except ImportError:
+    HAS_DB_SYNC = False
+
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import accuracy_score, roc_auc_score, mean_squared_error
 from sklearn.model_selection import TimeSeriesSplit
@@ -238,9 +244,9 @@ CONFIG = {
         "focal_gamma": 2.0
     },
     "xgb_clf": {
-        "max_depth": 4,
-        "learning_rate": 0.04,
-        "n_estimators": 40,
+        "max_depth": 3,
+        "learning_rate": 0.05,
+        "n_estimators": 25,
         "subsample": 0.85,
         "colsample_bytree": 0.80,
         "gamma": 0.15,
@@ -250,10 +256,10 @@ CONFIG = {
         "n_jobs": 1
     },
     "lgb_clf": {
-        "max_depth": 4,
-        "num_leaves": 15,
-        "learning_rate": 0.04,
-        "n_estimators": 40,
+        "max_depth": 3,
+        "num_leaves": 12,
+        "learning_rate": 0.05,
+        "n_estimators": 25,
         "subsample": 0.85,
         "colsample_bytree": 0.80,
         "random_state": 42,
@@ -261,16 +267,16 @@ CONFIG = {
         "n_jobs": 1
     },
     "extra_trees": {
-        "n_estimators": 30,
-        "max_depth": 5,
+        "n_estimators": 15,
+        "max_depth": 4,
         "min_samples_split": 5,
         "random_state": 42,
         "n_jobs": 1
     },
     "xgb_reg": {
-        "max_depth": 4,
-        "learning_rate": 0.04,
-        "n_estimators": 40,
+        "max_depth": 3,
+        "learning_rate": 0.05,
+        "n_estimators": 25,
         "subsample": 0.85,
         "colsample_bytree": 0.80,
         "objective": "reg:pseudohubererror",
@@ -278,9 +284,9 @@ CONFIG = {
         "n_jobs": 1
     },
     "catboost": {
-        "iterations": 35,
-        "depth": 4,
-        "learning_rate": 0.04,
+        "iterations": 12,
+        "depth": 3,
+        "learning_rate": 0.05,
         "l2_leaf_reg": 4.0,
         "auto_class_weights": "Balanced",
         "verbose": False,
@@ -852,8 +858,15 @@ class AdvancedFeatureEngineer:
                 break
             w.append(w_k)
             k += 1
-        w = np.array(w[::-1])
-        res = series.rolling(window=len(w)).apply(lambda x: np.dot(x, w), raw=True)
+        w = np.array(w)
+        vals = series.values
+        if len(vals) < len(w):
+            res_vals = np.zeros_like(vals)
+        else:
+            conv = np.convolve(vals, w, mode='valid')
+            res_vals = np.zeros_like(vals)
+            res_vals[len(w) - 1:] = conv
+        res = pd.Series(res_vals, index=series.index)
         return (res / (series + 1e-10)).fillna(0.0)
 
     @staticmethod
@@ -2807,8 +2820,8 @@ class HybridQuantEngine:
                         'elite_acc': elite_acc,
                         'ts': now_ts
                     }
-                    if len(self.model_cache) > 260:
-                        self._prune_model_cache(max_size=250)
+                    if len(self.model_cache) > 1200:
+                        self._prune_model_cache(max_size=1000)
 
         # 1. Base ML Direction & Calibrated Probability with Hysteresis Smoothing
         h_prob = (p_cat_live * w_cat) + (p_xgb_live * w_xgb) + (p_lgb_live * w_lgb) + (p_et_live * w_et)
@@ -3309,7 +3322,7 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
-            scan_deadline_seconds = 720.0
+            scan_deadline_seconds = 180.0
             max_threads = min(int(self.config.get('max_scan_workers', 16)), len(symbols_to_scan))
             executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
@@ -3322,14 +3335,30 @@ class HybridQuantEngine:
                         break
                     sym = future_to_sym[future]
                     try:
-                        res = future.result(timeout=45.0)
+                        res = future.result(timeout=20.0)
                         if res:
                             scanner_results.append(res)
                             live_prices[sym] = res['current_price']
                             live_highs[sym] = res['live_high']
                             live_lows[sym] = res['live_low']
                             if len(scanner_results) % 10 == 0 or len(scanner_results) == len(symbols_to_scan):
-                                print(f"[SCANNER 🛰️] Completed {len(scanner_results)}/{len(symbols_to_scan)} assets (Latest: {sym}) - Elapsed: {time.time()-self.last_scan_started_ts:.1f}s", flush=True)
+                                elapsed_now = time.time() - self.last_scan_started_ts
+                                print(f"[SCANNER 🛰️] Completed {len(scanner_results)}/{len(symbols_to_scan)} assets (Latest: {sym}) - Elapsed: {elapsed_now:.1f}s", flush=True)
+                                # Incremental Streaming Export: Keeps Web UI & Database fresh in real time
+                                try:
+                                    partial_sorted = sorted(scanner_results, key=lambda x: (
+                                        x['best_priority'],
+                                        not x['is_triple_confluence'],
+                                        -x.get('consistency_index', 50.0),
+                                        -abs(x.get('alignment_score', 0.0)),
+                                        -x['overall_score']
+                                    ))
+                                    partial_signals = self.render_top_round_signals(partial_sorted, verbose=False)
+                                    self.export_web_app_json(partial_sorted, deep_dive_result=None, top_signals=partial_signals, is_partial=True)
+                                    if HAS_DB_SYNC:
+                                        sync_files_to_db_live(force=True)
+                                except Exception:
+                                    pass
                     except Exception as e:
                         pass
             finally:
@@ -3538,7 +3567,7 @@ class HybridQuantEngine:
         print(f"\n[LEADERBOARD 🛰️] Top 5 Market Opportunities (Full 150-Asset Matrix on Web UI):")
         print(tabulate(df_scan, headers="keys", tablefmt="simple", showindex=False) + "\n")
 
-    def render_top_round_signals(self, scanner_results: list, deep_dive_result: dict = None) -> list:
+    def render_top_round_signals(self, scanner_results: list, deep_dive_result: dict = None, verbose: bool = True) -> list:
         """
         Dynamically detects, grades (A+/A/B+), throttles duplicates, and applies BTC Beta Shield:
         - 💎 Grade A+ (Elite Institutional): Multi-scale trend aligned + Volume/Order flow + High conviction (>=75%) + RS vs BTC >= 0.
@@ -3828,10 +3857,11 @@ class HybridQuantEngine:
 
         self.signals_by_horizon = signals_by_horizon
 
-        # Update Cooldown Timestamps for Dispatched Signals
-        for sig in selected_signals:
-            self.signal_cooldown_tracker[(sig['symbol'], sig['horizon_key'])] = now_ts
-            self.symbol_last_signal_time[sig['symbol']] = now_ts
+        # Update Cooldown Timestamps for Dispatched Signals (Final round only)
+        if verbose:
+            for sig in selected_signals:
+                self.signal_cooldown_tracker[(sig['symbol'], sig['horizon_key'])] = now_ts
+                self.symbol_last_signal_time[sig['symbol']] = now_ts
 
         # Market Regime Diagnostic & Beta Shield Banner
         count_a_plus = sum(1 for s in all_signals if s['grade_tier'] == 1 and s.get('meta_win_prob', 0) >= min_meta_prob)
@@ -3847,42 +3877,43 @@ class HybridQuantEngine:
         else:
             regime_tag = "🛡️ DEFENSIVE CHOP / CAPITAL PRESERVATION (Showing Highest-Ranked Defensive Setup)"
 
-        print("\n" + "=" * 145)
-        print(f" 🎯 DYNAMIC QUANTITATIVE SIGNAL ENGINE ({len(selected_signals)} SIGNALS ACROSS HORIZONS THIS ROUND)")
-        print(f" Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Scanned: {len(source_results)} Pairs across 15M, 1H, 4H, 24H, 7D, 30D")
-        active_horizons = [f"{k} ({len(v)})" for k, v in signals_by_horizon.items() if len(v) > 0]
-        print(f" Active Horizons Firing: {', '.join(active_horizons) if active_horizons else 'None (Defensive)'} | Regime: {regime_tag}")
-        if self.btc_shield_active:
-            print(f" ⚠️  CIRCUIT BREAKER: {self.btc_shield_reason} -> Prioritizing Shorts & BTC Hedges.")
-        print("=" * 145)
+        if verbose:
+            print("\n" + "=" * 145)
+            print(f" 🎯 DYNAMIC QUANTITATIVE SIGNAL ENGINE ({len(selected_signals)} SIGNALS ACROSS HORIZONS THIS ROUND)")
+            print(f" Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} | Scanned: {len(source_results)} Pairs across 15M, 1H, 4H, 24H, 7D, 30D")
+            active_horizons = [f"{k} ({len(v)})" for k, v in signals_by_horizon.items() if len(v) > 0]
+            print(f" Active Horizons Firing: {', '.join(active_horizons) if active_horizons else 'None (Defensive)'} | Regime: {regime_tag}")
+            if self.btc_shield_active:
+                print(f" ⚠️  CIRCUIT BREAKER: {self.btc_shield_reason} -> Prioritizing Shorts & BTC Hedges.")
+            print("=" * 145)
 
-        rank_medals = ["🥇 TOP PICK (#1)", "🥈 RUNNER UP (#2)", "🥉 BRONZE (#3)", "🎯 PICK (#4)", "🎯 PICK (#5)"]
-        summary_rows = []
-        for idx, sig in enumerate(selected_signals):
-            rank_str = rank_medals[idx] if idx < len(rank_medals) else f"#{idx+1}"
-            dir_str = "🟢 LONG" if sig['direction'] in ["BULLISH", "LONG"] else "🔴 SHORT"
-            exp_ret = sig.get('exp_return', 0.0)
-            ret_str = f"{'+' if exp_ret >= 0 else ''}{exp_ret*100:.2f}%"
-            meta_p_str = f"{sig.get('meta_win_prob', 0.70)*100:.1f}%"
+            rank_medals = ["🥇 TOP PICK (#1)", "🥈 RUNNER UP (#2)", "🥉 BRONZE (#3)", "🎯 PICK (#4)", "🎯 PICK (#5)"]
+            summary_rows = []
+            for idx, sig in enumerate(selected_signals):
+                rank_str = rank_medals[idx] if idx < len(rank_medals) else f"#{idx+1}"
+                dir_str = "🟢 LONG" if sig['direction'] in ["BULLISH", "LONG"] else "🔴 SHORT"
+                exp_ret = sig.get('exp_return', 0.0)
+                ret_str = f"{'+' if exp_ret >= 0 else ''}{exp_ret*100:.2f}%"
+                meta_p_str = f"{sig.get('meta_win_prob', 0.70)*100:.1f}%"
 
-            summary_rows.append({
-                "Rank": rank_str,
-                "Quality Grade": f"{sig['grade']}\n({sig['tier_label']})",
-                "Asset": sig['symbol'],
-                "Horizon": sig['horizon_name'],
-                "Side": dir_str,
-                "Conviction": f"{sig['conviction']:.1f}%\n{sig['decision']}",
-                "ML Win Prob": f"🧠 {meta_p_str}",
-                "Entry Price": fmt_p(sig['entry_price']),
-                "TP1 / TP2 Target": f"TP1: {fmt_p(sig['tp1_price'])}\nTP2: {fmt_p(sig['tp2_price'])}",
-                "Stop-Loss": fmt_p(sig['sl_price']),
-                "Exp. Return": ret_str,
-                "Paper Status": sig['paper_trading_status']
-            })
+                summary_rows.append({
+                    "Rank": rank_str,
+                    "Quality Grade": f"{sig['grade']}\n({sig['tier_label']})",
+                    "Asset": sig['symbol'],
+                    "Horizon": sig['horizon_name'],
+                    "Side": dir_str,
+                    "Conviction": f"{sig['conviction']:.1f}%\n{sig['decision']}",
+                    "ML Win Prob": f"🧠 {meta_p_str}",
+                    "Entry Price": fmt_p(sig['entry_price']),
+                    "TP1 / TP2 Target": f"TP1: {fmt_p(sig['tp1_price'])}\nTP2: {fmt_p(sig['tp2_price'])}",
+                    "Stop-Loss": fmt_p(sig['sl_price']),
+                    "Exp. Return": ret_str,
+                    "Paper Status": sig['paper_trading_status']
+                })
 
-        df_selected = pd.DataFrame(summary_rows)
-        print(tabulate(df_selected, headers="keys", tablefmt="simple", showindex=False))
-        print("=" * 145 + "\n")
+            df_selected = pd.DataFrame(summary_rows)
+            print(tabulate(df_selected, headers="keys", tablefmt="simple", showindex=False))
+            print("=" * 145 + "\n")
 
         return selected_signals
 
@@ -3894,7 +3925,7 @@ class HybridQuantEngine:
         sym = data['symbol']
         print(f"[DEEP DIVE 🔬] {sym} Multi-Horizon Analysis Complete (Triple Confluence: {'💎 YES' if data['is_triple_confluence'] else '⚡ INDEPENDENT'})\n")
 
-    def export_web_app_json(self, scanner_results: list, deep_dive_result: dict, top_signals: list = None):
+    def export_web_app_json(self, scanner_results: list, deep_dive_result: dict = None, top_signals: list = None, is_partial: bool = False):
         payload = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "strategy": "Multi-Horizon Quantitative Engine (V16.0)",
@@ -3917,36 +3948,51 @@ class HybridQuantEngine:
         with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(payload, f, indent=4, default=str)
         os.replace(temp_path, json_path)
-        print(f"📦 Web-App Ready JSON Data Exported to: {os.path.abspath(json_path)}\n")
 
-        # Publish scanner daemon state: IDLE with authoritative next 15-minute prediction timestamp
-        try:
-            now_done = datetime.now(timezone.utc)
-            scan_duration = round(time.time() - getattr(self, "last_scan_started_ts", time.time()), 2)
-            mins_past = now_done.minute % 15
-            secs_to_next = ((15 - mins_past) * 60) - now_done.second + 2
-            if secs_to_next <= 5:
-                secs_to_next += 900
-            next_scan_dt = now_done + timedelta(seconds=secs_to_next)
-            next_scan_ts = int(next_scan_dt.timestamp())
-            next_scan_utc = next_scan_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        if not is_partial:
+            print(f"📦 Web-App Ready JSON Data Exported to: {os.path.abspath(json_path)}\n")
 
-            state_path = os.path.join(self.config['app_export_dir'], "scanner_daemon_state.json")
-            with open(state_path + ".tmp", "w", encoding="utf-8") as f:
-                json.dump({
-                    "is_scanning": False,
-                    "scan_status": "IDLE",
-                    "last_scan_completed_at": now_done.isoformat(),
-                    "last_scan_completed_at_utc": now_done.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                    "last_scan_duration_seconds": scan_duration,
-                    "next_scan_time_utc": next_scan_utc,
-                    "next_scan_timestamp": next_scan_ts,
-                    "seconds_to_next_scan": secs_to_next,
-                    "scan_interval_seconds": 900
-                }, f)
-            os.replace(state_path + ".tmp", state_path)
-        except Exception:
-            pass
+            # Publish scanner daemon state: IDLE with authoritative next 15-minute prediction timestamp
+            try:
+                now_done = datetime.now(timezone.utc)
+                scan_duration = round(time.time() - getattr(self, "last_scan_started_ts", time.time()), 2)
+                mins_past = now_done.minute % 15
+                secs_to_next = ((15 - mins_past) * 60) - now_done.second + 2
+                if secs_to_next <= 5:
+                    secs_to_next += 900
+                next_scan_dt = now_done + timedelta(seconds=secs_to_next)
+                next_scan_ts = int(next_scan_dt.timestamp())
+                next_scan_utc = next_scan_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+                state_path = os.path.join(self.config['app_export_dir'], "scanner_daemon_state.json")
+                with open(state_path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump({
+                        "is_scanning": False,
+                        "scan_status": "IDLE",
+                        "last_scan_completed_at": now_done.isoformat(),
+                        "last_scan_completed_at_utc": now_done.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        "last_scan_duration_seconds": scan_duration,
+                        "next_scan_time_utc": next_scan_utc,
+                        "next_scan_timestamp": next_scan_ts,
+                        "seconds_to_next_scan": secs_to_next,
+                        "scan_interval_seconds": 900
+                    }, f)
+                os.replace(state_path + ".tmp", state_path)
+            except Exception:
+                pass
+        else:
+            # Partial streaming update: update daemon state with current scanned asset count
+            try:
+                state_path = os.path.join(self.config['app_export_dir'], "scanner_daemon_state.json")
+                if os.path.exists(state_path):
+                    with open(state_path, "r", encoding="utf-8") as f:
+                        curr_state = json.load(f)
+                    curr_state["scanned_assets_count"] = len(scanner_results)
+                    with open(state_path + ".tmp", "w", encoding="utf-8") as f:
+                        json.dump(curr_state, f)
+                    os.replace(state_path + ".tmp", state_path)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
