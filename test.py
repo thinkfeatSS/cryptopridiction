@@ -2522,6 +2522,7 @@ class HybridQuantEngine:
         self.loader = CryptoDataLoader()
         self.fe = AdvancedFeatureEngineer()
         self.labeler = TripleBarrierLabeler()
+        self.btc_cache = {}
         self.model_cache_path = os.path.join(self.config.get('models_export_dir', './models_export_v3'), "models_cache.joblib")
         if os.path.exists(self.model_cache_path):
             try:
