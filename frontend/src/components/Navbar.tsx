@@ -152,7 +152,7 @@ export default function Navbar() {
                   )}
                   <div className="flex flex-col">
                     <span className="text-[9px] uppercase tracking-wider font-bold text-slate-400 flex items-center gap-1">
-                      [SHIELD 🛡️] Market Beta
+                      [SHIELD 🛡️] {shieldTheme.regimeBadge}
                       <span className={`inline-block h-1.5 w-1.5 rounded-full ${shieldTheme.dotColor}`} />
                     </span>
                     <span className="font-mono text-[11px] font-bold truncate max-w-[130px] sm:max-w-[170px]">

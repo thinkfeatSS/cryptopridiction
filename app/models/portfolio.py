@@ -18,6 +18,8 @@ class PaperPosition(Base):
     unrealized_pnl_usd = Column(Float, default=0.0)
     unrealized_pnl_pct = Column(Float, default=0.0)
     target_progress_pct = Column(Float, default=0.0)
+    buy_fee_usd = Column(Float, default=0.0)
+    est_sell_fee_usd = Column(Float, default=0.0)
     unrealized_fee_usd = Column(Float, default=0.0)
     opened_at = Column(String(64))
     expiry_time = Column(String(64))
@@ -38,6 +40,8 @@ class PaperPosition(Base):
             "unrealized_pnl_usd": self.unrealized_pnl_usd,
             "unrealized_pnl_pct": self.unrealized_pnl_pct,
             "target_progress_pct": self.target_progress_pct,
+            "buy_fee_usd": self.buy_fee_usd,
+            "est_sell_fee_usd": self.est_sell_fee_usd,
             "unrealized_fee_usd": self.unrealized_fee_usd,
             "opened_at": self.opened_at,
             "expiry_time": self.expiry_time,
@@ -56,6 +60,8 @@ class ClosedTrade(Base):
     exit_reason = Column(String(64))  # TAKE_PROFIT_HIT, STOP_LOSS_HIT, EXPIRED
     outcome = Column(String(16), index=True)  # WON, LOST, BREAKEVEN
     gross_pnl_usd = Column(Float, default=0.0)
+    buy_fee_usd = Column(Float, default=0.0)
+    sell_fee_usd = Column(Float, default=0.0)
     binance_fee_usd = Column(Float, default=0.0)
     realized_pnl_usd = Column(Float, default=0.0)
     realized_pnl_pct = Column(Float, default=0.0)
@@ -75,6 +81,8 @@ class ClosedTrade(Base):
             "exit_reason": self.exit_reason,
             "outcome": self.outcome,
             "gross_pnl_usd": self.gross_pnl_usd,
+            "buy_fee_usd": self.buy_fee_usd,
+            "sell_fee_usd": self.sell_fee_usd,
             "binance_fee_usd": self.binance_fee_usd,
             "realized_pnl_usd": self.realized_pnl_usd,
             "realized_pnl_pct": self.realized_pnl_pct,

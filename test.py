@@ -237,13 +237,15 @@ CONFIG = {
         "min_expected_return_pct": 5.0,     # Strict minimum 5.0% net profit target on trades (>= 5.0% gain to TP1)
         "min_net_profit_usd": 0.50,         # Minimum $0.50 net profit target on $10.00 trades (5% of $10.00)
         "require_positive_track_record": True, # Must have past winning signals > past losing signals
-        # Binance Convert Rate Difference Engine (Zero Explicit Fee + Bid/Ask Spread Differential)
-        "execution_engine": "binance_convert", # "binance_convert" (0% fee, realistic ±0.10% buy/sell rate difference)
-        "convert_buy_spread_rate": 0.0010,  # +0.10% conversion ask rate markup when buying
-        "convert_sell_spread_rate": 0.0010, # -0.10% conversion bid rate markdown when selling
-        "binance_fee_rate": 0.0000,         # Zero explicit fee on Binance Convert
-        "use_bnb_fee_discount": False,
-        "slippage_rate": 0.0000
+        # Realistic Binance Spot Trading Fee Engine (0.10% Buy Fee + 0.10% Sell Fee Standard, or 0.075% BNB discount)
+        "execution_engine": "binance_spot", # "binance_spot" (100% real Binance Spot fees) or "binance_convert"
+        "binance_fee_rate": 0.0010,         # Standard Binance Spot 0.10% Maker/Taker Fee
+        "binance_buy_fee_rate": 0.0010,     # Explicit 0.10% Buy Fee
+        "binance_sell_fee_rate": 0.0010,    # Explicit 0.10% Sell Fee
+        "use_bnb_fee_discount": False,      # Set to True for 25% discount (0.075% fee)
+        "slippage_rate": 0.0000,
+        "convert_buy_spread_rate": 0.0010,  # Fallback for convert mode (+0.10% ask spread)
+        "convert_sell_spread_rate": 0.0010  # Fallback for convert mode (-0.10% bid spread)
     },
     "signal_engine": {
         "dynamic_signal_count": True,       # Adaptive signal count based on true market edge
@@ -1483,7 +1485,7 @@ class PaperTradingLedger:
         self.config = config['paper_trading']
         self.export_dir = config['app_export_dir']
         self.ledger_file = os.path.join(self.export_dir, "paper_trading_ledger.json")
-        self.execution_engine = self.config.get('execution_engine', 'binance_convert')
+        self.execution_engine = self.config.get('execution_engine', 'binance_spot')
         self.convert_buy_spread_rate = float(self.config.get('convert_buy_spread_rate', 0.0010))
         self.convert_sell_spread_rate = float(self.config.get('convert_sell_spread_rate', 0.0010))
         self.allowed_horizons = set(self.config.get('allowed_horizons', [
@@ -1492,16 +1494,21 @@ class PaperTradingLedger:
         self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 5.0))
         self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.50))
 
-        self.base_fee_rate = float(self.config.get('binance_fee_rate', 0.0))
+        self.base_fee_rate = float(self.config.get('binance_fee_rate', 0.0010))
         self.use_bnb_discount = self.config.get('use_bnb_fee_discount', False)
         self.slippage_rate = float(self.config.get('slippage_rate', 0.0))
+
+        raw_discount = 0.75 if self.use_bnb_discount else 1.0
+        self.buy_fee_rate = float(self.config.get('binance_buy_fee_rate', self.base_fee_rate)) * raw_discount + self.slippage_rate
+        self.sell_fee_rate = float(self.config.get('binance_sell_fee_rate', self.base_fee_rate)) * raw_discount + self.slippage_rate
 
         if self.execution_engine == 'binance_convert':
             self.effective_fee_rate = 0.0
             self.fee_tier_label = f"Binance Convert (Zero Fee | +{self.convert_buy_spread_rate*100:.2f}% Buy / -{self.convert_sell_spread_rate*100:.2f}% Sell Spread)"
         else:
-            self.effective_fee_rate = (self.base_fee_rate * (0.75 if self.use_bnb_discount else 1.0)) + self.slippage_rate
-            self.fee_tier_label = f"Binance Spot ({'0.075% BNB Discount' if self.use_bnb_discount else '0.10% Standard'}) + {self.slippage_rate*100:.2f}% Slippage"
+            self.effective_fee_rate = (self.base_fee_rate * raw_discount) + self.slippage_rate
+            discount_str = "0.075% BNB Discount" if self.use_bnb_discount else "0.10% Standard"
+            self.fee_tier_label = f"Binance Spot ({discount_str} | {self.buy_fee_rate*100:.2f}% Buy + {self.sell_fee_rate*100:.2f}% Sell)"
 
         self.cooldown_tracker = {}  # {symbol: datetime_of_last_breakeven_or_loss}
         self.data = self.load_or_initialize()
@@ -1686,7 +1693,7 @@ class PaperTradingLedger:
                 else:
                     gross_tp1_gain = scale_size * (abs(tp1_p - entry_p) / entry_p)
                     exit_nominal = scale_size + gross_tp1_gain
-                    exit_fee = round(exit_nominal * self.effective_fee_rate, 4)
+                    exit_fee = round(exit_nominal * self.sell_fee_rate, 4)
                 net_tp1_realized = round(gross_tp1_gain - exit_fee, 4)
 
                 pos['realized_gross_pnl'] = round(pos.get('realized_gross_pnl', 0.0) + gross_tp1_gain, 4)
@@ -1709,7 +1716,7 @@ class PaperTradingLedger:
                 else:
                     gross_tp2_gain = scale_size * (abs(tp2_p - entry_p) / entry_p)
                     exit_nominal = scale_size + gross_tp2_gain
-                    exit_fee = round(exit_nominal * self.effective_fee_rate, 4)
+                    exit_fee = round(exit_nominal * self.sell_fee_rate, 4)
                 net_tp2_realized = round(gross_tp2_gain - exit_fee, 4)
 
                 pos['realized_gross_pnl'] = round(pos.get('realized_gross_pnl', 0.0) + gross_tp2_gain, 4)
@@ -1737,12 +1744,14 @@ class PaperTradingLedger:
                     raw_rem_return = (exit_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - exit_p) / entry_p
                     gross_rem_pnl = rem_size * raw_rem_return
                     exit_rem_nominal = max(0.0, rem_size + gross_rem_pnl)
-                    exit_rem_fee = round(exit_rem_nominal * self.effective_fee_rate, 4)
+                    exit_rem_fee = round(exit_rem_nominal * self.sell_fee_rate, 4)
                 net_rem_realized = gross_rem_pnl - exit_rem_fee
 
                 # Total Combined Trade Accounting
                 total_gross_pnl = round(pos.get('realized_gross_pnl', 0.0) + gross_rem_pnl, 4)
-                total_fees_paid = round(pos.get('entry_fee_usd', 0.0) + pos.get('realized_fees', 0.0) + exit_rem_fee, 4)
+                buy_fee_usd = round(pos.get('buy_fee_usd', pos.get('entry_fee_usd', 0.0)), 4)
+                sell_fee_usd = round(pos.get('realized_fees', 0.0) + exit_rem_fee, 4)
+                total_fees_paid = round(buy_fee_usd + sell_fee_usd, 4)
                 total_net_realized_pnl = round(total_gross_pnl - total_fees_paid, 4)
                 net_pnl_pct = round((total_net_realized_pnl / init_size) * 100.0, 2)
                 gross_pnl_pct = round((total_gross_pnl / init_size) * 100.0, 2)
@@ -1802,6 +1811,8 @@ class PaperTradingLedger:
                 pos['outcome'] = outcome
                 pos['gross_pnl_usd'] = total_gross_pnl
                 pos['gross_pnl_pct'] = gross_pnl_pct
+                pos['buy_fee_usd'] = buy_fee_usd
+                pos['sell_fee_usd'] = sell_fee_usd
                 pos['binance_fee_usd'] = total_fees_paid
                 pos['realized_pnl_usd'] = total_net_realized_pnl
                 pos['realized_pnl_pct'] = net_pnl_pct
@@ -1816,22 +1827,45 @@ class PaperTradingLedger:
                 if self.execution_engine == 'binance_convert':
                     eff_curr_exit = round(curr_p * (1.0 - self.convert_sell_spread_rate), 8)
                     raw_ret = (eff_curr_exit - entry_p) / entry_p if direction == "BULLISH" else (entry_p - eff_curr_exit) / entry_p
+                    est_exit_fee = 0.0
+                    buy_fee_usd = 0.0
                     est_total_fee = 0.0
                     pos['convert_sell_rate'] = eff_curr_exit
                 else:
                     raw_ret = (curr_p - entry_p) / entry_p if direction == "BULLISH" else (entry_p - curr_p) / entry_p
                     est_exit_nominal = max(0.0, rem_size * (1.0 + raw_ret))
-                    est_exit_fee = round(est_exit_nominal * self.effective_fee_rate, 4)
-                    est_entry_fee = round(rem_size * self.effective_fee_rate, 4)
-                    est_total_fee = round(est_entry_fee + est_exit_fee, 4)
+                    est_exit_fee = round(est_exit_nominal * self.sell_fee_rate, 4)
+                    buy_fee_usd = round(pos.get('buy_fee_usd', pos.get('entry_fee_usd', rem_size * self.buy_fee_rate)), 4)
+                    est_total_fee = round(buy_fee_usd + est_exit_fee, 4)
 
                 gross_u_pnl = round(raw_ret * rem_size, 4)
                 net_u_pnl = round(gross_u_pnl - est_total_fee, 4)
                 
+                # Calculate Live Target Progress %:
+                # If in profit (curr_p >= entry_p): percentage of (tp_p - entry_p) achieved [0 to +100%]
+                # If in loss (curr_p < entry_p): percentage of (entry_p - sl_p) consumed towards SL [0 to -100%]
+                if direction == "BULLISH":
+                    if curr_p >= entry_p:
+                        tp_span = max(1e-8, tp_p - entry_p)
+                        target_prog = round(min(100.0, max(0.0, (curr_p - entry_p) / tp_span * 100.0)), 2)
+                    else:
+                        sl_span = max(1e-8, entry_p - sl_p)
+                        target_prog = -round(min(100.0, max(0.0, (entry_p - curr_p) / sl_span * 100.0)), 2)
+                else:
+                    if curr_p <= entry_p:
+                        tp_span = max(1e-8, entry_p - tp_p)
+                        target_prog = round(min(100.0, max(0.0, (entry_p - curr_p) / tp_span * 100.0)), 2)
+                    else:
+                        sl_span = max(1e-8, sl_p - entry_p)
+                        target_prog = -round(min(100.0, max(0.0, (curr_p - entry_p) / sl_span * 100.0)), 2)
+
                 pos['unrealized_gross_pnl_usd'] = gross_u_pnl
+                pos['buy_fee_usd'] = buy_fee_usd
+                pos['est_sell_fee_usd'] = est_exit_fee
                 pos['unrealized_fee_usd'] = est_total_fee
                 pos['unrealized_pnl_usd'] = net_u_pnl
                 pos['unrealized_pnl_pct'] = round((net_u_pnl / init_size) * 100.0, 2)
+                pos['target_progress_pct'] = target_prog
                 pos['current_price'] = curr_p
                 still_open.append(pos)
 
@@ -1904,7 +1938,7 @@ class PaperTradingLedger:
         # 4. Fixed Position Size: $10.00 per trade ($100 total capital / 10 trades)
         pos_size = float(self.config.get('position_size_usd', 10.0))
 
-        # 5. Strict Profit Hurdle: Minimum 5.0% Net Return after Binance Convert Buy/Sell Rate Difference
+        # 5. Strict Profit Hurdle: Minimum 5.0% Net Return after Binance Fees
         if self.execution_engine == 'binance_convert':
             eff_buy_entry = round(entry_p * (1.0 + self.convert_buy_spread_rate), 8)
             eff_tp1_exit = round(tp1_p * (1.0 - self.convert_sell_spread_rate), 8)
@@ -1913,7 +1947,7 @@ class PaperTradingLedger:
         else:
             eff_buy_entry = entry_p
             expected_gain_pct = abs(tp1_p - entry_p) / entry_p
-            est_nominal_fees = pos_size * (self.effective_fee_rate * 2)
+            est_nominal_fees = round((pos_size * self.buy_fee_rate) + (pos_size * (1.0 + expected_gain_pct) * self.sell_fee_rate), 4)
             est_net_profit_usd = (pos_size * expected_gain_pct) - est_nominal_fees
             expected_net_gain_pct = est_net_profit_usd / pos_size
 
@@ -1989,12 +2023,23 @@ class PaperTradingLedger:
 
         if self.execution_engine == 'binance_convert':
             fill_entry_p = eff_buy_entry
-            entry_fee = 0.0
+            buy_fee = 0.0
+            est_sell_fee = 0.0
             spread_cost_entry = round(pos_size * self.convert_buy_spread_rate, 4)
+            unrealized_fee = 0.0
+            unrealized_pnl = -round(spread_cost_entry, 4)
+            unrealized_pct = -round(self.convert_buy_spread_rate * 100.0, 2)
         else:
             fill_entry_p = entry_p
-            entry_fee = round(pos_size * self.effective_fee_rate, 4)
+            buy_fee = round(pos_size * self.buy_fee_rate, 4)
+            est_sell_fee = round(pos_size * self.sell_fee_rate, 4)
             spread_cost_entry = 0.0
+            unrealized_fee = round(buy_fee + est_sell_fee, 4)
+            unrealized_pnl = -unrealized_fee
+            unrealized_pct = round((-unrealized_fee / pos_size) * 100.0, 2)
+
+        # Initial target progress percentage is 0.0% at entry
+        target_prog = 0.0
 
         new_pos = {
             "trade_id": f"PAPER_{sym.replace('/', '_')}_{horizon_key}_{int(time.time())}",
@@ -2017,17 +2062,23 @@ class PaperTradingLedger:
             "realized_gross_pnl": 0.0,
             "realized_fees": 0.0,
             "realized_net_pnl": 0.0,
-            "entry_fee_usd": entry_fee,
+            "entry_fee_usd": buy_fee,
+            "buy_fee_usd": buy_fee,
+            "est_sell_fee_usd": est_sell_fee,
+            "sell_fee_usd": 0.0,
             "fee_rate": self.effective_fee_rate,
+            "buy_fee_rate": self.buy_fee_rate,
+            "sell_fee_rate": self.sell_fee_rate,
             "opened_at": now_utc.isoformat(),
             "entry_time_str": now_utc.strftime('%Y-%m-%d %H:%M:%S UTC'),
             "predicted_window": result.get('predicted_window_str', f"{result.get('trade_open_str', 'N/A')} ➔ {result.get('trade_close_str', 'N/A')}"),
             "expiry_time": expiry_dt.isoformat(),
             "signal_decision": decision,
             "unrealized_gross_pnl_usd": 0.0,
-            "unrealized_fee_usd": 0.0 if self.execution_engine == 'binance_convert' else entry_fee * 2,
-            "unrealized_pnl_usd": -round(spread_cost_entry, 4) if self.execution_engine == 'binance_convert' else -round(entry_fee * 2, 4),
-            "unrealized_pnl_pct": -round(self.convert_buy_spread_rate * 100.0, 2) if self.execution_engine == 'binance_convert' else -round((entry_fee * 2 / pos_size) * 100.0, 2),
+            "unrealized_fee_usd": unrealized_fee,
+            "unrealized_pnl_usd": unrealized_pnl,
+            "unrealized_pnl_pct": unrealized_pct,
+            "target_progress_pct": target_prog,
             "current_price": entry_p
         }
 
@@ -2579,7 +2630,25 @@ class HybridQuantEngine:
         else:
             self.model_cache = {}
         self.btc_shield_active = False
-        self.btc_shield_reason = "NORMAL (Market Stable)"
+        self.btc_shield_code = "CONSOLIDATION"
+        self.btc_shield_regime = "CONSOLIDATION"
+        self.btc_shield_regime_label = "💤 RANGE CONSOLIDATION"
+        self.btc_shield_reason = "RANGE CONSOLIDATION"
+        self.btc_composite_score = 0.0
+        self.btc_price = 0.0
+        self.btc_15m_change = 0.0
+        self.btc_1h_change = 0.0
+        self.btc_4h_change = 0.0
+        self.btc_24h_change = 0.0
+        self.btc_rsi_15m = 50.0
+        self.btc_rsi_1h = 50.0
+        self.btc_rsi_4h = 50.0
+        self.btc_trend_structure = "Multi-Timeframe Range Consolidation"
+        self.btc_is_squeeze = False
+        self.btc_bbw_15m = 0.0
+        self.btc_vol_ratio = 1.0
+        self._last_btc_heartbeat_ts = 0.0
+        self._last_shield_file_sync_ts = 0.0
         self.signal_cooldown_tracker = {}
         self.symbol_last_signal_time = {}
         self.ledger = PaperTradingLedger(config)
@@ -2617,68 +2686,244 @@ class HybridQuantEngine:
                 print(f"[WARNING] BTC reference fetch note for {tf}: {e}")
 
         # 🛡️ GLOBAL BTC MARKET BETA SHIELD (MARKET REGIME & CIRCUIT BREAKER)
-        # Protects altcoins from correlated stop-outs during BTC flash drops / severe flushes
-        self.btc_shield_active = False
-        self.btc_shield_code = "NORMAL"
-        self.btc_shield_reason = "NORMAL (Market Stable)"
-        self.btc_15m_change = 0.0
-        self.btc_1h_change = 0.0
+        self.evaluate_btc_market_regime()
 
+    def evaluate_btc_market_regime(self, live_btc_price: float = None):
+        """
+        🛡️ ADVANCED MULTI-FACTOR BTC QUANTITATIVE MARKET REGIME & SENTIMENT ENGINE
+        Accurately predicts real-time macro & intraday market states based on Bitcoin multi-scale dynamics:
+        - 🚀 BULL_MOMENTUM / BULLISH EXPANSION: Strong upward trend acceleration & momentum markup
+        - 💎 DIP ACCUMULATION: Oversold bounce off support within macro bull trend
+        - 🐻 BEAR_MOMENTUM / BEARISH BREAKDOWN: Strong downward distribution & negative momentum drift
+        - 💤 RANGE CONSOLIDATION: Volatility squeeze / tight Bollinger Band coiling / mean-reversion
+        - ⚡ HIGH VOLATILITY CHOP: Expanding volatility ratio with mixed multi-timeframe direction
+        - ⚠️ DEFENSIVE: Cascade drop circuit breaker (Altcoin longs paused)
+        - 🚨 ALERT_DUMP: Severe flash flush (Emergency risk-off pause)
+        - ⚖️ BALANCED EQUILIBRIUM: Neutral baseline market
+        """
         try:
-            ret_15m_1 = 0.0
-            ret_15m_2 = 0.0
+            df_15m = self.btc_cache.get('15m')
+            df_1h = self.btc_cache.get('1h')
+            df_4h = self.btc_cache.get('4h')
+            df_1d = self.btc_cache.get('1d')
+
+            if df_15m is None or len(df_15m) < 15:
+                return
+
+            c_now = float(live_btc_price) if (live_btc_price is not None and live_btc_price > 0) else float(df_15m['close'].iloc[-1])
+            c_prev_15m = float(df_15m['close'].iloc[-2])
+            c_prev3_15m = float(df_15m['close'].iloc[-4]) if len(df_15m) >= 4 else c_prev_15m
+            ret_15m = (c_now - c_prev_15m) / (c_prev_15m + 1e-10)
+            ret_45m = (c_now - c_prev3_15m) / (c_prev3_15m + 1e-10)
+
+            # 1H metrics
             ret_1h = 0.0
+            ema20_1h = c_now
+            ema50_1h = c_now
+            ema200_1h = c_now
+            rsi_1h = 50.0
+            if df_1h is not None and len(df_1h) >= 15:
+                c_prev_1h = float(df_1h['close'].iloc[-2])
+                ret_1h = (c_now - c_prev_1h) / (c_prev_1h + 1e-10)
+                ema20_1h = float(df_1h['close'].ewm(span=20, adjust=False).mean().iloc[-1])
+                ema50_1h = float(df_1h['close'].ewm(span=50, adjust=False).mean().iloc[-1])
+                ema200_1h = float(df_1h['close'].ewm(span=200, adjust=False).mean().iloc[-1]) if len(df_1h) >= 200 else ema50_1h
+                rsi_1h_series = self.fe.compute_rsi(df_1h['close'], period=14)
+                rsi_1h = float(rsi_1h_series.iloc[-1]) * 100.0
 
-            if '15m' in self.btc_cache and len(self.btc_cache['15m']) >= 3:
-                df_15m = self.btc_cache['15m']
-                c_now = float(df_15m['close'].iloc[-1])
-                c_prev = float(df_15m['close'].iloc[-2])
-                c_prev2 = float(df_15m['close'].iloc[-3])
-                ret_15m_1 = (c_now - c_prev) / c_prev
-                ret_15m_2 = (c_now - c_prev2) / c_prev2
-                self.btc_15m_change = round(ret_15m_1 * 100.0, 2)
+            # 4H metrics
+            ret_4h = 0.0
+            ema50_4h = c_now
+            ema200_4h = c_now
+            rsi_4h = 50.0
+            if df_4h is not None and len(df_4h) >= 5:
+                c_prev_4h = float(df_4h['close'].iloc[-2])
+                ret_4h = (c_now - c_prev_4h) / (c_prev_4h + 1e-10)
+                ema50_4h = float(df_4h['close'].ewm(span=50, adjust=False).mean().iloc[-1])
+                ema200_4h = float(df_4h['close'].ewm(span=200, adjust=False).mean().iloc[-1]) if len(df_4h) >= 200 else ema50_4h
+                rsi_4h_series = self.fe.compute_rsi(df_4h['close'], period=14)
+                rsi_4h = float(rsi_4h_series.iloc[-1]) * 100.0
 
-            if '1h' in self.btc_cache and len(self.btc_cache['1h']) >= 2:
-                df_1h = self.btc_cache['1h']
-                ret_1h = (float(df_1h['close'].iloc[-1]) - float(df_1h['close'].iloc[-2])) / float(df_1h['close'].iloc[-2])
-                self.btc_1h_change = round(ret_1h * 100.0, 2)
+            # 1D Macro metrics
+            ret_24h = 0.0
+            ema50_1d = c_now
+            ema200_1d = c_now
+            if df_1d is not None and len(df_1d) >= 5:
+                c_prev_1d = float(df_1d['close'].iloc[-2])
+                ret_24h = (c_now - c_prev_1d) / (c_prev_1d + 1e-10)
+                ema50_1d = float(df_1d['close'].ewm(span=50, adjust=False).mean().iloc[-1])
+                ema200_1d = float(df_1d['close'].ewm(span=200, adjust=False).mean().iloc[-1]) if len(df_1d) >= 200 else ema50_1d
 
-            # Evaluate Market Regime Hierarchy
-            if ret_15m_1 <= -0.025 or ret_1h <= -0.035:
-                # Critical Systemic Dump
-                self.btc_shield_active = True
-                self.btc_shield_code = "ALERT_DUMP"
-                self.btc_shield_reason = f"SEVERE DUMP (15M: {ret_15m_1*100:+.2f}%, 1H: {ret_1h*100:+.2f}%)"
-            elif ret_15m_1 <= -0.012 or ret_15m_2 <= -0.018 or ret_1h <= -0.020:
-                # Defensive Circuit Breaker (Altcoin Longs Paused)
-                self.btc_shield_active = True
-                self.btc_shield_code = "DEFENSIVE"
-                self.btc_shield_reason = f"DEFENSIVE (BTC Dump 15M: {ret_15m_1*100:+.2f}%)"
-            elif ret_15m_1 <= -0.007 or ret_1h <= -0.012:
-                # Elevated Volatility Caution
-                self.btc_shield_active = False
-                self.btc_shield_code = "CAUTION"
-                self.btc_shield_reason = f"CAUTION (High Volatility 15M: {ret_15m_1*100:+.2f}%)"
-            elif ret_15m_1 >= 0.012 or ret_1h >= 0.020:
-                # Strong Bullish Trend Expansion
-                self.btc_shield_active = False
-                self.btc_shield_code = "BULL_MOMENTUM"
-                self.btc_shield_reason = f"BULLISH EXPANSION (BTC 15M: {ret_15m_1*100:+.2f}%)"
+            # 15M Technicals (EMA, RSI, Bollinger Bands, ATR)
+            ema9_15m = float(df_15m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+            ema21_15m = float(df_15m['close'].ewm(span=21, adjust=False).mean().iloc[-1])
+            rsi_15m_series = self.fe.compute_rsi(df_15m['close'], period=14)
+            rsi_15m = float(rsi_15m_series.iloc[-1]) * 100.0
+
+            # Bollinger Bands 15M
+            std_15m = float(df_15m['close'].rolling(20).std().iloc[-1]) if len(df_15m) >= 20 else 0.0
+            bb_mid_15m = float(df_15m['close'].rolling(20).mean().iloc[-1]) if len(df_15m) >= 20 else ema21_15m
+            bb_upper_15m = bb_mid_15m + 2.0 * std_15m
+            bb_lower_15m = bb_mid_15m - 2.0 * std_15m
+            bbw_15m = (bb_upper_15m - bb_lower_15m) / (bb_mid_15m + 1e-10)
+
+            # Bollinger Bands 1H
+            bbw_1h = 0.04
+            if df_1h is not None and len(df_1h) >= 20:
+                std_1h = float(df_1h['close'].rolling(20).std().iloc[-1])
+                bb_mid_1h = float(df_1h['close'].rolling(20).mean().iloc[-1])
+                bbw_1h = (4.0 * std_1h) / (bb_mid_1h + 1e-10)
+
+            # Volatility ratio vs rolling baseline
+            atr_15m_series = self.fe.compute_atr(df_15m, period=14)
+            atr_15m = float(atr_15m_series.iloc[-1])
+            baseline_atr = float(atr_15m_series.rolling(32).mean().iloc[-1]) if len(atr_15m_series) >= 32 else atr_15m
+            vol_ratio = (atr_15m / (baseline_atr + 1e-10)) if baseline_atr > 0 else 1.0
+
+            # Multi-timeframe trend states
+            is_1d_bull = (c_now >= ema50_1d) and (ema50_1d >= ema200_1d)
+            is_1d_bear = (c_now <= ema50_1d) and (ema50_1d <= ema200_1d)
+
+            is_4h_bull = (c_now >= ema50_4h) and (ema50_4h >= ema200_4h)
+            is_4h_bear = (c_now <= ema50_4h) and (ema50_4h <= ema200_4h)
+
+            is_1h_bull = (c_now >= ema20_1h >= ema50_1h)
+            is_1h_bear = (c_now <= ema20_1h <= ema50_1h)
+
+            is_15m_bull = (c_now >= ema9_15m >= ema21_15m)
+            is_15m_bear = (c_now <= ema9_15m <= ema21_15m)
+
+            # Institutional Composite Market Score Calculation (-100 to +100)
+            trend_pts = 0.0
+            trend_pts += 15.0 if is_1d_bull else (-15.0 if is_1d_bear else 0.0)
+            trend_pts += 15.0 if is_4h_bull else (-15.0 if is_4h_bear else 0.0)
+            trend_pts += 10.0 if is_1h_bull else (-10.0 if is_1h_bear else 0.0)
+
+            mom_pts = 0.0
+            mom_pts += float(np.clip((rsi_1h - 50.0) * 0.5, -15.0, 15.0))
+            mom_pts += float(np.clip((rsi_15m - 50.0) * 0.3, -10.0, 10.0))
+            mom_pts += 10.0 if is_15m_bull else (-10.0 if is_15m_bear else 0.0)
+
+            vel_pts = 0.0
+            vel_pts += float(np.clip((ret_1h / 0.015) * 15.0, -15.0, 15.0))
+            vel_pts += float(np.clip((ret_15m / 0.008) * 10.0, -10.0, 10.0))
+
+            composite_score = round(float(np.clip(trend_pts + mom_pts + vel_pts, -100.0, 100.0)), 1)
+
+            # Structural narrative description
+            if is_1h_bull and is_4h_bull:
+                trend_structure = "Bullish Alignment (1H & 4H Trend Up)"
+            elif is_1h_bear and is_4h_bear:
+                trend_structure = "Bearish Alignment (1H & 4H Trend Down)"
+            elif is_1h_bear and is_1d_bull:
+                trend_structure = "Intraday Pullback in Macro Bull Trend"
+            elif is_1h_bull and is_1d_bear:
+                trend_structure = "Bear Market Relief Rally"
+            elif bbw_15m <= 0.018:
+                trend_structure = "15M Volatility Squeeze (Coiling)"
             else:
-                # Normal Stable Market
-                self.btc_shield_active = False
-                self.btc_shield_code = "NORMAL"
-                self.btc_shield_reason = "NORMAL (Market Stable)"
+                trend_structure = "Multi-Timeframe Range Consolidation"
+
+            is_squeeze = (bbw_15m <= 0.018) or (bbw_1h <= 0.030)
+
+            # --- REGIME CLASSIFICATION ENGINE HIERARCHY ---
+            if ret_15m <= -0.018 or ret_1h <= -0.028 or (ret_15m <= -0.012 and ret_45m <= -0.022):
+                # 1. ALERT_DUMP: Emergency risk-off flush
+                active = True
+                code = "ALERT_DUMP"
+                regime = "DUMP"
+                regime_label = "🚨 SEVERE SYSTEMIC DUMP"
+                reason = f"ALERT DUMP (BTC: ${c_now:,.0f} | 15M: {ret_15m*100:+.2f}% | 1H: {ret_1h*100:+.2f}%)"
+
+            elif ret_15m <= -0.009 or ret_1h <= -0.016 or (ret_15m <= -0.006 and c_now < bb_lower_15m and rsi_15m < 28.0):
+                # 2. DEFENSIVE: Altcoin longs paused
+                active = True
+                code = "DEFENSIVE"
+                regime = "DEFENSIVE"
+                regime_label = "⚠️ BTC DUMP CIRCUIT BREAKER"
+                reason = f"CIRCUIT BREAKER (BTC: ${c_now:,.0f} | 15M: {ret_15m*100:+.2f}% | 1H: {ret_1h*100:+.2f}%)"
+
+            elif composite_score >= 25.0 or (is_1h_bull and ret_1h >= 0.003 and rsi_1h >= 52.0) or (ret_1h >= 0.007 and rsi_15m >= 54.0):
+                # 3. BULL_MOMENTUM: Bullish expansion & markup
+                active = False
+                code = "BULL_MOMENTUM"
+                regime = "BULLISH"
+                regime_label = "🚀 BULLISH EXPANSION"
+                reason = f"BULLISH EXPANSION (BTC: ${c_now:,.0f} | Score: +{composite_score:.0f} | 1H: {ret_1h*100:+.2f}% | RSI: {rsi_1h:.1f})"
+
+            elif (rsi_15m <= 36.0 and ret_15m > 0 and (is_1d_bull or is_4h_bull) and c_now <= bb_lower_15m * 1.003):
+                # 4. BULL_ACCUMULATION: Dip-buy reversal off oversold
+                active = False
+                code = "BULL_MOMENTUM"
+                regime = "BULLISH"
+                regime_label = "💎 DIP ACCUMULATION"
+                reason = f"DIP ACCUMULATION (BTC: ${c_now:,.0f} | Oversold Bounce | RSI: {rsi_15m:.1f})"
+
+            elif composite_score <= -25.0 or (is_1h_bear and ret_1h <= -0.003 and rsi_1h <= 48.0) or (ret_1h <= -0.007 and rsi_15m <= 46.0):
+                # 5. BEAR_MOMENTUM: Bearish markdown & distribution
+                active = False
+                code = "BEAR_MOMENTUM"
+                regime = "BEARISH"
+                regime_label = "🐻 BEARISH BREAKDOWN"
+                reason = f"BEARISH BREAKDOWN (BTC: ${c_now:,.0f} | Score: {composite_score:.0f} | 1H: {ret_1h*100:+.2f}% | RSI: {rsi_1h:.1f})"
+
+            elif (vol_ratio >= 1.65 or abs(ret_15m) >= 0.010 or rsi_15m >= 82.0 or rsi_15m <= 18.0) and not is_squeeze:
+                # 6. CAUTION: Elevated volatility whipsaw
+                active = False
+                code = "CAUTION"
+                regime = "VOLATILE"
+                regime_label = "⚡ HIGH VOLATILITY CHOP"
+                reason = f"HIGH VOLATILITY (BTC: ${c_now:,.0f} | Vol Ratio: {vol_ratio:.1f}x | 15M: {ret_15m*100:+.2f}%)"
+
+            elif is_squeeze or abs(composite_score) < 22.0 or (38.0 <= rsi_1h <= 62.0 and abs(ret_1h) <= 0.008):
+                # 7. CONSOLIDATION: Range-bound squeeze / coiling inside bands
+                active = False
+                code = "CONSOLIDATION"
+                regime = "CONSOLIDATION"
+                regime_label = "💤 RANGE CONSOLIDATION"
+                sq_note = f"Squeeze: {bbw_15m*100:.2f}%" if is_squeeze else f"RSI: {rsi_1h:.1f}"
+                reason = f"RANGE CONSOLIDATION (BTC: ${c_now:,.0f} | Score: {composite_score:+.0f} | {sq_note})"
+
+            else:
+                # 8. NORMAL: Balanced Equilibrium
+                active = False
+                code = "NORMAL"
+                regime = "STABLE"
+                regime_label = "⚖️ BALANCED EQUILIBRIUM"
+                reason = f"BALANCED MARKET (BTC: ${c_now:,.0f} | Score: {composite_score:+.0f})"
+
+            # Assign properties
+            self.btc_shield_active = active
+            self.btc_shield_code = code
+            self.btc_shield_regime = regime
+            self.btc_shield_regime_label = regime_label
+            self.btc_shield_reason = reason
+            self.btc_composite_score = composite_score
+            self.btc_price = round(c_now, 2)
+            self.btc_15m_change = round(ret_15m * 100.0, 2)
+            self.btc_1h_change = round(ret_1h * 100.0, 2)
+            self.btc_4h_change = round(ret_4h * 100.0, 2)
+            self.btc_24h_change = round(ret_24h * 100.0, 2)
+            self.btc_rsi_15m = round(rsi_15m, 1)
+            self.btc_rsi_1h = round(rsi_1h, 1)
+            self.btc_rsi_4h = round(rsi_4h, 1)
+            self.btc_trend_structure = trend_structure
+            self.btc_is_squeeze = is_squeeze
+            self.btc_bbw_15m = round(bbw_15m * 100.0, 2)
+            self.btc_vol_ratio = round(vol_ratio, 2)
+
+            if self.btc_shield_active:
+                print(f"\n[SHIELD 🛡️] ⚠️ BTC MARKET BETA SHIELD ACTIVATED: {self.btc_shield_reason} | Altcoin Longs Paused to Prevent Correlated Stop-Outs.\n")
+            else:
+                print(f"[SHIELD 🛡️] Market Beta Status: {self.btc_shield_reason} | Regime: {self.btc_shield_regime_label}")
 
         except Exception as e:
             self.btc_shield_active = False
             self.btc_shield_code = "NORMAL"
-            self.btc_shield_reason = "NORMAL (Market Stable)"
-
-        if self.btc_shield_active:
-            print(f"\n[SHIELD 🛡️] ⚠️ BTC MARKET BETA SHIELD ACTIVATED: {self.btc_shield_reason} | Altcoin Longs Paused to Prevent Correlated Stop-Outs.\n")
-        else:
-            print(f"[SHIELD 🛡️] Market Beta Status: {self.btc_shield_reason}")
+            self.btc_shield_regime = "STABLE"
+            self.btc_shield_regime_label = "⚖️ BALANCED EQUILIBRIUM"
+            self.btc_shield_reason = "BALANCED MARKET"
+            print(f"[SHIELD Note evaluating BTC regime: {e}")
 
     def evaluate_single_horizon(self, symbol: str, horizon_key: str, h_cfg: dict, raw_dfs: dict, tf_features: dict, d1_macro_bull: bool, funding_info: dict = None, live_price: float = None) -> dict:
         anchor_tf = h_cfg['anchor_tf']
@@ -3537,7 +3782,24 @@ class HybridQuantEngine:
         trim_process_memory()
 
     def check_open_positions_heartbeat(self):
-        """Fast real-time ticker check: closes trade instantly if target touched within seconds."""
+        """Fast real-time ticker check: closes trade instantly if target touched within seconds, and refreshes BTC Shield."""
+        # Dynamic BTC Market Beta Shield Heartbeat (~every 15 seconds)
+        now_ts = time.time()
+        if (now_ts - getattr(self, "_last_btc_heartbeat_ts", 0)) >= 15.0:
+            self._last_btc_heartbeat_ts = now_ts
+            try:
+                btc_ticker = self.loader.fetch_ticker("BTC/USDT")
+                if btc_ticker and 'last' in btc_ticker and float(btc_ticker['last']) > 0:
+                    prev_regime = getattr(self, "btc_shield_regime", "")
+                    self.evaluate_btc_market_regime(live_btc_price=float(btc_ticker['last']))
+                    new_regime = getattr(self, "btc_shield_regime", "")
+                    time_since_sync = now_ts - getattr(self, "_last_shield_file_sync_ts", 0)
+                    if (prev_regime != new_regime) or (time_since_sync >= 45.0):
+                        self._last_shield_file_sync_ts = now_ts
+                        self._sync_live_shield_to_file()
+            except Exception:
+                pass
+
         if not self.config['paper_trading']['enabled'] or not self.ledger.data['open_positions']:
             return
 
@@ -3559,6 +3821,46 @@ class HybridQuantEngine:
             if new_open_count < prev_open_count:
                 print(f"[HEARTBEAT ⚡] Intra-candle target/stop touched! Position closed in real time.")
                 self.ledger.render_portfolio_card()
+
+    def _sync_live_shield_to_file(self):
+        """High-frequency real-time update of BTC Market Shield in exported JSON & database."""
+        try:
+            json_path = os.path.join(self.config['app_export_dir'], "live_market_forecast.json")
+            if os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                shield_payload = {
+                    "active": self.btc_shield_active,
+                    "status_code": getattr(self, "btc_shield_code", "NORMAL"),
+                    "regime": getattr(self, "btc_shield_regime", "STABLE"),
+                    "regime_label": getattr(self, "btc_shield_regime_label", "MARKET STABLE"),
+                    "reason": self.btc_shield_reason,
+                    "composite_score": getattr(self, "btc_composite_score", 0.0),
+                    "btc_price": getattr(self, "btc_price", 0.0),
+                    "btc_15m_change_pct": getattr(self, "btc_15m_change", 0.0),
+                    "btc_1h_change_pct": getattr(self, "btc_1h_change", 0.0),
+                    "btc_4h_change_pct": getattr(self, "btc_4h_change", 0.0),
+                    "btc_24h_change_pct": getattr(self, "btc_24h_change", 0.0),
+                    "btc_rsi_15m": getattr(self, "btc_rsi_15m", 50.0),
+                    "btc_rsi_1h": getattr(self, "btc_rsi_1h", 50.0),
+                    "btc_rsi_4h": getattr(self, "btc_rsi_4h", 50.0),
+                    "trend_structure": getattr(self, "btc_trend_structure", "Neutral / Stable"),
+                    "is_squeeze": getattr(self, "btc_is_squeeze", False),
+                    "bbw_15m_pct": getattr(self, "btc_bbw_15m", 0.0),
+                    "vol_ratio": getattr(self, "btc_vol_ratio", 1.0),
+                    "altcoin_longs_allowed": not self.btc_shield_active,
+                }
+                data["btc_market_shield"] = shield_payload
+                temp_path = json_path + ".tmp"
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, default=str)
+                os.replace(temp_path, json_path)
+
+                if HAS_DB_SYNC:
+                    sync_files_to_db_live()
+        except Exception:
+            pass
 
     def run(self):
         continuous = self.config.get("continuous_loop", True)
@@ -4007,9 +4309,22 @@ class HybridQuantEngine:
             "btc_market_shield": {
                 "active": self.btc_shield_active,
                 "status_code": getattr(self, "btc_shield_code", "NORMAL"),
+                "regime": getattr(self, "btc_shield_regime", "STABLE"),
+                "regime_label": getattr(self, "btc_shield_regime_label", "MARKET STABLE"),
                 "reason": self.btc_shield_reason,
+                "composite_score": getattr(self, "btc_composite_score", 0.0),
+                "btc_price": getattr(self, "btc_price", 0.0),
                 "btc_15m_change_pct": getattr(self, "btc_15m_change", 0.0),
                 "btc_1h_change_pct": getattr(self, "btc_1h_change", 0.0),
+                "btc_4h_change_pct": getattr(self, "btc_4h_change", 0.0),
+                "btc_24h_change_pct": getattr(self, "btc_24h_change", 0.0),
+                "btc_rsi_15m": getattr(self, "btc_rsi_15m", 50.0),
+                "btc_rsi_1h": getattr(self, "btc_rsi_1h", 50.0),
+                "btc_rsi_4h": getattr(self, "btc_rsi_4h", 50.0),
+                "trend_structure": getattr(self, "btc_trend_structure", "Neutral / Stable"),
+                "is_squeeze": getattr(self, "btc_is_squeeze", False),
+                "bbw_15m_pct": getattr(self, "btc_bbw_15m", 0.0),
+                "vol_ratio": getattr(self, "btc_vol_ratio", 1.0),
                 "altcoin_longs_allowed": not self.btc_shield_active,
             },
             "top_round_signals": top_signals or [],

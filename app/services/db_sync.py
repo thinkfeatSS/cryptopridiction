@@ -250,6 +250,8 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                         unrealized_pnl_usd=float(op.get("unrealized_pnl_usd", 0.0)),
                         unrealized_pnl_pct=float(op.get("unrealized_pnl_pct", 0.0)),
                         target_progress_pct=float(op.get("target_progress_pct", 0.0)),
+                        buy_fee_usd=float(op.get("buy_fee_usd", op.get("entry_fee_usd", 0.0))),
+                        est_sell_fee_usd=float(op.get("est_sell_fee_usd", 0.0)),
                         unrealized_fee_usd=float(op.get("unrealized_fee_usd", 0.0)),
                         opened_at=str(op.get("opened_at", "")),
                         expiry_time=str(op.get("expiry_time", "")),
@@ -281,6 +283,8 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                             exit_reason=str(ct.get("exit_reason", "")),
                             outcome=str(ct.get("outcome", "")),
                             gross_pnl_usd=float(ct.get("gross_pnl_usd", 0.0)),
+                            buy_fee_usd=float(ct.get("buy_fee_usd", 0.0)),
+                            sell_fee_usd=float(ct.get("sell_fee_usd", 0.0)),
                             binance_fee_usd=float(ct.get("binance_fee_usd", 0.0)),
                             realized_pnl_usd=float(ct.get("realized_pnl_usd", 0.0)),
                             realized_pnl_pct=float(ct.get("realized_pnl_pct", 0.0)),
@@ -316,9 +320,12 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                         top_round_signals_json=json.dumps(f_data.get("top_round_signals", [])),
                         scanner_leaderboard_json=json.dumps(f_data.get("scanner_leaderboard", [])),
                         deep_dive_json=json.dumps(f_data.get("deep_dive", {})),
-                        btc_market_shield_json=json.dumps(f_data.get("btc_market_shield", {"active": False, "reason": "NORMAL (Market Stable)"})),
+                        btc_market_shield_json=json.dumps(f_data.get("btc_market_shield", {"active": False, "reason": "RANGE CONSOLIDATION"})),
                     )
                     db.add(mf)
+                    db.commit()
+                else:
+                    existing_f.btc_market_shield_json = json.dumps(f_data.get("btc_market_shield", {"active": False, "reason": "RANGE CONSOLIDATION"}))
                     db.commit()
 
                 _LAST_SYNC_TIMES["forecast"] = forecast_mtime

@@ -18,6 +18,7 @@ import {
   AlertTriangle,
   CheckCircle2,
 } from "lucide-react";
+import TradeProgressBar from "./TradeProgressBar";
 
 export default function PortfolioView() {
   const queryClient = useQueryClient();
@@ -69,7 +70,7 @@ export default function PortfolioView() {
               <li>Wipe previous closed trade history</li>
               <li>Reset wallet capital back to clean <span className="text-emerald-400 font-bold">$100.00</span></li>
               <li>Activate 4H / 24H / Daily spot trades ($10 max 10 trades)</li>
-              <li>Enforce &ge; 5.0% net profit return under Binance Convert (0% fee, &plusmn;0.10% spread)</li>
+              <li>Enforce &ge; 5.0% net profit target with 100% real Binance Spot fees (0.10% buy + 0.10% sell)</li>
             </ul>
 
             <div className="mt-5 flex items-center justify-end gap-3">
@@ -145,7 +146,7 @@ export default function PortfolioView() {
               🎯 Min +5.0% Net Profit
             </span>
             <span className="rounded-md bg-amber-950/60 px-2 py-1 text-amber-300 border border-amber-800/60">
-              🔄 Convert (±0.1% Spread, 0% Fee)
+              ⚡ Binance Spot (0.10% Buy + 0.10% Sell Fee)
             </span>
           </div>
 
@@ -228,45 +229,49 @@ export default function PortfolioView() {
                     </div>
                   </div>
 
-                  {/* Progress to Target Bar */}
-                  <div className="mt-3">
-                    <div className="flex items-center justify-between text-[11px] font-mono">
-                      <span className="text-slate-400 flex items-center gap-1">
-                        <Target className="h-3 w-3 text-cyan-400" /> Progress to TP
-                      </span>
-                      <span className={`font-bold ${progress >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                        {progress >= 0 ? "+" : ""}{progress.toFixed(1)}%
-                      </span>
-                    </div>
-                    <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-800">
-                      <div
-                        className={`h-full transition-all duration-500 rounded-full ${
-                          progress >= 0 ? "bg-gradient-to-r from-cyan-500 to-emerald-400" : "bg-rose-500"
-                        }`}
-                        style={{ width: `${Math.max(5, Math.abs(progress))}%` }}
-                      />
-                    </div>
-                  </div>
+                  {/* Institutional Bi-Directional SL <-> Buy/Entry <-> TP Live Progress Line */}
+                  <TradeProgressBar
+                    entryPrice={pos.entry_price}
+                    currentPrice={pos.current_price}
+                    tpPrice={pos.tp_price}
+                    slPrice={pos.sl_price}
+                    direction={pos.direction}
+                    targetProgressPct={pos.target_progress_pct}
+                  />
                 </div>
 
-                {/* Bottom PnL & Fee Bar */}
-                <div className="mt-4 flex items-center justify-between border-t border-slate-800/60 pt-2.5 text-xs">
-                  <div>
-                    <span className="text-[10px] text-slate-400">
-                      {pos.execution_engine === "binance_convert" ? "Convert Fee:" : "Fee (Est):"}
-                    </span>{" "}
-                    <span className="text-slate-300 font-mono">
-                      {pos.execution_engine === "binance_convert" ? "$0.00 (Zero Fee)" : `-$${pos.unrealized_fee_usd?.toFixed(2) || "0.00"}`}
-                    </span>
+                {/* Bottom PnL & Binance 100% Real Fee Bar */}
+                <div className="mt-4 border-t border-slate-800/60 pt-2.5">
+                  <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[10px] uppercase font-bold text-slate-400">Binance Fees:</span>
+                      <span className="bg-dark-950 px-1.5 py-0.5 rounded border border-slate-800 text-slate-300">
+                        Buy: -${(pos.buy_fee_usd ?? 0.01).toFixed(2)}
+                      </span>
+                      <span className="bg-dark-950 px-1.5 py-0.5 rounded border border-slate-800 text-slate-300">
+                        Est Sell: -${(pos.est_sell_fee_usd ?? 0.01).toFixed(2)}
+                      </span>
+                    </div>
+
+                    <div className="text-right">
+                      <span className="text-[10px] text-slate-400 uppercase font-semibold">Net Unrealized PnL</span>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <span
+
+                  <div className="mt-1 flex items-baseline justify-between">
+                    <div className="text-[10px] text-slate-400 font-mono">
+                      Gross: <span className={pos.unrealized_gross_pnl_usd && pos.unrealized_gross_pnl_usd >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>
+                        {pos.unrealized_gross_pnl_usd && pos.unrealized_gross_pnl_usd >= 0 ? "+" : ""}{formatUsd(pos.unrealized_gross_pnl_usd ?? 0.0)}
+                      </span>
+                    </div>
+
+                    <div
                       className={`text-sm font-black font-mono ${
                         uPnl >= 0 ? "text-emerald-400" : "text-rose-400"
                       }`}
                     >
                       {uPnl >= 0 ? "+" : ""}{formatUsd(uPnl)} ({formatPercent(uPct)})
-                    </span>
+                    </div>
                   </div>
                 </div>
               </div>

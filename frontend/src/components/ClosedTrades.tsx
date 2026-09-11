@@ -107,18 +107,34 @@ export default function ClosedTrades() {
                     {/* Duration */}
                     <td className="py-3 px-4 text-slate-400">{t.duration_str || "N/A"}</td>
 
-                    {/* Fee */}
-                    <td className="py-3 px-4 text-slate-400">-${t.binance_fee_usd?.toFixed(2) || "0.00"}</td>
+                    {/* Binance Fees (Buy + Sell) */}
+                    <td className="py-3 px-4">
+                      <div className="flex flex-col text-[11px]">
+                        <span className="text-slate-300 font-bold">
+                          -${(t.binance_fee_usd ?? 0.02).toFixed(2)}
+                        </span>
+                        <span className="text-[10px] text-slate-500">
+                          B: -${(t.buy_fee_usd ?? 0.01).toFixed(2)} | S: -${(t.sell_fee_usd ?? 0.01).toFixed(2)}
+                        </span>
+                      </div>
+                    </td>
 
                     {/* Net Realized Return */}
                     <td className="py-3 px-4 text-right">
-                      <span
-                        className={`text-sm font-bold ${
-                          netPnl >= 0 ? "text-emerald-400" : "text-rose-400"
-                        }`}
-                      >
-                        {netPnl >= 0 ? "+" : ""}{formatUsd(netPnl)} ({formatPercent(netPct)})
-                      </span>
+                      <div className="flex flex-col items-end">
+                        <span
+                          className={`text-sm font-bold ${
+                            netPnl >= 0 ? "text-emerald-400" : "text-rose-400"
+                          }`}
+                        >
+                          {netPnl >= 0 ? "+" : ""}{formatUsd(netPnl)} ({formatPercent(netPct)})
+                        </span>
+                        {t.gross_pnl_usd !== undefined && (
+                          <span className="text-[10px] text-slate-500">
+                            Gross: {t.gross_pnl_usd >= 0 ? "+" : ""}{formatUsd(t.gross_pnl_usd)}
+                          </span>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );

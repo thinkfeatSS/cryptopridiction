@@ -62,10 +62,23 @@ export interface DailySummaryItem {
 
 export interface BtcMarketShield {
   active: boolean;
-  status_code?: "NORMAL" | "BULL_MOMENTUM" | "CAUTION" | "DEFENSIVE" | "ALERT_DUMP" | string;
+  status_code?: "NORMAL" | "BULL_MOMENTUM" | "BEAR_MOMENTUM" | "CONSOLIDATION" | "CAUTION" | "DEFENSIVE" | "ALERT_DUMP" | string;
+  regime?: string;
+  regime_label?: string;
   reason: string;
+  composite_score?: number;
+  btc_price?: number;
   btc_15m_change_pct?: number;
   btc_1h_change_pct?: number;
+  btc_4h_change_pct?: number;
+  btc_24h_change_pct?: number;
+  btc_rsi_15m?: number;
+  btc_rsi_1h?: number;
+  btc_rsi_4h?: number;
+  trend_structure?: string;
+  is_squeeze?: boolean;
+  bbw_15m_pct?: number;
+  vol_ratio?: number;
   altcoin_longs_allowed?: boolean;
 }
 
@@ -100,11 +113,17 @@ export interface OpenPosition {
   raw_entry_price?: number;
   current_price: number;
   tp_price: number;
+  tp1_price?: number;
+  tp2_price?: number;
+  tp3_price?: number;
   sl_price: number;
+  unrealized_gross_pnl_usd?: number;
+  buy_fee_usd?: number;
+  est_sell_fee_usd?: number;
+  unrealized_fee_usd: number;
   unrealized_pnl_usd: number;
   unrealized_pnl_pct: number;
   target_progress_pct: number;
-  unrealized_fee_usd: number;
   opened_at: string;
   expiry_time: string;
 }
@@ -122,6 +141,8 @@ export interface ClosedTradeItem {
   exit_reason: string;
   outcome: "WON" | "LOST" | "BREAKEVEN" | string;
   gross_pnl_usd: number;
+  buy_fee_usd?: number;
+  sell_fee_usd?: number;
   binance_fee_usd: number;
   realized_pnl_usd: number;
   realized_pnl_pct: number;

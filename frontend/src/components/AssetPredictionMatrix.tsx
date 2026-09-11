@@ -400,6 +400,12 @@ export default function AssetPredictionMatrix() {
     }
   }, [sortHorizon, sortOrder]);
 
+  const handleResetSort = useCallback(() => {
+    setSortHorizon("scalp");
+    setSortOrder("none");
+    setBiasFilter("all");
+  }, []);
+
   const filteredAssets = useMemo(() => {
     let list = leaderboard;
 
@@ -628,7 +634,7 @@ export default function AssetPredictionMatrix() {
               <SlidersHorizontal className="h-3.5 w-3.5 text-cyan-400" />
               Sort Horizon:
             </span>
-            <div className="flex items-center gap-1 bg-dark-950/90 p-1 rounded-lg border border-slate-800">
+            <div className="flex items-center gap-1 bg-dark-950/90 p-1 rounded-lg border border-slate-800 flex-wrap">
               {SORT_HORIZONS.map((h) => (
                 <button
                   key={h.key}
@@ -643,6 +649,21 @@ export default function AssetPredictionMatrix() {
                   {h.label}
                 </button>
               ))}
+
+              {/* Reset Horizon Button */}
+              <button
+                type="button"
+                onClick={handleResetSort}
+                className={`flex items-center gap-1 px-2.5 py-1 text-xs font-bold rounded-md transition-all border ${
+                  sortOrder !== "none" || biasFilter !== "all" || sortHorizon !== "scalp"
+                    ? "bg-rose-500/20 text-rose-300 border-rose-500/50 hover:bg-rose-500/30 shadow-sm shadow-rose-500/20"
+                    : "text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-800/50"
+                }`}
+                title="Reset Sort Horizon to default (⚡ Scalp 15M) and clear stance sorting"
+              >
+                <RotateCcw className="h-3 w-3" />
+                <span>Reset</span>
+              </button>
             </div>
           </div>
 
