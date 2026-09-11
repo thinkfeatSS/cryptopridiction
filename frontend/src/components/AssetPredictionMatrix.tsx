@@ -33,6 +33,7 @@ import {
   CircleDot,
 } from "lucide-react";
 import { useWatchlist } from "@/hooks/useWatchlist";
+import { useRelativeTime, formatRelativeMinutes, formatServerPredictionTime } from "@/hooks/useRelativeTime";
 
 type HorizonKey =
   | "all"
@@ -41,23 +42,41 @@ type HorizonKey =
   | "trend_expansion"
   | "watchlist"
   | "scalp"
+  | "horizon_30m"
   | "swing"
+  | "horizon_4h"
+  | "horizon_12h"
   | "macro"
-  | "horizon_2d"
-  | "horizon_3d"
+  | "horizon_4d"
   | "weekly"
   | "biweekly"
   | "monthly";
 
-export type HorizonSortKey = "scalp" | "swing" | "macro" | "weekly" | "monthly";
+export type HorizonSortKey =
+  | "scalp"
+  | "horizon_30m"
+  | "swing"
+  | "horizon_4h"
+  | "horizon_12h"
+  | "macro"
+  | "horizon_4d"
+  | "weekly"
+  | "biweekly"
+  | "monthly";
+
 export type BiasSortOrder = "bullish_first" | "bearish_first" | "consolidate_first" | "none";
 export type BiasFilter = "all" | "bullish" | "consolidate" | "bearish";
 
 export const SORT_HORIZONS: { key: HorizonSortKey; label: string; short: string }[] = [
   { key: "scalp", label: "⚡ Scalp (15M)", short: "15M" },
+  { key: "horizon_30m", label: "⏱️ 30M", short: "30M" },
   { key: "swing", label: "🌊 Swing (1H)", short: "1H" },
+  { key: "horizon_4h", label: "⏳ Intraday (4H)", short: "4H" },
+  { key: "horizon_12h", label: "🌗 12H", short: "12H" },
   { key: "macro", label: "🚀 Macro (24H)", short: "24H" },
+  { key: "horizon_4d", label: "📅 4D", short: "4D" },
   { key: "weekly", label: "🗓️ Weekly (7D)", short: "7D" },
+  { key: "biweekly", label: "📆 15D", short: "15D" },
   { key: "monthly", label: "🪐 Monthly (30D)", short: "30D" },
 ];
 
@@ -250,6 +269,84 @@ function renderSignalCell(h?: any) {
   );
 }
 
+// Asset & Confluence Cell with Server Date/Time and live ticking relative updates
+function AssetConfluenceCell({
+  item,
+  livePrice,
+  confTag,
+  isStarred,
+  toggleWatchlist,
+  idx,
+  serverPredictionTimeFallback,
+}: {
+  item: any;
+  livePrice: number;
+  confTag: string;
+  isStarred: boolean;
+  toggleWatchlist: (s: string) => void;
+  idx: number;
+  serverPredictionTimeFallback?: string | number;
+}) {
+  const itemTime = item.server_prediction_time || item.server_prediction_ts || serverPredictionTimeFallback;
+  const relTime = useRelativeTime(itemTime);
+  const formattedTime = formatServerPredictionTime(itemTime);
+
+  return (
+    <td className="py-3 px-4 min-w-[215px]">
+      <div className="flex items-start gap-2">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleWatchlist(item.symbol);
+          }}
+          className="p-1 mt-0.5 text-slate-500 hover:text-amber-400 transition-colors shrink-0"
+          title={isStarred ? "Remove from Watchlist" : "Add to Watchlist"}
+        >
+          <Star
+            className={`h-3.5 w-3.5 ${
+              isStarred ? "fill-amber-400 text-amber-400" : ""
+            }`}
+          />
+        </button>
+        <div className="flex flex-col gap-1 w-full">
+          {/* Confluence Tag Badge */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="rounded bg-dark-900 px-1.5 py-0.5 text-[9.5px] font-bold text-cyan-300 border border-slate-800 tracking-tight flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
+              {confTag}
+            </span>
+            {idx === 0 && (
+              <span className="inline-flex items-center gap-1 rounded bg-amber-950/80 px-1 py-0.5 text-[9px] font-bold text-amber-300 border border-amber-500/50">
+                🥇 TOP
+              </span>
+            )}
+          </div>
+
+          {/* Symbol & Price */}
+          <div className="flex items-baseline justify-between gap-1.5">
+            <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1">
+              {item.symbol}
+              <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+            </span>
+            <span className="text-xs font-mono font-semibold text-cyan-400">
+              ({formatUsd(livePrice)})
+            </span>
+          </div>
+
+          {/* Small Date & Time of Prediction at Server + Relative Updates */}
+          <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+            <Clock className="h-2.5 w-2.5 text-slate-500 shrink-0" />
+            <span className="text-slate-300">{formattedTime}</span>
+            <span className="text-slate-600">•</span>
+            <span className="text-emerald-400 font-medium">({relTime})</span>
+          </div>
+        </div>
+      </div>
+    </td>
+  );
+}
+
 export default function AssetPredictionMatrix() {
   const { data: forecast, isLoading } = useForecastQuery();
   const { data: status } = useStatusQuery();
@@ -259,6 +356,9 @@ export default function AssetPredictionMatrix() {
   const [selectedHorizon, setSelectedHorizon] = useState<HorizonKey>("all");
   const [search, setSearch] = useState("");
   const [selectedCoin, setSelectedCoin] = useState<{ symbol: string; price?: number } | null>(null);
+
+  const serverSyncRelative = useRelativeTime(forecast?.server_prediction_time || forecast?.timestamp);
+  const serverSyncTimeFormatted = formatServerPredictionTime(forecast?.server_prediction_time || forecast?.timestamp);
 
   // User-configurable Horizon Stance Sorting & Filtering
   const [sortHorizon, setSortHorizon] = useState<HorizonSortKey>("scalp");
@@ -386,18 +486,20 @@ export default function AssetPredictionMatrix() {
 
   const horizonTabs: { key: HorizonKey; label: string }[] = useMemo(
     () => [
-      { key: "all", label: "All Horizons Matrix" },
-      { key: "high_confluence", label: "💎 High Confluence (≥5/8)" },
+      { key: "all", label: "All Horizons Matrix (10TF)" },
+      { key: "high_confluence", label: "💎 High Confluence (≥6/10)" },
       { key: "reversals", label: "⚡ Reversals & Bounces" },
       { key: "trend_expansion", label: "🚀 Trend Expansion" },
       { key: "watchlist", label: `⭐ Watchlist (${watchlist.length})` },
       { key: "scalp", label: "⚡ Scalp (15M)" },
+      { key: "horizon_30m", label: "⏱️ 30M" },
       { key: "swing", label: "🌊 Swing (1H)" },
+      { key: "horizon_4h", label: "⏳ Intraday (4H)" },
+      { key: "horizon_12h", label: "🌗 12H" },
       { key: "macro", label: "🚀 Macro (24H)" },
-      { key: "horizon_2d", label: "🔮 2-Day (48H)" },
-      { key: "horizon_3d", label: "🔭 3-Day (72H)" },
+      { key: "horizon_4d", label: "📅 4D" },
       { key: "weekly", label: "🗓️ Weekly (7D)" },
-      { key: "biweekly", label: "🌕 Bi-Weekly (15D)" },
+      { key: "biweekly", label: "📆 15D" },
       { key: "monthly", label: "🪐 Monthly (30D)" },
     ],
     [watchlist.length]
@@ -461,18 +563,18 @@ export default function AssetPredictionMatrix() {
           <div className="flex items-center gap-2.5">
             <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
               <Compass className="h-5 w-5 text-cyan-400" />
-              Complete Top 100-Asset Multi-Horizon Prediction Matrix
+              Complete Top 200-Asset Multi-Horizon Prediction Matrix
             </h2>
             <span className="rounded-md bg-dark-900 px-2.5 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50">
-              {filteredAssets.length} of {leaderboard.length || 100} Assets
+              {filteredAssets.length} of {leaderboard.length || 200} Assets
             </span>
             <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-bold text-emerald-400 border border-emerald-500/30">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-              LIVE TICKER SYNC
+              SERVER SYNC: {serverSyncRelative}
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Multi-timeframe AI prediction matrix with Hysteresis noise-filtering, 8-horizon confluence scoring, and institutional phase tags.{" "}
+            Multi-timeframe AI prediction matrix with Hysteresis noise-filtering, 10-horizon confluence scoring, and institutional phase tags.{" "}
             <span className="text-cyan-400 font-semibold underline decoration-dotted">
               Click column headers or toolbar buttons to sort by Bullish, Consolidate, or Bearish stance across horizons.
             </span>
@@ -482,15 +584,15 @@ export default function AssetPredictionMatrix() {
 
       {/* Controls & Horizon Tabs */}
       <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        {/* Horizon Filter Tabs (8 Horizons Spectrum) */}
+        {/* Horizon Filter Tabs (10 Horizons Spectrum) */}
         <div className="flex items-center gap-1 rounded-xl bg-dark-900/90 p-1 border border-slate-800 overflow-x-auto max-w-full">
           {horizonTabs.map((tab) => (
             <button
               key={tab.key}
               onClick={() => {
                 setSelectedHorizon(tab.key);
-                if (tab.key === "scalp" || tab.key === "swing" || tab.key === "macro" || tab.key === "weekly" || tab.key === "monthly") {
-                  setSortHorizon(tab.key);
+                if (SORT_HORIZONS.some((h) => h.key === tab.key)) {
+                  setSortHorizon(tab.key as HorizonSortKey);
                 }
               }}
               className={`whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all ${
@@ -509,7 +611,7 @@ export default function AssetPredictionMatrix() {
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
           <input
             type="text"
-            placeholder="Search 100 assets..."
+            placeholder="Search 200 assets..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full rounded-xl bg-dark-900/90 pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 border border-slate-800 focus:border-cyan-500 focus:outline-none"
@@ -686,14 +788,19 @@ export default function AssetPredictionMatrix() {
         <table className="w-full text-left text-xs text-slate-300 font-mono">
           <thead className="bg-dark-900/90 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
             <tr>
-              <th className="py-3 px-4"># / Asset &amp; Confluence</th>
+              <th className="py-3 px-4 min-w-[215px]"># / Asset &amp; Confluence</th>
               {selectedHorizon === "all" || selectedHorizon === "high_confluence" || selectedHorizon === "reversals" || selectedHorizon === "trend_expansion" || selectedHorizon === "watchlist" ? (
                 <>
-                  {renderSortableHeader("scalp", "⚡ Scalp (15M)")}
-                  {renderSortableHeader("swing", "🌊 Swing (1H)")}
-                  {renderSortableHeader("macro", "🚀 Macro (24H)")}
-                  {renderSortableHeader("weekly", "🗓️ Weekly (7D)")}
-                  {renderSortableHeader("monthly", "🪐 Monthly (30D)")}
+                  {renderSortableHeader("scalp", "⚡ 15M")}
+                  {renderSortableHeader("horizon_30m", "⏱️ 30M")}
+                  {renderSortableHeader("swing", "🌊 1H")}
+                  {renderSortableHeader("horizon_4h", "⏳ 4H")}
+                  {renderSortableHeader("horizon_12h", "🌗 12H")}
+                  {renderSortableHeader("macro", "🚀 24H")}
+                  {renderSortableHeader("horizon_4d", "📅 4D")}
+                  {renderSortableHeader("weekly", "🗓️ 7D")}
+                  {renderSortableHeader("biweekly", "📆 15D")}
+                  {renderSortableHeader("monthly", "🪐 30D")}
                   <th className="py-3 px-4 text-right">Radar Confluence</th>
                 </>
               ) : (
@@ -737,22 +844,27 @@ export default function AssetPredictionMatrix() {
           <tbody className="divide-y divide-slate-800/60 bg-dark-950/40">
             {isLoading ? (
               <tr>
-                <td colSpan={8} className="py-12 text-center text-slate-500 font-sans">
-                  Loading Top 100 asset predictions from latest multi-horizon scan...
+                <td colSpan={12} className="py-12 text-center text-slate-500 font-sans">
+                  Loading Top 200 asset predictions from latest multi-horizon scan...
                 </td>
               </tr>
             ) : filteredAssets.length === 0 ? (
               <tr>
-                <td colSpan={8} className="py-12 text-center text-slate-500 font-sans">
+                <td colSpan={12} className="py-12 text-center text-slate-500 font-sans">
                   No assets match the selected filter.
                 </td>
               </tr>
             ) : (
               filteredAssets.map((item: any, idx: number) => {
                 const s = item.horizons?.scalp || {};
+                const h30m = item.horizons?.horizon_30m || {};
                 const w = item.horizons?.swing || {};
+                const h4h = item.horizons?.horizon_4h || {};
+                const h12h = item.horizons?.horizon_12h || {};
                 const m = item.horizons?.macro || {};
+                const h4d = item.horizons?.horizon_4d || {};
                 const h7d = item.horizons?.weekly || {};
+                const h15d = item.horizons?.biweekly || {};
                 const h30d = item.horizons?.monthly || {};
                 const isTriple = item.is_triple_confluence;
                 const confTag = item.confluence_tag || (isTriple ? "💎 TRIPLE CONFLUENCE" : `Score: ${item.alignment_score ?? 0}%`);
@@ -785,48 +897,19 @@ export default function AssetPredictionMatrix() {
                     <tr
                       key={item.symbol}
                       onClick={() => setSelectedCoin({ symbol: item.symbol, price: livePrice })}
-                      className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
+                      className="matrix-row-virtual hover:bg-slate-800/60 cursor-pointer transition-colors group"
                       title="Click to view 15-minute historical signal records for this coin"
                     >
-                      {/* Asset & Price */}
-                      <td className="py-3 px-4">
-                        <div className="flex items-start gap-2 min-w-[170px]">
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              toggleWatchlist(item.symbol);
-                            }}
-                            className="p-1 mt-0.5 text-slate-500 hover:text-amber-400 transition-colors shrink-0"
-                            title={isStarred(item.symbol) ? "Remove from Watchlist" : "Add to Watchlist"}
-                          >
-                            <Star
-                              className={`h-3.5 w-3.5 ${
-                                isStarred(item.symbol) ? "fill-amber-400 text-amber-400" : ""
-                              }`}
-                            />
-                          </button>
-                          <div className="flex flex-col gap-1">
-                            {/* Confluence Tag Badge */}
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="rounded bg-dark-900 px-1.5 py-0.5 text-[9px] font-bold text-cyan-300 border border-slate-800">
-                                {confTag}
-                              </span>
-                            </div>
-
-                            {/* Symbol & Price */}
-                            <div className="flex items-baseline gap-1.5">
-                              <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1">
-                                {item.symbol}
-                                <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                              </span>
-                              <span className="text-xs font-mono font-semibold text-cyan-400">
-                                ({formatUsd(livePrice)})
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-                      </td>
+                      {/* Asset & Confluence Cell with Server Time */}
+                      <AssetConfluenceCell
+                        item={item}
+                        livePrice={livePrice}
+                        confTag={confTag}
+                        isStarred={isStarred(item.symbol)}
+                        toggleWatchlist={toggleWatchlist}
+                        idx={idx}
+                        serverPredictionTimeFallback={forecast?.server_prediction_time || forecast?.timestamp}
+                      />
 
                       {/* Direction */}
                       <td className="py-3 px-4">
@@ -888,76 +971,67 @@ export default function AssetPredictionMatrix() {
                   <tr
                     key={item.symbol}
                     onClick={() => setSelectedCoin({ symbol: item.symbol, price: livePrice })}
-                    className="hover:bg-slate-800/60 cursor-pointer transition-colors group"
+                    className="matrix-row-virtual hover:bg-slate-800/60 cursor-pointer transition-colors group"
                     title="Click to view 15-minute historical signal records for this coin"
                   >
-                    {/* Asset, Price & Radar Confluence Tag */}
-                    <td className="py-3 px-4">
-                      <div className="flex items-start gap-2 min-w-[175px]">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleWatchlist(item.symbol);
-                          }}
-                          className="p-1 mt-0.5 text-slate-500 hover:text-amber-400 transition-colors shrink-0"
-                          title={isStarred(item.symbol) ? "Remove from Watchlist" : "Add to Watchlist"}
-                        >
-                          <Star
-                            className={`h-3.5 w-3.5 ${
-                              isStarred(item.symbol) ? "fill-amber-400 text-amber-400" : ""
-                            }`}
-                          />
-                        </button>
-                        <div className="flex flex-col gap-1">
-                          {/* Confluence Badge */}
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="rounded bg-dark-900 px-1.5 py-0.5 text-[9.5px] font-bold text-cyan-300 border border-slate-800 tracking-tight">
-                              {confTag}
-                            </span>
-                            {idx === 0 && (
-                              <span className="inline-flex items-center gap-1 rounded bg-amber-950/80 px-1 py-0.5 text-[9px] font-bold text-amber-300 border border-amber-500/50">
-                                🥇 TOP
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Symbol & Price */}
-                          <div className="flex items-baseline gap-1.5">
-                            <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1">
-                              {item.symbol}
-                              <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-                            </span>
-                            <span className="text-xs font-mono font-semibold text-cyan-400">
-                              ({formatUsd(livePrice)})
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </td>
+                    {/* Asset & Confluence Cell with Server Time */}
+                    <AssetConfluenceCell
+                      item={item}
+                      livePrice={livePrice}
+                      confTag={confTag}
+                      isStarred={isStarred(item.symbol)}
+                      toggleWatchlist={toggleWatchlist}
+                      idx={idx}
+                      serverPredictionTimeFallback={forecast?.server_prediction_time || forecast?.timestamp}
+                    />
 
                     {/* Scalp (15M) */}
-                    <td className={`py-3 px-4 transition-colors ${activeHorizonKey === "scalp" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "scalp" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
                       {renderSignalCell(s)}
                     </td>
 
+                    {/* 30M */}
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_30m" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                      {renderSignalCell(h30m)}
+                    </td>
+
                     {/* Swing (1H) */}
-                    <td className={`py-3 px-4 transition-colors ${activeHorizonKey === "swing" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "swing" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
                       {renderSignalCell(w)}
                     </td>
 
+                    {/* 4H (Intraday) */}
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4h" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                      {renderSignalCell(h4h)}
+                    </td>
+
+                    {/* 12H */}
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_12h" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                      {renderSignalCell(h12h)}
+                    </td>
+
                     {/* Macro (24H) */}
-                    <td className={`py-3 px-4 transition-colors ${activeHorizonKey === "macro" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "macro" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
                       {renderSignalCell(m)}
                     </td>
 
+                    {/* 4D */}
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4d" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                      {renderSignalCell(h4d)}
+                    </td>
+
                     {/* Weekly (7D) */}
-                    <td className={`py-3 px-4 transition-colors ${activeHorizonKey === "weekly" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "weekly" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
                       {renderSignalCell(h7d)}
                     </td>
 
+                    {/* Bi-Weekly (15D) */}
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "biweekly" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                      {renderSignalCell(h15d)}
+                    </td>
+
                     {/* Monthly (30D) */}
-                    <td className={`py-3 px-4 transition-colors ${activeHorizonKey === "monthly" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
+                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "monthly" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
                       {renderSignalCell(h30d)}
                     </td>
 
@@ -966,9 +1040,9 @@ export default function AssetPredictionMatrix() {
                       <div className="flex flex-col items-end gap-1">
                         <span
                           className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-black border ${
-                            item.confluence_bull_count >= 5
+                            item.confluence_bull_count >= 6
                               ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/60"
-                              : item.confluence_bear_count >= 5
+                              : item.confluence_bear_count >= 6
                               ? "bg-rose-950/80 text-rose-300 border-rose-500/60"
                               : "bg-slate-900/90 text-slate-400 border-slate-800"
                           }`}

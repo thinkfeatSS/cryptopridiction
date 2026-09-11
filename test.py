@@ -113,8 +113,8 @@ CONFIG = {
     "mode": "both",               # "both", "scanner", or "single"
     "continuous_loop": True,      # 24/7 Background Watcher Loop
     "scanner_mode": "top_volume", # "top_volume" (dynamic auto-discovery of all active Binance coins), "expanded_universe", or "custom_list"
-    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "100")), # Top 100 volume Binance coins (full market coverage)
-    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "16")), # 16 Concurrency worker threads (high throughput)
+    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "200")), # Top 200 volume Binance coins (full market coverage)
+    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "20")), # 20 Concurrency worker threads (high throughput)
     "heartbeat_interval_seconds": int(os.getenv("HEARTBEAT_SECONDS", "4")), # Fast intra-candle position monitoring
     "single_symbol": "BTC/USDT",
     "scanner_symbols": [
@@ -135,7 +135,7 @@ CONFIG = {
         "LISTA/USDT", "VOXEL/USDT", "TRX/USDT", "BCH/USDT", "HBAR/USDT"
     ],
     "timeframes": ["1d", "4h", "1h", "15m"],
-    # Multi-Horizon Definitions: Minutes, Hours, Days, Weeks, and Months
+    # Multi-Horizon Definitions: 10 Horizons Spectrum + Radar Confluence
     "horizons": {
         "scalp": {
             "name": "⚡ Scalp (15M)",
@@ -145,11 +145,19 @@ CONFIG = {
             "tp_mult": 2.0,
             "sl_mult": 1.0
         },
+        "horizon_30m": {
+            "name": "⏱️ 30M",
+            "anchor_tf": "15m",
+            "bars": 2,
+            "duration_label": "30 Mins",
+            "tp_mult": 2.2,
+            "sl_mult": 1.1
+        },
         "swing": {
             "name": "🌊 Swing (1H)",
             "anchor_tf": "1h",
-            "bars": 2,
-            "duration_label": "2 Hours",
+            "bars": 1,
+            "duration_label": "1 Hour",
             "tp_mult": 2.5,
             "sl_mult": 1.2
         },
@@ -161,6 +169,14 @@ CONFIG = {
             "tp_mult": 2.8,
             "sl_mult": 1.4
         },
+        "horizon_12h": {
+            "name": "🌗 12H",
+            "anchor_tf": "4h",
+            "bars": 3,
+            "duration_label": "12 Hours",
+            "tp_mult": 2.9,
+            "sl_mult": 1.45
+        },
         "macro": {
             "name": "🚀 Macro (24H)",
             "anchor_tf": "1d",
@@ -169,6 +185,14 @@ CONFIG = {
             "tp_mult": 3.0,
             "sl_mult": 1.5
         },
+        "horizon_4d": {
+            "name": "📅 4D",
+            "anchor_tf": "1d",
+            "bars": 4,
+            "duration_label": "4 Days",
+            "tp_mult": 4.0,
+            "sl_mult": 2.0
+        },
         "weekly": {
             "name": "🗓️ Weekly (7D)",
             "anchor_tf": "1d",
@@ -176,6 +200,14 @@ CONFIG = {
             "duration_label": "7 Days",
             "tp_mult": 5.0,
             "sl_mult": 2.5
+        },
+        "biweekly": {
+            "name": "📆 15D",
+            "anchor_tf": "1d",
+            "bars": 15,
+            "duration_label": "15 Days",
+            "tp_mult": 6.5,
+            "sl_mult": 3.25
         },
         "monthly": {
             "name": "🪐 Monthly (30D)",
@@ -3192,22 +3224,30 @@ class HybridQuantEngine:
         is_scalp_bottom = "BOTTOM-REVERSAL" in scalp_h.get('decision', '') or "DIP-BUY" in scalp_h.get('decision', '')
         is_scalp_top = "TOP-REVERSAL" in scalp_h.get('decision', '') or "RALLY-SELL" in scalp_h.get('decision', '')
         
-        if bull_count >= 7:
+        if bull_count >= 8:
             confluence_tag = f"💎 {bull_count}/{total_h} BULL EXPANSION"
             market_phase = "🚀 BULL_TREND_EXPANSION"
             consistency_index = 95.0
-        elif bear_count >= 7:
+        elif bear_count >= 8:
             confluence_tag = f"💎 {bear_count}/{total_h} BEAR BREAKDOWN"
             market_phase = "🩸 BEAR_TREND_EXPANSION"
             consistency_index = 95.0
-        elif bull_count >= 5:
+        elif bull_count >= 6:
             confluence_tag = f"🟢 {bull_count}/{total_h} STRONG BULLISH"
             market_phase = "🚀 BULL_TREND_EXPANSION" if macro_h.get('direction') == 'BULLISH' else "💎 DIP_ACCUMULATION"
             consistency_index = 80.0
-        elif bear_count >= 5:
+        elif bear_count >= 6:
             confluence_tag = f"🔴 {bear_count}/{total_h} STRONG BEARISH"
             market_phase = "🩸 BEAR_TREND_EXPANSION" if macro_h.get('direction') == 'BEARISH' else "🛑 TOP_DISTRIBUTION"
             consistency_index = 80.0
+        elif bull_count >= 5:
+            confluence_tag = f"⚡ {bull_count}/{total_h} MODERATE BULL"
+            market_phase = "⚡ MODERATE_BULLISH"
+            consistency_index = 70.0
+        elif bear_count >= 5:
+            confluence_tag = f"⚡ {bear_count}/{total_h} MODERATE BEAR"
+            market_phase = "⚡ MODERATE_BEARISH"
+            consistency_index = 70.0
         elif is_scalp_bottom:
             confluence_tag = f"⚡ 15M BOTTOM REVERSAL"
             market_phase = "💎 DIP_ACCUMULATION"
@@ -3234,6 +3274,7 @@ class HybridQuantEngine:
         live_high = max(float(raw_dfs['15m']['high'].iloc[-1]) if '15m' in raw_dfs else live_price, live_price)
         live_low = min(float(raw_dfs['15m']['low'].iloc[-1]) if '15m' in raw_dfs else live_price, live_price)
 
+        prediction_now = datetime.now(timezone.utc)
         out_dict = {
             "symbol": symbol,
             "current_price": live_price,
@@ -3250,7 +3291,9 @@ class HybridQuantEngine:
             "consistency_index": consistency_index,
             "best_priority": best_priority,
             "overall_score": overall_score,
-            "tf_metrics_summary": tf_metrics_summary
+            "tf_metrics_summary": tf_metrics_summary,
+            "server_prediction_time": prediction_now.isoformat(),
+            "server_prediction_ts": int(prediction_now.timestamp()),
         }
         del raw_dfs
         del tf_features
@@ -3820,10 +3863,14 @@ class HybridQuantEngine:
         # Horizon-Separated High-Potential Signal Buckets (>= 0.40% Return & >= 65% Meta Win Prob)
         horizon_bucket_defs = [
             {"key": "scalp", "tag": "15M", "label": "⚡ Scalp (15M)", "min_return": 0.40},
+            {"key": "horizon_30m", "tag": "30M", "label": "⏱️ 30M", "min_return": 0.40},
             {"key": "swing", "tag": "1H", "label": "🌊 Swing (1H)", "min_return": 0.40},
             {"key": "horizon_4h", "tag": "4H", "label": "⏳ Intraday (4H)", "min_return": 0.40},
+            {"key": "horizon_12h", "tag": "12H", "label": "🌗 12H", "min_return": 0.40},
             {"key": "macro", "tag": "24H", "label": "🚀 Macro (24H)", "min_return": 0.40},
+            {"key": "horizon_4d", "tag": "4D", "label": "📅 4D", "min_return": 0.40},
             {"key": "weekly", "tag": "7D", "label": "🗓️ Weekly (7D)", "min_return": 0.40},
+            {"key": "biweekly", "tag": "15D", "label": "📆 15D", "min_return": 0.40},
             {"key": "monthly", "tag": "30D", "label": "🪐 Monthly (30D)", "min_return": 0.40}
         ]
 
@@ -3941,9 +3988,21 @@ class HybridQuantEngine:
         sym = data['symbol']
         print(f"[DEEP DIVE 🔬] {sym} Multi-Horizon Analysis Complete (Triple Confluence: {'💎 YES' if data['is_triple_confluence'] else '⚡ INDEPENDENT'})\n")
 
-    def export_web_app_json(self, scanner_results: list, deep_dive_result: dict = None, top_signals: list = None, is_partial: bool = False, total_count: int = 100):
+    def export_web_app_json(self, scanner_results: list, deep_dive_result: dict = None, top_signals: list = None, is_partial: bool = False, total_count: int = 200):
+        now_utc = datetime.now(timezone.utc)
+        now_iso = now_utc.isoformat()
+        now_ts = int(now_utc.timestamp())
+
+        # Ensure all items in scanner_results have server_prediction_time
+        for r in scanner_results:
+            if "server_prediction_time" not in r:
+                r["server_prediction_time"] = now_iso
+                r["server_prediction_ts"] = now_ts
+
         payload = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now_iso,
+            "server_prediction_time": now_iso,
+            "server_prediction_ts": now_ts,
             "strategy": "Multi-Horizon Quantitative Engine (V16.0)",
             "btc_market_shield": {
                 "active": self.btc_shield_active,

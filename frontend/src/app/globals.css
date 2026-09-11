@@ -59,3 +59,39 @@ body {
 .glow-cyan {
   box-shadow: 0 0 15px rgba(0, 242, 254, 0.2);
 }
+
+/* Institutional Live Matrix Cell Update Animations */
+@keyframes cellFlashGreen {
+  0% { background-color: rgba(16, 185, 129, 0.45); }
+  100% { background-color: transparent; }
+}
+
+@keyframes cellFlashRed {
+  0% { background-color: rgba(244, 63, 94, 0.45); }
+  100% { background-color: transparent; }
+}
+
+@keyframes cellFlashCyan {
+  0% { background-color: rgba(6, 182, 212, 0.40); }
+  100% { background-color: transparent; }
+}
+
+.cell-flash-bullish {
+  animation: cellFlashGreen 1.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.cell-flash-bearish {
+  animation: cellFlashRed 1.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.cell-flash-sync {
+  animation: cellFlashCyan 1.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* High-Performance 200-Row Matrix Rendering */
+.matrix-row-virtual {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 54px;
+  transition: background-color 0.18s ease-in-out;
+}
+

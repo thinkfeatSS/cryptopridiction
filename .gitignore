@@ -58,6 +58,11 @@ export_app_data/*.json
 # IDE & Editor files
 .vscode/
 .idea/
+
+# Local Deployment & Profiling Scripts with VPS credentials
+profile_vps.py
+scratch_test_asset.py
+deploy_vps.py
 *.swp
 *.swo
 *~

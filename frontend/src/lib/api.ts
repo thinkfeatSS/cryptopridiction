@@ -173,6 +173,8 @@ export interface PortfolioData {
 
 export interface ForecastData {
   timestamp: string;
+  server_prediction_time?: string;
+  server_prediction_ts?: number;
   strategy: string;
   btc_market_shield?: BtcMarketShield;
   top_round_signals: any[];

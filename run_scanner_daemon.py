@@ -27,15 +27,15 @@ def run_daemon():
         interval_seconds = int(os.getenv("SCAN_INTERVAL_MINUTES")) * 60
     
     run_once = os.getenv("RUN_ONCE", "false").lower() in ("true", "1", "yes")
-    scan_top_n = int(os.getenv("SCANNER_TOP_N", str(CONFIG.get("scanner_top_n", 100))))
-    max_workers = int(os.getenv("MAX_SCAN_WORKERS", str(CONFIG.get("max_scan_workers", 16))))
+    scan_top_n = int(os.getenv("SCANNER_TOP_N", str(CONFIG.get("scanner_top_n", 200))))
+    max_workers = int(os.getenv("MAX_SCAN_WORKERS", str(CONFIG.get("max_scan_workers", 20))))
     heartbeat_secs = int(os.getenv("HEARTBEAT_SECONDS", str(CONFIG.get("heartbeat_interval_seconds", 4))))
     CONFIG["scanner_top_n"] = scan_top_n
     CONFIG["max_scan_workers"] = max_workers
     CONFIG["continuous_loop"] = False
 
     print("=" * 80)
-    print("🚀 QUANTITATIVE 8-HORIZON CRYPTO PREDICTION SCANNER DAEMON")
+    print("🚀 QUANTITATIVE 10-HORIZON CRYPTO PREDICTION SCANNER DAEMON (TOP 200 UNIVERSE)")
     print(f"📊 Top Coins Scanning Universe: {scan_top_n} Coins (Parallel Workers: {max_workers})")
     print(f"⏱️  Scan Frequency: Every {interval_seconds} seconds ({interval_seconds // 60} minutes)")
     print(f"💓 Live Position Heartbeat: Every {heartbeat_secs} seconds")
