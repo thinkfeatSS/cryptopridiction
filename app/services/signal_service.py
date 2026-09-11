@@ -535,8 +535,34 @@ class SignalService:
                 if p and p > 0:
                     s_dict["current_price"] = p
                     s_dict["live_price"] = p
+                    entry_p = float(s_dict.get("entry_price") or p)
+                    direction = str(s_dict.get("direction", "LONG")).upper()
+                    if entry_p > 0:
+                        s_dict["live_pnl_pct"] = round(((p - entry_p) / entry_p) * 100.0, 2) if direction in ["LONG", "BULLISH"] else round(((entry_p - p) / entry_p) * 100.0, 2)
                 updated_top.append(s_dict)
             res["top_round_signals"] = updated_top
+
+        # Overlay on signals_by_horizon
+        signals_by_h = res.get("signals_by_horizon", {})
+        if isinstance(signals_by_h, dict):
+            updated_h = {}
+            for h_tag, sig_list in signals_by_h.items():
+                up_list = []
+                for sig in sig_list:
+                    s_dict = dict(sig)
+                    sym = s_dict.get("symbol", "")
+                    raw_sym = sym.replace("/", "").replace(":USDT", "")
+                    p = live_prices.get(sym) or live_prices.get(raw_sym)
+                    if p and p > 0:
+                        s_dict["current_price"] = p
+                        s_dict["live_price"] = p
+                        entry_p = float(s_dict.get("entry_price") or p)
+                        direction = str(s_dict.get("direction", "LONG")).upper()
+                        if entry_p > 0:
+                            s_dict["live_pnl_pct"] = round(((p - entry_p) / entry_p) * 100.0, 2) if direction in ["LONG", "BULLISH"] else round(((entry_p - p) / entry_p) * 100.0, 2)
+                    up_list.append(s_dict)
+                updated_h[h_tag] = up_list
+            res["signals_by_horizon"] = updated_h
 
         return res
 

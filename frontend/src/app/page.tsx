@@ -16,6 +16,7 @@ export default function DashboardPage() {
   const { data: forecast, isLoading } = useForecastQuery();
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [activeHorizon, setActiveHorizon] = useState<string>("ALL");
+  const [directionFilter, setDirectionFilter] = useState<"ALL" | "LONG" | "SHORT">("ALL");
 
   const topSignals = forecast?.top_round_signals || [];
   const signalsByHorizon = forecast?.signals_by_horizon || {};
@@ -23,56 +24,90 @@ export default function DashboardPage() {
   const horizonCategories = [
     { key: "ALL", label: "⚡ All Active", tag: "ALL" },
     { key: "15M", label: "⚡ Scalp (15M)", tag: "15M" },
+    { key: "30M", label: "⏱️ 30M", tag: "30M" },
     { key: "1H", label: "🌊 Swing (1H)", tag: "1H" },
     { key: "4H", label: "⏳ Intraday (4H)", tag: "4H" },
+    { key: "12H", label: "🌗 12H", tag: "12H" },
     { key: "24H", label: "🚀 Macro (24H)", tag: "24H" },
+    { key: "4D", label: "📅 4D", tag: "4D" },
     { key: "7D", label: "🗓️ Weekly (7D)", tag: "7D" },
+    { key: "15D", label: "📆 15D", tag: "15D" },
     { key: "30D", label: "🪐 Monthly (30D)", tag: "30D" },
   ];
 
   // Helper to count active setups per horizon category
   const getHorizonCount = (tag: string) => {
-    if (tag === "ALL") return topSignals.length;
-    if (signalsByHorizon[tag]) return signalsByHorizon[tag].length;
-    return topSignals.filter((s: any) => {
-      const hStr = (s.horizon_tag || s.horizon || s.horizon_name || "").toUpperCase();
+    let list = topSignals;
+    if (directionFilter === "LONG") {
+      list = list.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH");
+    } else if (directionFilter === "SHORT") {
+      list = list.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH");
+    }
+
+    if (tag === "ALL") return list.length;
+    if (signalsByHorizon[tag] && directionFilter === "ALL") return signalsByHorizon[tag].length;
+    return list.filter((s: any) => {
+      const hStr = (s.horizon_tag || s.horizon || s.horizon_name || s.horizon_key || "").toUpperCase();
       if (tag === "15M") return hStr.includes("15M") || hStr.includes("SCALP");
+      if (tag === "30M") return hStr.includes("30M");
       if (tag === "1H") return hStr.includes("1H") || hStr.includes("SWING");
       if (tag === "4H") return hStr.includes("4H") || hStr.includes("INTRADAY") || hStr.includes("4-HOUR");
+      if (tag === "12H") return hStr.includes("12H");
       if (tag === "24H") return hStr.includes("24H") || hStr.includes("MACRO") || hStr.includes("1D");
+      if (tag === "4D") return hStr.includes("4D");
       if (tag === "7D") return hStr.includes("7D") || hStr.includes("WEEKLY");
+      if (tag === "15D") return hStr.includes("15D") || hStr.includes("BIWEEKLY");
       if (tag === "30D") return hStr.includes("30D") || hStr.includes("MONTHLY");
       return false;
     }).length;
   };
 
-  // Filter signals according to active horizon
+  const longCount = useMemo(() => {
+    return topSignals.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH").length;
+  }, [topSignals]);
+
+  const shortCount = useMemo(() => {
+    return topSignals.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH").length;
+  }, [topSignals]);
+
+  // Filter signals according to active horizon & direction filter
   const filteredTopSignals = useMemo(() => {
+    let list: any[] = [];
     if (activeHorizon === "ALL") {
-      return topSignals.filter((s: any) => {
+      list = topSignals.filter((s: any) => {
         const exp = s.expected_return_pct ?? (s.exp_return ? s.exp_return * 100 : 0.0);
         return Math.abs(exp) >= 0.40;
       });
+    } else if (signalsByHorizon[activeHorizon] && signalsByHorizon[activeHorizon].length > 0 && directionFilter === "ALL") {
+      list = signalsByHorizon[activeHorizon];
+    } else {
+      list = topSignals.filter((s: any) => {
+        const exp = s.expected_return_pct ?? (s.exp_return ? s.exp_return * 100 : 0.0);
+        if (Math.abs(exp) < 0.40) return false;
+
+        const hStr = (s.horizon_tag || s.horizon || s.horizon_name || s.horizon_key || "").toUpperCase();
+        if (activeHorizon === "15M") return hStr.includes("15M") || hStr.includes("SCALP");
+        if (activeHorizon === "30M") return hStr.includes("30M");
+        if (activeHorizon === "1H") return hStr.includes("1H") || hStr.includes("SWING");
+        if (activeHorizon === "4H") return hStr.includes("4H") || hStr.includes("INTRADAY") || hStr.includes("4-HOUR");
+        if (activeHorizon === "12H") return hStr.includes("12H");
+        if (activeHorizon === "24H") return hStr.includes("24H") || hStr.includes("MACRO") || hStr.includes("1D");
+        if (activeHorizon === "4D") return hStr.includes("4D");
+        if (activeHorizon === "7D") return hStr.includes("7D") || hStr.includes("WEEKLY");
+        if (activeHorizon === "15D") return hStr.includes("15D") || hStr.includes("BIWEEKLY");
+        if (activeHorizon === "30D") return hStr.includes("30D") || hStr.includes("MONTHLY");
+        return false;
+      });
     }
 
-    if (signalsByHorizon[activeHorizon] && signalsByHorizon[activeHorizon].length > 0) {
-      return signalsByHorizon[activeHorizon];
+    if (directionFilter === "LONG") {
+      list = list.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH");
+    } else if (directionFilter === "SHORT") {
+      list = list.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH");
     }
 
-    return topSignals.filter((s: any) => {
-      const exp = s.expected_return_pct ?? (s.exp_return ? s.exp_return * 100 : 0.0);
-      if (Math.abs(exp) < 0.40) return false;
-
-      const hStr = (s.horizon_tag || s.horizon || s.horizon_name || "").toUpperCase();
-      if (activeHorizon === "15M") return hStr.includes("15M") || hStr.includes("SCALP");
-      if (activeHorizon === "1H") return hStr.includes("1H") || hStr.includes("SWING");
-      if (activeHorizon === "4H") return hStr.includes("4H") || hStr.includes("INTRADAY") || hStr.includes("4-HOUR");
-      if (activeHorizon === "24H") return hStr.includes("24H") || hStr.includes("MACRO") || hStr.includes("1D");
-      if (activeHorizon === "7D") return hStr.includes("7D") || hStr.includes("WEEKLY");
-      if (activeHorizon === "30D") return hStr.includes("30D") || hStr.includes("MONTHLY");
-      return false;
-    });
-  }, [topSignals, signalsByHorizon, activeHorizon]);
+    return list;
+  }, [topSignals, signalsByHorizon, activeHorizon, directionFilter]);
 
   return (
     <div className="space-y-8">
@@ -92,7 +127,7 @@ export default function DashboardPage() {
               </h1>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              Timeframe-separated confluence setups (15M, 1H, 4H, 24H, Weekly, Monthly) evaluated on the 15-minute candle close with strict &ge;0.40% fee-cleared profit hurdles.
+              Timeframe-separated confluence setups (15M, 30M, 1H, 4H, 12H, 24H, 4D, 7D, 15D, 30D) actively maintained until Win, Loss, or Expire with strict &ge;0.40% profit hurdles.
             </p>
           </div>
 
@@ -104,7 +139,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* 1.1 Actionable Top Institutional Signal Cards by Horizon */}
+        {/* 1.1 Actionable Top Institutional Signal Cards by Horizon & Direction */}
         <div>
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-3">
             <h2 className="text-sm font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5 font-mono">
@@ -115,37 +150,84 @@ export default function DashboardPage() {
             </span>
           </div>
 
-          {/* Horizon Category Tabs */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-2 mb-4 max-w-full">
-            {horizonCategories.map((cat) => {
-              const count = getHorizonCount(cat.tag);
-              const isActive = activeHorizon === cat.tag;
-              return (
-                <button
-                  key={cat.key}
-                  type="button"
-                  onClick={() => setActiveHorizon(cat.tag)}
-                  className={`flex items-center gap-1.5 whitespace-nowrap rounded-xl px-3 py-1.5 text-xs font-bold transition-all ${
-                    isActive
-                      ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/50 shadow-sm shadow-cyan-500/20"
-                      : "bg-dark-900/90 text-slate-400 hover:text-slate-200 border border-slate-800"
-                  }`}
-                >
-                  <span>{cat.label}</span>
-                  <span
-                    className={`rounded-full px-1.5 py-0.2 text-[10px] font-mono ${
-                      count > 0
-                        ? isActive
-                          ? "bg-cyan-400 text-dark-950 font-black"
-                          : "bg-cyan-950 text-cyan-400 border border-cyan-700/50"
-                        : "bg-slate-800 text-slate-500"
+          {/* Controls Bar: Direction Filters + Horizon Category Tabs */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-4 bg-dark-900/80 p-2.5 rounded-2xl border border-slate-800/90">
+            {/* Direction Filter Buttons */}
+            <div className="flex items-center gap-1.5 bg-dark-950/90 p-1 rounded-xl border border-slate-800 shrink-0">
+              <span className="text-[10px] uppercase font-bold text-slate-500 px-2 font-mono">Side:</span>
+              <button
+                type="button"
+                onClick={() => setDirectionFilter("ALL")}
+                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                  directionFilter === "ALL"
+                    ? "bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 shadow-sm"
+                    : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+                }`}
+              >
+                ⚡ All ({topSignals.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setDirectionFilter("LONG")}
+                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+                  directionFilter === "LONG"
+                    ? "bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 shadow-sm shadow-emerald-500/20"
+                    : "text-slate-400 hover:text-emerald-300 hover:bg-slate-800/50"
+                }`}
+              >
+                <span>🟢 Longs</span>
+                <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-700/50">
+                  {longCount}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDirectionFilter("SHORT")}
+                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+                  directionFilter === "SHORT"
+                    ? "bg-rose-500/25 text-rose-300 border border-rose-500/50 shadow-sm shadow-rose-500/20"
+                    : "text-slate-400 hover:text-rose-300 hover:bg-slate-800/50"
+                }`}
+              >
+                <span>🔴 Shorts</span>
+                <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-rose-950 text-rose-300 border border-rose-700/50">
+                  {shortCount}
+                </span>
+              </button>
+            </div>
+
+            {/* Horizon Category Tabs */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 max-w-full">
+              {horizonCategories.map((cat) => {
+                const count = getHorizonCount(cat.tag);
+                const isActive = activeHorizon === cat.tag;
+                return (
+                  <button
+                    key={cat.key}
+                    type="button"
+                    onClick={() => setActiveHorizon(cat.tag)}
+                    className={`flex items-center gap-1.5 whitespace-nowrap rounded-xl px-2.5 py-1.5 text-xs font-bold transition-all ${
+                      isActive
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/50 shadow-sm shadow-cyan-500/20"
+                        : "bg-dark-950 text-slate-400 hover:text-slate-200 border border-slate-800/80"
                     }`}
                   >
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
+                    <span>{cat.label}</span>
+                    <span
+                      className={`rounded-full px-1.5 py-0.2 text-[10px] font-mono ${
+                        count > 0
+                          ? isActive
+                            ? "bg-cyan-400 text-dark-950 font-black"
+                            : "bg-cyan-950 text-cyan-400 border border-cyan-700/50"
+                          : "bg-slate-800 text-slate-500"
+                      }`}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {isLoading ? (

@@ -2506,6 +2506,382 @@ class SignalAuditTracker:
         print(f"[AUDIT LEDGER 📊] Tracked Signals: {kpi['total_trader_signals']} | Won: {kpi['won_signals_count']} | Lost: {kpi['lost_signals_count']} | Win Rate: {kpi['win_rate_pct']:.1f}% | Return: {sign}{kpi['cumulative_return_pct']:.2f}%")
 
 # ------------------------------------------------------------------------------
+# 7.4 PERSISTENT INSTITUTIONAL ACTIVE SIGNAL LIFECYCLE MANAGER
+# ------------------------------------------------------------------------------
+HORIZON_TAG_MAP = {
+    'scalp': '15M',
+    'horizon_30m': '30M',
+    'swing': '1H',
+    'horizon_4h': '4H',
+    'horizon_12h': '12H',
+    'macro': '24H',
+    'horizon_4d': '4D',
+    'weekly': '7D',
+    'biweekly': '15D',
+    'monthly': '30D',
+}
+
+HORIZON_EXPIRY_SECONDS = {
+    '15M': 900,
+    '30M': 1800,
+    '1H': 3600,
+    '4H': 14400,
+    '12H': 43200,
+    '24H': 86400,
+    '4D': 345600,
+    '7D': 604800,
+    '15D': 1296000,
+    '30D': 2592000,
+}
+
+def resolve_horizon_tag(h_key: str) -> str:
+    hk = str(h_key or "").lower().strip()
+    if hk in HORIZON_TAG_MAP:
+        return HORIZON_TAG_MAP[hk]
+    if 'scalp' in hk or '15m' in hk: return '15M'
+    if '30m' in hk: return '30M'
+    if 'swing' in hk or '1h' in hk: return '1H'
+    if '4h' in hk or 'intraday' in hk: return '4H'
+    if '12h' in hk: return '12H'
+    if 'macro' in hk or '24h' in hk or '1d' in hk: return '24H'
+    if '4d' in hk: return '4D'
+    if 'weekly' in hk or '7d' in hk: return '7D'
+    if 'biweekly' in hk or '15d' in hk: return '15D'
+    if 'monthly' in hk or '30d' in hk: return '30D'
+    return '15M'
+
+class ActiveInstitutionalSignalManager:
+    """
+    Persistent Institutional Signal Lifecycle Registry:
+    - Maintains exactly ONE active signal per (symbol, horizon).
+    - Preserves signals across multiple 15-minute scans until they WIN (TP hit), LOSE (SL hit), or EXPIRE.
+    - If a subsequent scan evaluates the same coin & horizon (e.g. entry shifted from 2.2 to 2.5),
+      updates the existing signal in-place rather than creating duplicates.
+    - Performs high-frequency evaluation on live prices during both scans and fast 15s heartbeats.
+    - Persists state to active_institutional_signals.json.
+    """
+    def __init__(self, export_dir: str = "./export_app_data", audit_tracker=None):
+        self.export_dir = export_dir
+        self.audit_tracker = audit_tracker
+        self.filepath = os.path.join(self.export_dir, "active_institutional_signals.json")
+        self.active_signals = {}  # key: f"{symbol}:{horizon_tag}" -> dict
+        self.load_state()
+
+    def _make_key(self, sym: str, h_key: str) -> str:
+        h_tag = resolve_horizon_tag(h_key)
+        return f"{sym.upper()}:{h_tag.upper()}"
+
+    def load_state(self):
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    for item in data:
+                        sym = item.get('symbol', '')
+                        h_k = item.get('horizon_key', item.get('horizon_tag', 'scalp'))
+                        if sym and h_k:
+                            key = self._make_key(sym, h_k)
+                            self.active_signals[key] = item
+                elif isinstance(data, dict):
+                    self.active_signals = data
+            except Exception as e:
+                print(f"[ACTIVE SIGNAL MGR] Error loading state: {e}")
+
+    def save_state(self):
+        try:
+            os.makedirs(self.export_dir, exist_ok=True)
+            temp = self.filepath + ".tmp"
+            with open(temp, 'w', encoding='utf-8') as f:
+                json.dump(list(self.active_signals.values()), f, indent=2, default=str)
+            os.replace(temp, self.filepath)
+        except Exception as e:
+            print(f"[ACTIVE SIGNAL MGR] Error saving state: {e}")
+
+    def get_active_symbols(self) -> list:
+        syms = set()
+        for s in self.active_signals.values():
+            if s.get('status') in ["ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
+                sym = s.get('symbol')
+                if sym:
+                    syms.add(sym)
+        return list(syms)
+
+    def upsert_signals(self, candidate_signals: list) -> list:
+        """
+        Upserts candidate signals:
+        - If (symbol, horizon) is already active, updates the coin's data in place (entry price, TP/SL, conviction).
+        - If new, registers it into the active pool.
+        """
+        now_utc = datetime.now(timezone.utc)
+        now_str = now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
+
+        for cand in candidate_signals:
+            sym = cand.get('symbol')
+            h_k = cand.get('horizon_key', 'scalp')
+            h_tag = resolve_horizon_tag(h_k)
+            key = self._make_key(sym, h_tag)
+
+            existing = self.active_signals.get(key)
+            is_active = existing and existing.get('status') in [
+                "ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"
+            ]
+
+            if is_active:
+                # 1. Update existing signal in-place
+                old_entry = float(existing.get('entry_price', 0.0))
+                new_entry = float(cand.get('entry_price', old_entry))
+
+                # Check if entry shifted significantly (>0.05%)
+                if old_entry > 0 and abs(new_entry - old_entry) / old_entry >= 0.0005:
+                    existing['was_price_updated'] = True
+                    existing['previous_entry_price'] = round(old_entry, 6)
+
+                existing['entry_price'] = round(new_entry, 6)
+                existing['current_price'] = round(float(cand.get('current_price', new_entry)), 6)
+                existing['tp1_price'] = round(float(cand.get('tp1_price', existing.get('tp1_price'))), 6)
+                existing['tp2_price'] = round(float(cand.get('tp2_price', existing.get('tp2_price'))), 6)
+                existing['tp3_price'] = round(float(cand.get('tp3_price', existing.get('tp3_price'))), 6)
+
+                # Maintain locked breakeven if already locked
+                if not existing.get('is_tp1_locked'):
+                    existing['sl_price'] = round(float(cand.get('sl_price', existing.get('sl_price'))), 6)
+
+                existing['conviction'] = float(cand.get('conviction', existing.get('conviction', 50.0)))
+                existing['conviction_pct'] = existing['conviction']
+                existing['meta_win_prob'] = float(cand.get('meta_win_prob', existing.get('meta_win_prob', 0.70)))
+                existing['meta_win_prob_pct'] = round(existing['meta_win_prob'] * 100.0, 1)
+                existing['exp_return'] = float(cand.get('exp_return', existing.get('exp_return', 0.0)))
+                existing['expected_return_pct'] = round(existing['exp_return'] * 100.0, 2)
+                existing['decision'] = cand.get('decision', existing.get('decision'))
+                existing['updated_at_utc'] = now_str
+                existing['horizon_tag'] = h_tag
+
+                # Update in audit tracker if matching ID found
+                if self.audit_tracker:
+                    for rec in self.audit_tracker.records:
+                        if rec.get('signal_id') == existing.get('signal_id'):
+                            rec['entry_price'] = existing['entry_price']
+                            rec['tp1_price'] = existing['tp1_price']
+                            rec['tp2_price'] = existing['tp2_price']
+                            rec['tp3_price'] = existing['tp3_price']
+                            if not rec.get('is_tp1_locked'):
+                                rec['sl_price'] = existing['sl_price']
+                            rec['conviction_pct'] = existing['conviction_pct']
+                            rec['meta_win_prob_pct'] = existing['meta_win_prob_pct']
+                            rec['expected_return_pct'] = existing['expected_return_pct']
+                            rec['decision'] = existing['decision']
+                            break
+            else:
+                # 2. Register as a fresh active signal
+                sig_copy = dict(cand)
+                sig_id = f"SIG_{now_utc.strftime('%Y%m%d_%H%M')}_{sym.replace('/', '_')}_{h_tag}"
+                sig_copy['signal_id'] = sig_id
+                sig_copy['horizon_tag'] = h_tag
+                sig_copy['status'] = "ACTIVE"
+                sig_copy['outcome_label'] = "ACTIVE 🟢"
+                sig_copy['is_tp1_locked'] = False
+                sig_copy['is_tp2_locked'] = False
+                sig_copy['was_price_updated'] = False
+                sig_copy['created_at_utc'] = now_str
+                sig_copy['updated_at_utc'] = now_str
+                sig_copy['created_ts'] = time.time()
+                sig_copy['live_pnl_pct'] = 0.0
+
+                # Ensure predicted expiration is robustly set
+                pred_close = sig_copy.get('predicted_close_utc')
+                if not pred_close or pred_close == 'N/A':
+                    dur_sec = HORIZON_EXPIRY_SECONDS.get(h_tag, 3600)
+                    sig_copy['predicted_close_utc'] = (now_utc + timedelta(seconds=dur_sec)).strftime('%Y-%m-%d %H:%M:%S UTC')
+
+                self.active_signals[key] = sig_copy
+
+                if self.audit_tracker:
+                    self.audit_tracker.log_top_trader_signals([sig_copy])
+
+        self.save_state()
+        return self.get_display_signals()
+
+    def evaluate_signals(self, live_prices: dict, live_highs: dict = None, live_lows: dict = None) -> bool:
+        """
+        Evaluates active signals in real time against live prices:
+        - TP1 / TP2 / TP3 hits -> WIN
+        - Stop Loss hits -> LOSS
+        - Expiration time reached -> EXPIRE
+        Returns True if any signal state or price updated.
+        """
+        if not self.active_signals:
+            return False
+
+        now_utc = datetime.now(timezone.utc)
+        now_ts = time.time()
+        now_str = now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
+        updated = False
+
+        # 1. Clean up resolved signals past grace period (2 hours = 7200s)
+        keys_to_delete = []
+        for key, s in self.active_signals.items():
+            status = s.get('status', 'ACTIVE')
+            if status in ["WON_TP3", "WON_TP2_TRAIL", "WON_TP1_BE", "LOST_SL", "EXPIRED"]:
+                resolved_ts = s.get('resolved_at_ts', 0.0)
+                if resolved_ts > 0 and (now_ts - resolved_ts) > 7200.0:
+                    keys_to_delete.append(key)
+        for k in keys_to_delete:
+            self.active_signals.pop(k, None)
+            updated = True
+
+        # 2. Evaluate active signals
+        for key, s in self.active_signals.items():
+            status = s.get('status', 'ACTIVE')
+            if status not in ["ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
+                continue
+
+            sym = s.get('symbol')
+            raw_sym = sym.replace('/', '').replace(':USDT', '') if sym else ''
+            curr_p = live_prices.get(sym) or live_prices.get(raw_sym)
+            if not curr_p or curr_p <= 0:
+                continue
+
+            entry_p = float(s.get('entry_price', curr_p))
+            direction = str(s.get('direction', 'LONG')).upper()
+            is_long = direction in ["LONG", "BULLISH"]
+
+            # Real-time live PnL calculation
+            pnl_pct = ((curr_p - entry_p) / entry_p) * 100.0 if is_long else ((entry_p - curr_p) / entry_p) * 100.0
+            s['live_pnl_pct'] = round(pnl_pct, 2)
+            s['current_price'] = curr_p
+            s['live_price'] = curr_p
+
+            raw_h = live_highs.get(sym, curr_p) if live_highs else curr_p
+            raw_l = live_lows.get(sym, curr_p) if live_lows else curr_p
+            high_p = max(curr_p, raw_h)
+            low_p = min(curr_p, raw_l)
+
+            tp1_p = float(s.get('tp1_price', entry_p))
+            tp2_p = float(s.get('tp2_price', entry_p))
+            tp3_p = float(s.get('tp3_price', entry_p))
+            sl_p = float(s.get('sl_price', entry_p))
+
+            is_tp1_locked = bool(s.get('is_tp1_locked', False) or status in ['TP1_LOCKED_BREAKEVEN', 'TP2_LOCKED_TRAIL'])
+            is_tp2_locked = bool(s.get('is_tp2_locked', False) or status == 'TP2_LOCKED_TRAIL')
+
+            # Check expiration
+            is_expired = False
+            pred_close_str = str(s.get('predicted_close_utc', '')).strip()
+            if pred_close_str and pred_close_str != 'N/A':
+                try:
+                    clean_dt_str = pred_close_str.replace(' UTC', '').strip()
+                    close_dt = datetime.fromisoformat(clean_dt_str) if 'T' in clean_dt_str else datetime.strptime(clean_dt_str, '%Y-%m-%d %H:%M:%S' if len(clean_dt_str) > 16 else '%Y-%m-%d %H:%M')
+                    if close_dt.tzinfo is None:
+                        close_dt = close_dt.replace(tzinfo=timezone.utc)
+                    if now_utc >= close_dt:
+                        is_expired = True
+                except Exception:
+                    pass
+
+            # Target checks
+            is_hit_tp3 = (high_p >= tp3_p) if is_long else (low_p <= tp3_p)
+            is_hit_tp2 = (high_p >= tp2_p) if is_long else (low_p <= tp2_p)
+            is_hit_tp1 = (high_p >= tp1_p) if is_long else (low_p <= tp1_p)
+            is_hit_sl = (low_p <= sl_p) if is_long else (high_p >= sl_p)
+
+            # Win/Loss Resolution Transitions
+            if is_hit_tp3:
+                s['status'] = "WON_TP3"
+                s['outcome_label'] = f"🏆 WON TP3 (+{abs(tp3_p - entry_p)/entry_p*100.0:.2f}%)"
+                s['exit_price'] = round(tp3_p, 6)
+                s['resolved_at_ts'] = now_ts
+                s['resolved_at_utc'] = now_str
+                updated = True
+            elif is_hit_tp2 and not is_tp2_locked and not is_hit_sl:
+                s['status'] = "TP2_LOCKED_TRAIL"
+                s['outcome_label'] = "🎯 TP2 HIT (TRAILING)"
+                s['is_tp2_locked'] = True
+                s['is_tp1_locked'] = True
+                s['sl_price'] = round(tp1_p, 6)  # Trail SL to TP1 floor
+                updated = True
+            elif is_hit_tp1 and not is_tp1_locked and not is_hit_sl:
+                s['status'] = "TP1_LOCKED_BREAKEVEN"
+                s['outcome_label'] = "🎯 TP1 HIT (SL @ BE)"
+                s['is_tp1_locked'] = True
+                s['sl_price'] = round(entry_p, 6)  # Trail SL to Breakeven
+                updated = True
+            elif is_hit_sl:
+                if is_tp2_locked:
+                    s['status'] = "WON_TP2_TRAIL"
+                    s['outcome_label'] = "🏆 WON (TP2 + TRAIL)"
+                elif is_tp1_locked:
+                    s['status'] = "WON_TP1_BE"
+                    s['outcome_label'] = "🏆 WON (TP1 + BE)"
+                else:
+                    s['status'] = "LOST_SL"
+                    s['outcome_label'] = f"🛑 STOPPED (SL -{abs(sl_p - entry_p)/entry_p*100.0:.2f}%)"
+                s['exit_price'] = round(sl_p, 6)
+                s['resolved_at_ts'] = now_ts
+                s['resolved_at_utc'] = now_str
+                updated = True
+            elif is_expired:
+                s['status'] = "EXPIRED"
+                ret_sign = "+" if pnl_pct >= 0 else ""
+                s['outcome_label'] = f"⏱️ EXPIRED ({ret_sign}{pnl_pct:.2f}%)"
+                s['exit_price'] = round(curr_p, 6)
+                s['resolved_at_ts'] = now_ts
+                s['resolved_at_utc'] = now_str
+                updated = True
+
+        if updated:
+            self.save_state()
+
+        return updated
+
+    def get_display_signals(self) -> list:
+        """Returns sorted active signals followed by recently resolved signals."""
+        active_list = []
+        resolved_list = []
+
+        for s in self.active_signals.values():
+            status = s.get('status', 'ACTIVE')
+            if status in ["ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
+                active_list.append(s)
+            else:
+                resolved_list.append(s)
+
+        # Sort active: Grade Tier asc, Meta Win Prob desc, Conviction desc
+        active_list.sort(key=lambda x: (
+            x.get('grade_tier', 2),
+            -float(x.get('meta_win_prob', 0.70)),
+            -float(x.get('conviction', 50.0))
+        ))
+
+        # Sort resolved: Most recently resolved first
+        resolved_list.sort(key=lambda x: -float(x.get('resolved_at_ts', 0.0)))
+
+        # Assign clean rank labels #1, #2...
+        combined = active_list + resolved_list
+        medals = ["🥇 TOP PICK (#1)", "🥈 RUNNER UP (#2)", "🥉 BRONZE (#3)", "🎯 PICK (#4)", "🎯 PICK (#5)"]
+        for idx, sig in enumerate(combined):
+            if idx < len(medals):
+                sig['rank'] = medals[idx]
+            else:
+                sig['rank'] = f"#{idx+1}"
+
+        return combined
+
+    def get_signals_by_horizon(self) -> dict:
+        """Groups display signals by standard horizon tags."""
+        tags = ["15M", "30M", "1H", "4H", "12H", "24H", "4D", "7D", "15D", "30D"]
+        res = {t: [] for t in tags}
+
+        for s in self.get_display_signals():
+            h_tag = s.get('horizon_tag') or resolve_horizon_tag(s.get('horizon_key', 'scalp'))
+            if h_tag in res:
+                res[h_tag].append(s)
+            else:
+                res['15M'].append(s)
+
+        return res
+
+# ------------------------------------------------------------------------------
 # 7.5 SECONDARY MACHINE LEARNING META-LABELING CLASSIFIER
 # ------------------------------------------------------------------------------
 class SignalMetaClassifier:
@@ -2653,6 +3029,10 @@ class HybridQuantEngine:
         self.symbol_last_signal_time = {}
         self.ledger = PaperTradingLedger(config)
         self.signal_tracker = SignalAuditTracker(config.get('app_export_dir', './export_app_data'))
+        self.institutional_signal_manager = ActiveInstitutionalSignalManager(
+            config.get('app_export_dir', './export_app_data'),
+            audit_tracker=self.signal_tracker
+        )
         self.meta_classifier = SignalMetaClassifier(
             os.path.join(self.config.get('models_export_dir', './models_export_v3'), "signal_meta_classifier.joblib")
         )
@@ -3773,6 +4153,7 @@ class HybridQuantEngine:
         # 5. Persistent Signal Audit Logger: Record & Evaluate ONLY Trader Signals in CSV
         self.signal_tracker.log_top_trader_signals(top_round_signals, [p['symbol'] for p in self.ledger.data['open_positions']])
         self.signal_tracker.evaluate_signals(live_prices, live_highs, live_lows)
+        self.institutional_signal_manager.evaluate_signals(live_prices, live_highs, live_lows)
         self.signal_tracker.render_performance_card()
 
         # 6. Export JSON Data
@@ -3800,12 +4181,15 @@ class HybridQuantEngine:
             except Exception:
                 pass
 
-        if not self.config['paper_trading']['enabled'] or not self.ledger.data['open_positions']:
+        active_paper_symbols = {p['symbol'] for p in self.ledger.data.get('open_positions', [])} if self.config.get('paper_trading', {}).get('enabled') else set()
+        active_signal_symbols = set(self.institutional_signal_manager.get_active_symbols())
+        all_watch_symbols = list(active_paper_symbols | active_signal_symbols)
+
+        if not all_watch_symbols:
             return
 
-        active_symbols = list({p['symbol'] for p in self.ledger.data['open_positions']})
         heartbeat_prices = {}
-        for sym in active_symbols:
+        for sym in all_watch_symbols:
             try:
                 ticker = self.loader.fetch_ticker(sym)
                 if ticker and 'last' in ticker:
@@ -3814,13 +4198,43 @@ class HybridQuantEngine:
                 pass
 
         if heartbeat_prices:
-            prev_open_count = len(self.ledger.data['open_positions'])
-            self.ledger.on_tick(heartbeat_prices)
-            self.signal_tracker.evaluate_signals(heartbeat_prices)
-            new_open_count = len(self.ledger.data['open_positions'])
-            if new_open_count < prev_open_count:
-                print(f"[HEARTBEAT ⚡] Intra-candle target/stop touched! Position closed in real time.")
-                self.ledger.render_portfolio_card()
+            if active_paper_symbols:
+                prev_open_count = len(self.ledger.data['open_positions'])
+                self.ledger.on_tick(heartbeat_prices)
+                self.signal_tracker.evaluate_signals(heartbeat_prices)
+                new_open_count = len(self.ledger.data['open_positions'])
+                if new_open_count < prev_open_count:
+                    print(f"[HEARTBEAT ⚡] Intra-candle target/stop touched! Position closed in real time.")
+                    self.ledger.render_portfolio_card()
+
+            # Real-time evaluation of institutional signals
+            signals_changed = self.institutional_signal_manager.evaluate_signals(heartbeat_prices)
+            if signals_changed:
+                self._sync_live_signals_to_file()
+
+    def _sync_live_signals_to_file(self):
+        """Real-time synchronization of active institutional signals to live_market_forecast.json & database."""
+        try:
+            json_path = os.path.join(self.config['app_export_dir'], "live_market_forecast.json")
+            if os.path.exists(json_path):
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+
+                data["top_round_signals"] = self.institutional_signal_manager.get_display_signals()
+                data["signals_by_horizon"] = self.institutional_signal_manager.get_signals_by_horizon()
+
+                temp_path = json_path + ".tmp"
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, default=str)
+                os.replace(temp_path, json_path)
+
+                if HAS_DB_SYNC:
+                    try:
+                        sync_files_to_db_live(force=True)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _sync_live_shield_to_file(self):
         """High-frequency real-time update of BTC Market Shield in exported JSON & database."""
@@ -4280,7 +4694,12 @@ class HybridQuantEngine:
             print(tabulate(df_selected, headers="keys", tablefmt="simple", showindex=False))
             print("=" * 145 + "\n")
 
-        return selected_signals
+        if verbose:
+            persistent_signals = self.institutional_signal_manager.upsert_signals(selected_signals)
+            self.signals_by_horizon = self.institutional_signal_manager.get_signals_by_horizon()
+            return persistent_signals
+        else:
+            return self.institutional_signal_manager.get_display_signals()
 
     # Backwards compatibility alias
     def render_professional_trading_signals(self, scanner_results: list):

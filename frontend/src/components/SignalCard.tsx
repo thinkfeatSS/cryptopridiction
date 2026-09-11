@@ -48,6 +48,15 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
   const tp3 = signal.tp3_price ?? signal.tp_price ?? entryPrice;
   const sl = signal.sl_price ?? entryPrice;
 
+  const status = signal.status || "ACTIVE";
+  const isWon = status.startsWith("WON");
+  const isLost = status.startsWith("LOST");
+  const isExpired = status.startsWith("EXPIRED");
+  const isBreakeven = status === "TP1_LOCKED_BREAKEVEN";
+  const wasPriceUpdated = Boolean(signal.was_price_updated);
+  const prevEntry = signal.previous_entry_price;
+  const livePnl = signal.live_pnl_pct;
+
   const medals = ["🥇 TOP PICK (#1)", "🥈 RUNNER UP (#2)", "🥉 BRONZE (#3)", "🎯 PICK (#4)", "🎯 PICK (#5)"];
   const rankLabel = signal.rank || (rankIndex < medals.length ? medals[rankIndex] : `#${rankIndex + 1}`);
 
@@ -96,13 +105,43 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
               {isGradeAPlus ? "💎 Grade A+ (ELITE)" : "🟢 Grade A (HIGH)"}
             </span>
 
-            {/* 🧠 ML Win Prob Pill Badge */}
-            <span className="rounded-lg bg-purple-950/80 px-2.5 py-1 text-xs font-bold text-purple-300 border border-purple-500/50 shadow-sm shadow-purple-500/20 flex items-center gap-1.5 font-mono">
-              <span>🧠</span> ML Win Prob: <strong className="text-white">{metaWinProb ? `${metaWinProb.toFixed(1)}%` : "75.0%"}</strong>
+            {/* Lifecycle Status Pill */}
+            <span
+              className={`rounded-lg px-2.5 py-1 text-xs font-bold flex items-center gap-1.5 border font-mono ${
+                isWon
+                  ? "bg-emerald-950 text-emerald-300 border-emerald-500 shadow-sm shadow-emerald-500/20"
+                  : isLost
+                  ? "bg-rose-950 text-rose-300 border-rose-500 shadow-sm shadow-rose-500/20"
+                  : isBreakeven
+                  ? "bg-cyan-950 text-cyan-300 border-cyan-500 shadow-sm shadow-cyan-500/20"
+                  : isExpired
+                  ? "bg-slate-900 text-slate-400 border-slate-700"
+                  : "bg-emerald-950/60 text-emerald-400 border-emerald-600/50"
+              }`}
+            >
+              {!isWon && !isLost && !isExpired && (
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              )}
+              <span>{signal.outcome_label || "ACTIVE 🟢"}</span>
             </span>
           </div>
 
           <div className="flex items-center gap-1.5">
+            {/* Live PnL Badge if active */}
+            {livePnl !== undefined && livePnl !== null && (
+              <span
+                className={`rounded-lg px-2 py-1 text-xs font-mono font-black border ${
+                  livePnl >= 0
+                    ? "bg-emerald-950/90 text-emerald-300 border-emerald-500/60"
+                    : "bg-rose-950/90 text-rose-300 border-rose-500/60"
+                }`}
+                title="Current live floating PnL based on real-time price"
+              >
+                {livePnl >= 0 ? "+" : ""}
+                {Number(livePnl).toFixed(2)}%
+              </span>
+            )}
+
             {/* 15M History Button */}
             <button
               type="button"
@@ -180,12 +219,29 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
         {/* Price Target Matrix Grid (1:2 R:R) */}
         <div className="mt-4 grid grid-cols-2 gap-2 rounded-xl bg-dark-900/90 p-3 border border-slate-800/80">
           <div className="flex flex-col">
-            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
-              Entry Price
-            </span>
-            <span className="text-sm font-black text-white font-mono mt-0.5">
-              {formatUsd(entryPrice)}
-            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
+                Entry Price
+              </span>
+              {wasPriceUpdated && prevEntry && (
+                <span
+                  className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                  title={`Entry price updated in recent scan from ${formatUsd(prevEntry)}`}
+                >
+                  ↺ Updated
+                </span>
+              )}
+            </div>
+            <div className="flex items-baseline gap-1.5 mt-0.5">
+              <span className="text-sm font-black text-white font-mono">
+                {formatUsd(entryPrice)}
+              </span>
+              {wasPriceUpdated && prevEntry && (
+                <span className="text-[10px] text-slate-500 line-through font-mono">
+                  {formatUsd(prevEntry)}
+                </span>
+              )}
+            </div>
           </div>
 
           <div className="flex flex-col">

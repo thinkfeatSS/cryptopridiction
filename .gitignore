@@ -50,6 +50,7 @@ catboost_info/
 # Temporary export data & database files
 export_app_data/*.csv
 export_app_data/*.json
+trader_signals_tracker.csv
 *.log
 *.sqlite
 *.sqlite3
