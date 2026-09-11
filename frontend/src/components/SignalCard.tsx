@@ -52,7 +52,7 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
   const isWon = status.startsWith("WON");
   const isLost = status.startsWith("LOST");
   const isExpired = status.startsWith("EXPIRED");
-  const isBreakeven = status === "TP1_LOCKED_BREAKEVEN";
+  const isBreakeven = status === "TP1_LOCKED_BREAKEVEN" || status === "TIER0_PROTECTED_BREAKEVEN" || status.includes("BE") || status.includes("BREAKEVEN");
   const wasPriceUpdated = Boolean(signal.was_price_updated);
   const prevEntry = signal.previous_entry_price;
   const livePnl = signal.live_pnl_pct;

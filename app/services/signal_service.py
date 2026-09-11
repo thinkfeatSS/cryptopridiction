@@ -55,7 +55,7 @@ class SignalService:
         try:
             pending = db.query(SignalAudit).filter(
                 or_(
-                    SignalAudit.status.in_(["PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]),
+                    SignalAudit.status.in_(["PENDING_EVALUATION", "ACTIVE", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]),
                     SignalAudit.outcome_label.like("%PENDING%")
                 )
             ).all()
@@ -113,6 +113,15 @@ class SignalService:
                     except Exception:
                         pass
 
+                # 0. Tier-0 Early Breakeven Guard (+0.65% gain raises SL to Soft BE)
+                if max_gain >= 0.65 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
+                    s.status = "TIER0_PROTECTED_BREAKEVEN"
+                    soft_be_p = (entry_p * 0.998) if direction == "LONG" else (entry_p * 1.002)
+                    s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
+                    sl_p = s.sl_price
+                    s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
+                    updated = True
+
                 if is_hit_tp3:
                     s.status = "WON_TP3"
                     s.exit_price = round(tp3_p, 6)
@@ -147,6 +156,12 @@ class SignalService:
                         s.exit_price = round(entry_p, 6)
                         s.realized_return_pct = round(blended_ret, 2)
                         s.outcome_label = "🟢 WON (TP1 + BE RUNNER)"
+                    elif s.status == "TIER0_PROTECTED_BREAKEVEN":
+                        ret_be = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                        s.status = "WON_TIER0_BE"
+                        s.exit_price = round(sl_p, 6)
+                        s.realized_return_pct = round(ret_be, 2)
+                        s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
                     else:
                         s.status = "LOST_SL"
                         s.exit_price = round(sl_p, 6)
@@ -164,6 +179,11 @@ class SignalService:
                         s.exit_price = round(curr_p, 6)
                         s.realized_return_pct = round(blended_ret, 2)
                         s.outcome_label = f"🟢 WON (TP1 + EXP {blended_ret:+.2f}%)"
+                    elif s.status == "TIER0_PROTECTED_BREAKEVEN":
+                        s.status = "WON_TIER0_BE"
+                        s.exit_price = round(curr_p, 6)
+                        s.realized_return_pct = round(ret_current, 2)
+                        s.outcome_label = f"🛡️ EXPIRED (TIER-0 BE {ret_current:+.2f}%)"
                     else:
                         s.status = "EXPIRED_PROFIT" if ret_current > 0 else ("EXPIRED_LOSS" if ret_current < 0 else "EXPIRED_FLAT")
                         s.exit_price = round(curr_p, 6)

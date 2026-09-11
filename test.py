@@ -2174,25 +2174,65 @@ class SignalAuditTracker:
         except Exception as e:
             print(f"[SIGNAL TRACKER ERROR] Failed saving CSV: {e}")
 
+    def is_asset_quarantined(self, symbol: str, lookback_hours: float = 24.0, cooldown_hours: float = 12.0) -> tuple:
+        """
+        2-Strike Asset Blacklist Quarantine Engine:
+        If an asset recorded >= 2 stop losses within past 24 hours,
+        quarantines it for 12 hours after the latest stop loss to eliminate whipsaw chop bleeding.
+        """
+        now_utc = datetime.now(timezone.utc)
+        recent_losses = []
+        for r in self.records:
+            if r.get('symbol') != symbol:
+                continue
+            status = str(r.get('status', '')).upper()
+            outcome = str(r.get('outcome_label', '')).upper()
+            if status == "LOST_SL" or "LOST (SL" in outcome or "STOPPED" in outcome:
+                eval_str = str(r.get('evaluated_at_utc', '')).replace(' UTC', '').strip()
+                loss_dt = None
+                try:
+                    if eval_str:
+                        loss_dt = datetime.strptime(eval_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                    else:
+                        date_u = str(r.get('date_utc', ''))
+                        time_u = str(r.get('time_utc', '')).replace(' UTC', '').strip()
+                        if date_u and time_u:
+                            loss_dt = datetime.strptime(f"{date_u} {time_u}", '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                except Exception:
+                    pass
+                if loss_dt:
+                    age_hours = (now_utc - loss_dt).total_seconds() / 3600.0
+                    if age_hours <= lookback_hours:
+                        recent_losses.append(loss_dt)
+
+        if len(recent_losses) >= 2:
+            latest_loss = max(recent_losses)
+            hours_since_last = (now_utc - latest_loss).total_seconds() / 3600.0
+            if hours_since_last < cooldown_hours:
+                rem_hours = round(cooldown_hours - hours_since_last, 1)
+                return True, f"QUARANTINED (2 SLs in 24h - cooldown active for {rem_hours}h)"
+
+        return False, ""
+
     def build_kpi_summary(self) -> dict:
         total_signals = len(self.records)
-        won = sum(1 for r in self.records if "WON" in str(r.get('outcome_label', '')))
-        lost = sum(1 for r in self.records if "LOST" in str(r.get('outcome_label', '')))
+        won = sum(1 for r in self.records if "WON" in str(r.get('outcome_label', '')) or "BREAKEVEN" in str(r.get('outcome_label', '')))
+        lost = sum(1 for r in self.records if "LOST" in str(r.get('outcome_label', '')) and "BREAKEVEN" not in str(r.get('outcome_label', '')))
         expired = sum(1 for r in self.records if "EXPIRED" in str(r.get('outcome_label', '')))
-        pending = sum(1 for r in self.records if r.get('status') in ["PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"])
+        pending = sum(1 for r in self.records if r.get('status') in ["PENDING_EVALUATION", "ACTIVE", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"])
         decisive = won + lost
         win_rate = round((won / max(1, decisive)) * 100.0, 2) if decisive > 0 else 0.0
 
         # Grade A+ specific stats
         a_plus_recs = [r for r in self.records if "A+" in str(r.get('quality_grade', ''))]
-        a_plus_won = sum(1 for r in a_plus_recs if "WON" in str(r.get('outcome_label', '')))
-        a_plus_lost = sum(1 for r in a_plus_recs if "LOST" in str(r.get('outcome_label', '')))
+        a_plus_won = sum(1 for r in a_plus_recs if "WON" in str(r.get('outcome_label', '')) or "BREAKEVEN" in str(r.get('outcome_label', '')))
+        a_plus_lost = sum(1 for r in a_plus_recs if "LOST" in str(r.get('outcome_label', '')) and "BREAKEVEN" not in str(r.get('outcome_label', '')))
         a_plus_wr = round((a_plus_won / max(1, a_plus_won + a_plus_lost)) * 100.0, 2) if (a_plus_won + a_plus_lost) > 0 else 0.0
 
         # Grade A specific stats
         a_recs = [r for r in self.records if "Grade A (" in str(r.get('quality_grade', '')) or "Grade A\n" in str(r.get('quality_grade', ''))]
-        a_won = sum(1 for r in a_recs if "WON" in str(r.get('outcome_label', '')))
-        a_lost = sum(1 for r in a_recs if "LOST" in str(r.get('outcome_label', '')))
+        a_won = sum(1 for r in a_recs if "WON" in str(r.get('outcome_label', '')) or "BREAKEVEN" in str(r.get('outcome_label', '')))
+        a_lost = sum(1 for r in a_recs if "LOST" in str(r.get('outcome_label', '')) and "BREAKEVEN" not in str(r.get('outcome_label', '')))
         a_wr = round((a_won / max(1, a_won + a_lost)) * 100.0, 2) if (a_won + a_lost) > 0 else 0.0
 
         # Calculate Average & Cumulative Return safely (ignoring pending/empty/NaN values)
@@ -2342,7 +2382,7 @@ class SignalAuditTracker:
 
         for r in self.records:
             status = r.get('status', 'PENDING_EVALUATION')
-            if status not in ["PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
+            if status not in ["PENDING_EVALUATION", "ACTIVE", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]:
                 continue
 
             sym = r['symbol']
@@ -2367,6 +2407,7 @@ class SignalAuditTracker:
             direction = r.get('direction', 'LONG')
             is_tp1_locked = bool(r.get('is_tp1_locked', False) or status in ['TP1_LOCKED_BREAKEVEN', 'TP2_LOCKED_TRAIL'])
             is_tp2_locked = bool(r.get('is_tp2_locked', False) or status == 'TP2_LOCKED_TRAIL')
+            is_tier0_locked = bool(r.get('is_tier0_locked', False) or status == 'TIER0_PROTECTED_BREAKEVEN')
 
             # Update intra-trade extremes safely
             try:
@@ -2414,6 +2455,40 @@ class SignalAuditTracker:
             except Exception:
                 pass
 
+            # Resilient Zombie Expiry Guard: If still not expired, evaluate against created timestamp + duration
+            if not is_expired:
+                try:
+                    sig_id = str(r.get('signal_id', ''))
+                    date_u = str(r.get('date_utc', '')).strip()
+                    time_u = str(r.get('time_utc', '')).replace(' UTC', '').strip()
+                    h_name = str(r.get('horizon', '15M')).upper()
+                    h_tag = resolve_horizon_tag(h_name)
+                    dur_sec = HORIZON_EXPIRY_SECONDS.get(h_tag, 3600)
+                    created_dt = None
+                    if date_u and time_u:
+                        created_dt = datetime.strptime(f"{date_u} {time_u}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    elif 'SIG_' in sig_id:
+                        parts = sig_id.split('_')
+                        if len(parts) >= 3 and len(parts[1]) == 8 and len(parts[2]) == 4:
+                            dt_str = f"{parts[1]}_{parts[2]}"
+                            created_dt = datetime.strptime(dt_str, "%Y%m%d_%H%M").replace(tzinfo=timezone.utc)
+                    if created_dt and (now_utc - created_dt).total_seconds() >= dur_sec:
+                        is_expired = True
+                        r['predicted_close_utc'] = (created_dt + timedelta(seconds=dur_sec)).strftime('%Y-%m-%d %H:%M:%S UTC')
+                except Exception:
+                    pass
+
+            # 0. Tier-0 Early Breakeven Guard (+0.65% gain raises SL to Soft BE)
+            if max_gain >= 0.65 and not is_tp1_locked and not is_tier0_locked and not is_hit_sl:
+                r['is_tier0_locked'] = True
+                r['status'] = "TIER0_PROTECTED_BREAKEVEN"
+                soft_be_p = (entry_p * 0.998) if direction == "LONG" else (entry_p * 1.002)
+                r['sl_price'] = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
+                sl_p = r['sl_price']
+                r['outcome_label'] = "🛡️ TIER-0 PROTECTED (SOFT BE)"
+                is_tier0_locked = True
+                updated = True
+
             # 1. TP3 Full Target Reached
             if is_hit_tp3:
                 r['status'] = "WON_TP3"
@@ -2442,7 +2517,7 @@ class SignalAuditTracker:
                 r['outcome_label'] = "🟢 TP1 HIT (SL @ BREAKEVEN)"
                 updated = True
 
-            # 4. Stop Loss Triggered (Either Original SL or Trailed BE / TP1 Stop)
+            # 4. Stop Loss Triggered (Either Original SL or Trailed BE / Tier-0 Stop)
             elif is_hit_sl:
                 if is_tp2_locked:
                     # Trailed Stop hit at TP1 floor (Locked 50% TP1 + 30% TP2 + 20% TP1 runner)
@@ -2461,6 +2536,13 @@ class SignalAuditTracker:
                     r['exit_price'] = round(entry_p, 6)
                     r['realized_return_pct'] = f"{blended_ret:+.2f}%"
                     r['outcome_label'] = "🟢 WON (TP1 + BE RUNNER)"
+                elif is_tier0_locked:
+                    # Tier-0 Protected Breakeven Stop hit (saved trade from full -3% loss)
+                    ret_be = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                    r['status'] = "WON_TIER0_BE"
+                    r['exit_price'] = round(sl_p, 6)
+                    r['realized_return_pct'] = f"{ret_be:+.2f}%"
+                    r['outcome_label'] = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
                 else:
                     # Original Stop Loss hit without reaching TP1
                     r['status'] = "LOST_SL"
@@ -2482,6 +2564,11 @@ class SignalAuditTracker:
                     r['exit_price'] = round(curr_p, 6)
                     r['realized_return_pct'] = f"{blended_ret:+.2f}%"
                     r['outcome_label'] = f"🟢 WON (TP1 + EXP {blended_ret:+.2f}%)"
+                elif is_tier0_locked:
+                    r['status'] = "WON_TIER0_BE"
+                    r['exit_price'] = round(curr_p, 6)
+                    r['realized_return_pct'] = f"{ret_current:+.2f}%"
+                    r['outcome_label'] = f"🛡️ EXPIRED (TIER-0 BE {ret_current:+.2f}%)"
                 else:
                     r['status'] = "EXPIRED_PROFIT" if ret_current > 0 else ("EXPIRED_LOSS" if ret_current < 0 else "EXPIRED_FLAT")
                     r['exit_price'] = round(curr_p, 6)
@@ -2601,11 +2688,16 @@ class ActiveInstitutionalSignalManager:
     def get_active_symbols(self) -> list:
         syms = set()
         for s in self.active_signals.values():
-            if s.get('status') in ["ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
+            if s.get('status') in ["ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]:
                 sym = s.get('symbol')
                 if sym:
                     syms.add(sym)
         return list(syms)
+
+    def is_asset_quarantined(self, symbol: str) -> tuple:
+        if self.audit_tracker:
+            return self.audit_tracker.is_asset_quarantined(symbol)
+        return False, ""
 
     def upsert_signals(self, candidate_signals: list) -> list:
         """
@@ -2624,7 +2716,7 @@ class ActiveInstitutionalSignalManager:
 
             existing = self.active_signals.get(key)
             is_active = existing and existing.get('status') in [
-                "ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"
+                "ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"
             ]
 
             if is_active:
@@ -2644,7 +2736,7 @@ class ActiveInstitutionalSignalManager:
                 existing['tp3_price'] = round(float(cand.get('tp3_price', existing.get('tp3_price'))), 6)
 
                 # Maintain locked breakeven if already locked
-                if not existing.get('is_tp1_locked'):
+                if not existing.get('is_tp1_locked') and not existing.get('is_tier0_locked'):
                     existing['sl_price'] = round(float(cand.get('sl_price', existing.get('sl_price'))), 6)
 
                 existing['conviction'] = float(cand.get('conviction', existing.get('conviction', 50.0)))
@@ -2665,7 +2757,7 @@ class ActiveInstitutionalSignalManager:
                             rec['tp1_price'] = existing['tp1_price']
                             rec['tp2_price'] = existing['tp2_price']
                             rec['tp3_price'] = existing['tp3_price']
-                            if not rec.get('is_tp1_locked'):
+                            if not rec.get('is_tp1_locked') and not rec.get('is_tier0_locked'):
                                 rec['sl_price'] = existing['sl_price']
                             rec['conviction_pct'] = existing['conviction_pct']
                             rec['meta_win_prob_pct'] = existing['meta_win_prob_pct']
@@ -2682,6 +2774,7 @@ class ActiveInstitutionalSignalManager:
                 sig_copy['outcome_label'] = "ACTIVE 🟢"
                 sig_copy['is_tp1_locked'] = False
                 sig_copy['is_tp2_locked'] = False
+                sig_copy['is_tier0_locked'] = False
                 sig_copy['was_price_updated'] = False
                 sig_copy['created_at_utc'] = now_str
                 sig_copy['updated_at_utc'] = now_str
@@ -2722,7 +2815,7 @@ class ActiveInstitutionalSignalManager:
         keys_to_delete = []
         for key, s in self.active_signals.items():
             status = s.get('status', 'ACTIVE')
-            if status in ["WON_TP3", "WON_TP2_TRAIL", "WON_TP1_BE", "LOST_SL", "EXPIRED"]:
+            if status in ["WON_TP3", "WON_TP2_TRAIL", "WON_TP1_BE", "WON_TIER0_BE", "LOST_SL", "EXPIRED"]:
                 resolved_ts = s.get('resolved_at_ts', 0.0)
                 if resolved_ts > 0 and (now_ts - resolved_ts) > 7200.0:
                     keys_to_delete.append(key)
@@ -2733,7 +2826,7 @@ class ActiveInstitutionalSignalManager:
         # 2. Evaluate active signals
         for key, s in self.active_signals.items():
             status = s.get('status', 'ACTIVE')
-            if status not in ["ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
+            if status not in ["ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]:
                 continue
 
             sym = s.get('symbol')
@@ -2764,6 +2857,7 @@ class ActiveInstitutionalSignalManager:
 
             is_tp1_locked = bool(s.get('is_tp1_locked', False) or status in ['TP1_LOCKED_BREAKEVEN', 'TP2_LOCKED_TRAIL'])
             is_tp2_locked = bool(s.get('is_tp2_locked', False) or status == 'TP2_LOCKED_TRAIL')
+            is_tier0_locked = bool(s.get('is_tier0_locked', False) or status == 'TIER0_PROTECTED_BREAKEVEN')
 
             # Check expiration
             is_expired = False
@@ -2779,11 +2873,29 @@ class ActiveInstitutionalSignalManager:
                 except Exception:
                     pass
 
+            if not is_expired:
+                created_ts = s.get('created_ts')
+                h_tag = s.get('horizon_tag') or resolve_horizon_tag(s.get('horizon_key', 'scalp'))
+                dur_sec = HORIZON_EXPIRY_SECONDS.get(h_tag, 3600)
+                if created_ts and (now_ts - float(created_ts)) >= dur_sec:
+                    is_expired = True
+
             # Target checks
             is_hit_tp3 = (high_p >= tp3_p) if is_long else (low_p <= tp3_p)
             is_hit_tp2 = (high_p >= tp2_p) if is_long else (low_p <= tp2_p)
             is_hit_tp1 = (high_p >= tp1_p) if is_long else (low_p <= tp1_p)
             is_hit_sl = (low_p <= sl_p) if is_long else (high_p >= sl_p)
+
+            # 0. Tier-0 Early Breakeven Guard (+0.65% gain raises SL to Soft BE)
+            if pnl_pct >= 0.65 and not is_tp1_locked and not is_tier0_locked and not is_hit_sl:
+                s['is_tier0_locked'] = True
+                s['status'] = "TIER0_PROTECTED_BREAKEVEN"
+                soft_be_p = (entry_p * 0.998) if is_long else (entry_p * 1.002)
+                s['sl_price'] = round(max(sl_p, soft_be_p) if is_long else min(sl_p, soft_be_p), 6)
+                sl_p = s['sl_price']
+                s['outcome_label'] = "🛡️ PROFIT PROTECTED (SOFT BE)"
+                is_tier0_locked = True
+                updated = True
 
             # Win/Loss Resolution Transitions
             if is_hit_tp3:
@@ -2813,6 +2925,10 @@ class ActiveInstitutionalSignalManager:
                 elif is_tp1_locked:
                     s['status'] = "WON_TP1_BE"
                     s['outcome_label'] = "🏆 WON (TP1 + BE)"
+                elif is_tier0_locked:
+                    s['status'] = "WON_TIER0_BE"
+                    ret_be = ((sl_p - entry_p) / entry_p) * 100.0 if is_long else ((entry_p - sl_p) / entry_p) * 100.0
+                    s['outcome_label'] = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
                 else:
                     s['status'] = "LOST_SL"
                     s['outcome_label'] = f"🛑 STOPPED (SL -{abs(sl_p - entry_p)/entry_p*100.0:.2f}%)"
@@ -2821,9 +2937,13 @@ class ActiveInstitutionalSignalManager:
                 s['resolved_at_utc'] = now_str
                 updated = True
             elif is_expired:
-                s['status'] = "EXPIRED"
-                ret_sign = "+" if pnl_pct >= 0 else ""
-                s['outcome_label'] = f"⏱️ EXPIRED ({ret_sign}{pnl_pct:.2f}%)"
+                if is_tier0_locked:
+                    s['status'] = "WON_TIER0_BE"
+                    s['outcome_label'] = f"🛡️ EXPIRED (TIER-0 BE {pnl_pct:+.2f}%)"
+                else:
+                    s['status'] = "EXPIRED"
+                    ret_sign = "+" if pnl_pct >= 0 else ""
+                    s['outcome_label'] = f"⏱️ EXPIRED ({ret_sign}{pnl_pct:.2f}%)"
                 s['exit_price'] = round(curr_p, 6)
                 s['resolved_at_ts'] = now_ts
                 s['resolved_at_utc'] = now_str
@@ -3562,6 +3682,16 @@ class HybridQuantEngine:
         is_dip_buy = d1_macro_bull and rsi_anchor <= 46.0 and (p_cat_live >= 0.48 or p_xgb_live >= 0.48)
         is_rally_sell = (not d1_macro_bull) and rsi_anchor >= 55.0 and (p_cat_live <= 0.52 or p_xgb_live <= 0.52)
 
+        # Quantitative Breakdown Short Engine (activated when market is weak/bearish or coin underperforms BTC)
+        btc_regime = getattr(self, 'btc_market_regime', 'RANGE_CONSOLIDATION')
+        is_bear_regime = btc_regime in ["BEAR_MOMENTUM", "CIRCUIT_BREAKER", "ALERT_DUMP", "RANGE_CONSOLIDATION", "HIGH_VOLATILITY_CHOP"] or not d1_macro_bull
+        is_breakdown_short = (
+            is_bear_regime and
+            rs_btc < 0.0 and
+            rsi_anchor <= 54.0 and
+            (h_dir == "BEARISH" or p_cat_live <= 0.50 or p_xgb_live <= 0.50)
+        )
+
         is_reversal_setup = False
         if is_bottom_reversal and (not is_top_reversal or bull_rev_score > bear_rev_score):
             h_dir = "BULLISH"
@@ -3601,6 +3731,12 @@ class HybridQuantEngine:
             decision = f"🎯 ELITE RALLY-SELL EXECUTE (SHORT){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
+        elif is_breakdown_short and not is_neutral_zone:
+            h_dir = "BEARISH"
+            h_conf = max(66.0, min(95.0, h_conf + 8.0))
+            decision = f"🎯 ELITE BREAKDOWN EXECUTE (SHORT){squeeze_boost_label}"
+            priority = 1
+            is_neutral_zone = False
         elif is_neutral_zone:
             decision = "⚪ CONSOLIDATION (RANGE-BOUND / WAIT)"
             priority = 4
@@ -3630,6 +3766,7 @@ class HybridQuantEngine:
         live_low_c = float(live_candle['low'].values[0]) if 'low' in live_candle.columns else current_price
         live_high_c = float(live_candle['high'].values[0]) if 'high' in live_candle.columns else current_price
 
+        # Asymmetric R:R Architecture: TP1 at 1.15x actual risk, TP2 at 2.0x, TP3 at 3.0x
         if h_dir == "BULLISH":
             sl_base = current_price - risk_dist
             if is_reversal_setup or is_bull_sweep:
@@ -3637,10 +3774,10 @@ class HybridQuantEngine:
             else:
                 sl_p = sl_base
             actual_risk = max(1e-8, current_price - sl_p)
-            tp1_p = current_price + (0.50 * actual_risk)
-            tp2_p = current_price + (1.00 * actual_risk)
-            tp3_p = current_price + (1.50 * actual_risk)
-            tp4_p = current_price + (2.00 * actual_risk)
+            tp1_p = current_price + (1.15 * actual_risk)
+            tp2_p = current_price + (2.00 * actual_risk)
+            tp3_p = current_price + (3.00 * actual_risk)
+            tp4_p = current_price + (4.00 * actual_risk)
             tp_p = tp4_p
         else:
             sl_base = current_price + risk_dist
@@ -3650,10 +3787,10 @@ class HybridQuantEngine:
                 sl_p = sl_base
             actual_risk = max(1e-8, sl_p - current_price)
             min_floor = max(1e-8, current_price * 0.05)
-            tp1_p = max(min_floor, current_price - (0.50 * actual_risk))
-            tp2_p = max(min_floor, current_price - (1.00 * actual_risk))
-            tp3_p = max(min_floor, current_price - (1.50 * actual_risk))
-            tp4_p = max(min_floor, current_price - (2.00 * actual_risk))
+            tp1_p = max(min_floor, current_price - (1.15 * actual_risk))
+            tp2_p = max(min_floor, current_price - (2.00 * actual_risk))
+            tp3_p = max(min_floor, current_price - (3.00 * actual_risk))
+            tp4_p = max(min_floor, current_price - (4.00 * actual_risk))
             tp_p = tp4_p
 
         # 8. Minimum Profit Hurdle Check (Enforces >= 0.40% return to clear round-trip buy & sell fees)
@@ -4467,9 +4604,13 @@ class HybridQuantEngine:
                 elif h_key == 'swing' and tp_pct < min_swing_gain:
                     is_fee_drag_rejected = True
 
-                # 3. Asset-level deduplication lockout
+                # 3. 2-Strike Asset Blacklist Quarantine Check & Deduplication
+                is_quarantined, quar_reason = self.signal_tracker.is_asset_quarantined(sym)
                 last_sym_time = self.symbol_last_signal_time.get(sym, 0)
-                is_asset_locked = (now_ts - last_sym_time) < asset_cooldown_sec and not is_triple
+                is_asset_locked = ((now_ts - last_sym_time) < asset_cooldown_sec and not is_triple) or is_quarantined
+                if is_quarantined:
+                    decision = f"⛔ {quar_reason}"
+                    prio = 5
 
                 # 4. BTC Shield Check
                 is_shield_blocked = False
@@ -4483,12 +4624,14 @@ class HybridQuantEngine:
                 is_in_cooldown = (now_ts - last_sig_time) < cooldown_map.get(h_key, 1800)
 
                 # 💎 Grade Classification
+                is_exec_decision = any(k in decision for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "REVERSAL", "SWEEP"])
                 is_a_plus_candidate = (
                     (conv >= a_plus_cutoff or (is_triple and conv >= 70.0)) and
-                    ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision) and
+                    is_exec_decision and
                     not is_shield_blocked and
                     not is_parabolic_short and
                     not is_fee_drag_rejected and
+                    not is_quarantined and
                     (rs_val >= 0.0 if direction == "BULLISH" else rs_val <= 0.2) and
                     elite_prec >= 0.55
                 )
@@ -4497,11 +4640,11 @@ class HybridQuantEngine:
                     grade = "💎 Grade A+"
                     grade_tier = 1
                     tier_label = "ELITE CONFLUENCE"
-                elif (conv >= a_cutoff and prio <= 2 and not is_shield_blocked and not is_parabolic_short) or (("EXECUTE" in decision or "DIP-BUY" in decision) and not is_shield_blocked and not is_parabolic_short):
+                elif (conv >= a_cutoff and prio <= 2 and not is_shield_blocked and not is_parabolic_short and not is_quarantined) or (is_exec_decision and not is_shield_blocked and not is_parabolic_short and not is_quarantined):
                     grade = "🟢 Grade A"
                     grade_tier = 2
                     tier_label = "HIGH CONVICTION"
-                elif conv >= b_cutoff and prio <= 3 and not is_shield_blocked:
+                elif conv >= b_cutoff and prio <= 3 and not is_shield_blocked and not is_quarantined:
                     grade = "🟡 Grade B+"
                     grade_tier = 3
                     tier_label = "ACTIONABLE MOMENTUM"
@@ -4555,7 +4698,7 @@ class HybridQuantEngine:
                 
                 # Composite Score combining Conviction, ML Meta-Score, Triple Confluence & Yield
                 triple_bonus = 30.0 if is_triple else 0.0
-                exec_bonus = 20.0 if ("EXECUTE" in decision or "DIP-BUY" in decision or "RALLY-SELL" in decision or "REVERSAL" in decision) else 0.0
+                exec_bonus = 20.0 if is_exec_decision else 0.0
                 composite_score = (conv * 0.4) + (meta_win_prob * 100.0 * 0.4) + (max(0.0, rs_val) * 4.0) + triple_bonus + exec_bonus + (abs(exp_ret) * 50.0)
                 candidate_obj['composite_score'] = composite_score
 
@@ -4564,19 +4707,21 @@ class HybridQuantEngine:
         # Sort candidate setups: Grade Tier first, Meta Win Probability second, Composite score third
         all_signals.sort(key=lambda x: (x['grade_tier'], -x['meta_win_prob'], -x['composite_score'], -x['conviction']))
 
-        # Filter candidates applying ML Meta-Probability Gate & Cooldown Throttling
+        # Filter candidates applying ML Meta-Probability Gate & Grade A+ Quality Enforcement
         qualified_pool = []
         for s in all_signals:
             if s['is_shield_blocked'] or s['is_parabolic_short'] or s['is_fee_drag_rejected']:
                 continue
-            # Pass if Meta probability meets threshold or Grade A+ with high conviction
-            if s['meta_win_prob'] >= min_meta_prob or (s['grade_tier'] == 1 and s['conviction'] >= 78.0):
-                if not s['is_in_cooldown'] and not s['is_asset_locked']:
-                    qualified_pool.append(s)
+            # Pass Grade A+ (tier 1) or Grade A (tier 2) with conviction >= 72% and meta_win_prob >= 0.70
+            # Strictly discard Grade B+ and Grade C to eliminate negative alpha drag
+            is_tier1_ok = (s['grade_tier'] == 1 and (s['meta_win_prob'] >= 0.65 or s['conviction'] >= 75.0))
+            is_tier2_ok = (s['grade_tier'] == 2 and s['conviction'] >= 72.0 and s['meta_win_prob'] >= 0.70)
+            if (is_tier1_ok or is_tier2_ok) and not s['is_in_cooldown'] and not s['is_asset_locked']:
+                qualified_pool.append(s)
 
         pool_for_selection = qualified_pool if len(qualified_pool) >= min_sig else all_signals
 
-        # Horizon-Separated High-Potential Signal Buckets (>= 0.40% Return & >= 65% Meta Win Prob)
+        # Horizon-Separated High-Potential Signal Buckets (>= 0.40% Return & Quality Filter Enforcement)
         horizon_bucket_defs = [
             {"key": "scalp", "tag": "15M", "label": "⚡ Scalp (15M)", "min_return": 0.40},
             {"key": "horizon_30m", "tag": "30M", "label": "⏱️ 30M", "min_return": 0.40},
@@ -4599,15 +4744,19 @@ class HybridQuantEngine:
             h_tag = b["tag"]
             min_ret = b["min_return"]
 
-            # Filter candidates for this exact horizon
+            # Filter candidates for this exact horizon with Grade A+ Quality Filter Gate
             h_candidates = [
                 s for s in all_signals
                 if (s['horizon_key'] == h_k or h_tag.lower() in s['horizon_key'].lower())
                 and not s['is_shield_blocked']
                 and not s['is_parabolic_short']
                 and not s['is_fee_drag_rejected']
+                and not s.get('is_asset_locked', False)
                 and abs(s.get('exp_return', 0.0) * 100.0) >= min_ret
-                and (s['meta_win_prob'] >= min_meta_prob or (s['grade_tier'] == 1 and s['conviction'] >= 78.0))
+                and (
+                    (s['grade_tier'] == 1 and (s['meta_win_prob'] >= 0.65 or s['conviction'] >= 75.0)) or
+                    (s['grade_tier'] == 2 and s['conviction'] >= 72.0 and s['meta_win_prob'] >= 0.70)
+                )
             ]
 
             # Sort by Grade Tier -> Meta Win Prob -> Composite Score
