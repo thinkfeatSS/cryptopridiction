@@ -404,6 +404,8 @@ export default function AssetPredictionMatrix() {
     setSortHorizon("scalp");
     setSortOrder("none");
     setBiasFilter("all");
+    setSelectedHorizon("all");
+    setSearch("");
   }, []);
 
   const filteredAssets = useMemo(() => {
@@ -650,19 +652,19 @@ export default function AssetPredictionMatrix() {
                 </button>
               ))}
 
-              {/* Reset Horizon Button */}
+              {/* Reset to Original Order Button */}
               <button
                 type="button"
                 onClick={handleResetSort}
-                className={`flex items-center gap-1 px-2.5 py-1 text-xs font-bold rounded-md transition-all border ${
-                  sortOrder !== "none" || biasFilter !== "all" || sortHorizon !== "scalp"
-                    ? "bg-rose-500/20 text-rose-300 border-rose-500/50 hover:bg-rose-500/30 shadow-sm shadow-rose-500/20"
-                    : "text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-800/50"
+                className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-md transition-all border ${
+                  sortOrder !== "none" || biasFilter !== "all" || sortHorizon !== "scalp" || selectedHorizon !== "all" || search !== ""
+                    ? "bg-cyan-500/25 text-cyan-200 border-cyan-500/60 hover:bg-cyan-500/35 shadow-sm shadow-cyan-500/25 ring-1 ring-cyan-500/40"
+                    : "bg-slate-800/70 text-slate-300 border-slate-700 hover:text-white hover:bg-slate-700/60"
                 }`}
-                title="Reset Sort Horizon to default (⚡ Scalp 15M) and clear stance sorting"
+                title="Reset to Original AI Engine Ranking Order (Rank #1, #2, #3...)"
               >
-                <RotateCcw className="h-3 w-3" />
-                <span>Reset</span>
+                <RotateCcw className="h-3.5 w-3.5 text-cyan-400" />
+                <span>↺ Reset to Original Order</span>
               </button>
             </div>
           </div>
@@ -673,6 +675,23 @@ export default function AssetPredictionMatrix() {
               Sort Order:
             </span>
             <div className="flex items-center gap-1 bg-dark-950/90 p-1 rounded-lg border border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setSortOrder("none");
+                  setBiasFilter("all");
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-md transition-all ${
+                  sortOrder === "none" && biasFilter === "all"
+                    ? "bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 shadow-sm"
+                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+                }`}
+                title="Original institutional ranking order by AI quantitative conviction"
+              >
+                <RotateCcw className="h-3.5 w-3.5 text-cyan-400" />
+                <span>Original Order</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => setSortOrder(sortOrder === "bullish_first" ? "none" : "bullish_first")}
@@ -717,18 +736,6 @@ export default function AssetPredictionMatrix() {
                 <span>Bearish First</span>
                 {sortOrder === "bearish_first" && <ArrowDown className="h-3.5 w-3.5 text-rose-400" />}
               </button>
-
-              {sortOrder !== "none" && (
-                <button
-                  type="button"
-                  onClick={() => setSortOrder("none")}
-                  className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-400 hover:text-white rounded-md transition-colors"
-                  title="Reset to default ranking"
-                >
-                  <RotateCcw className="h-3 w-3" />
-                  <span>Reset</span>
-                </button>
-              )}
             </div>
           </div>
         </div>
