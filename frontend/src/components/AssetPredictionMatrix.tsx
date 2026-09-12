@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { useForecastQuery, useStatusQuery, useLivePricesQuery } from "@/hooks/useCryptoData";
 import { formatPercent, formatUsd } from "@/lib/utils";
 import CoinSignalHistoryModal from "@/components/CoinSignalHistoryModal";
@@ -278,6 +278,7 @@ function AssetConfluenceCell({
   toggleWatchlist,
   idx,
   serverPredictionTimeFallback,
+  isStale,
 }: {
   item: any;
   livePrice: number;
@@ -286,6 +287,7 @@ function AssetConfluenceCell({
   toggleWatchlist: (s: string) => void;
   idx: number;
   serverPredictionTimeFallback?: string | number;
+  isStale?: boolean;
 }) {
   const itemTime = item.server_prediction_time || item.server_prediction_ts || serverPredictionTimeFallback;
   const relTime = useRelativeTime(itemTime);
@@ -321,6 +323,12 @@ function AssetConfluenceCell({
                 🥇 TOP
               </span>
             )}
+            {/* Stale / Updating badge – visible while this coin is still being scanned */}
+            {isStale && (
+              <span className="inline-flex items-center gap-1 rounded bg-amber-950/60 px-1.5 py-0.5 text-[9px] font-bold text-amber-400 border border-amber-500/40 animate-pulse">
+                ⟳ Updating
+              </span>
+            )}
           </div>
 
           {/* Symbol & Price */}
@@ -347,6 +355,168 @@ function AssetConfluenceCell({
   );
 }
 
+// ─── Memoized Row Components ────────────────────────────────────────────────
+
+// Wraps a single <tr> and only re-renders when its data identity changes.
+const AssetAllHorizonRow = React.memo(function AssetAllHorizonRow({
+  item,
+  idx,
+  livePrice,
+  confTag,
+  isStarredFn,
+  toggleWatchlist,
+  activeHorizonKey,
+  sortOrder,
+  serverPredictionTimeFallback,
+  onSelectCoin,
+  isStale,
+}: {
+  item: any;
+  idx: number;
+  livePrice: number;
+  confTag: string;
+  isStarredFn: (s: string) => boolean;
+  toggleWatchlist: (s: string) => void;
+  activeHorizonKey: HorizonSortKey;
+  sortOrder: BiasSortOrder;
+  serverPredictionTimeFallback?: string;
+  onSelectCoin: (symbol: string, price: number) => void;
+  isStale: boolean;
+}) {
+  const s    = item.horizons?.scalp       || {};
+  const h30m = item.horizons?.horizon_30m || {};
+  const w    = item.horizons?.swing       || {};
+  const h4h  = item.horizons?.horizon_4h  || {};
+  const h12h = item.horizons?.horizon_12h || {};
+  const m    = item.horizons?.macro       || {};
+  const h4d  = item.horizons?.horizon_4d  || {};
+  const h7d  = item.horizons?.weekly      || {};
+  const h15d = item.horizons?.biweekly    || {};
+  const h30d = item.horizons?.monthly     || {};
+
+  return (
+    <tr
+      onClick={() => onSelectCoin(item.symbol, livePrice)}
+      className="matrix-row-virtual hover:bg-slate-800/60 cursor-pointer transition-colors group"
+      title="Click to view 15-minute historical signal records for this coin"
+    >
+      <AssetConfluenceCell
+        item={item}
+        livePrice={livePrice}
+        confTag={confTag}
+        isStarred={isStarredFn(item.symbol)}
+        toggleWatchlist={toggleWatchlist}
+        idx={idx}
+        serverPredictionTimeFallback={serverPredictionTimeFallback}
+        isStale={isStale}
+      />
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "scalp"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(s)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_30m" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h30m)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "swing"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(w)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4h"  && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h4h)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_12h" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h12h)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "macro"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(m)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4d"  && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h4d)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "weekly"      && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h7d)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "biweekly"    && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h15d)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "monthly"     && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h30d)}</td>
+      <td className="py-3 px-4 text-right font-sans">
+        <div className="flex flex-col items-end gap-1">
+          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-black border ${
+            item.confluence_bull_count >= 6 ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/60"
+            : item.confluence_bear_count >= 6 ? "bg-rose-950/80 text-rose-300 border-rose-500/60"
+            : "bg-slate-900/90 text-slate-400 border-slate-800"
+          }`}>
+            <Activity className="h-3 w-3" />
+            {item.confluence_bull_count ?? 0} Bulls / {item.confluence_bear_count ?? 0} Bears
+          </span>
+          <span className="text-[10px] font-mono text-slate-500">
+            Align: {item.alignment_score !== undefined ? `${item.alignment_score > 0 ? "+" : ""}${item.alignment_score}%` : "—"}
+          </span>
+        </div>
+      </td>
+    </tr>
+  );
+});
+
+const AssetSingleHorizonRow = React.memo(function AssetSingleHorizonRow({
+  item,
+  idx,
+  livePrice,
+  confTag,
+  isStarredFn,
+  toggleWatchlist,
+  selectedHorizon,
+  serverPredictionTimeFallback,
+  onSelectCoin,
+  isStale,
+}: {
+  item: any;
+  idx: number;
+  livePrice: number;
+  confTag: string;
+  isStarredFn: (s: string) => boolean;
+  toggleWatchlist: (s: string) => void;
+  selectedHorizon: HorizonKey;
+  serverPredictionTimeFallback?: string;
+  onSelectCoin: (symbol: string, price: number) => void;
+  isStale: boolean;
+}) {
+  const h = item.horizons?.[selectedHorizon] || {};
+  const isLong = h.direction === "BULLISH" || h.direction === "LONG";
+  const conv = h.conviction ?? 50.0;
+  const metaProb =
+    h.meta_win_prob_pct ??
+    (h.meta_win_prob !== undefined && h.meta_win_prob !== null
+      ? h.meta_win_prob <= 1.0 ? h.meta_win_prob * 100.0 : h.meta_win_prob
+      : h.conviction ? Math.min(94.5, Math.max(48.0, h.conviction * 0.86)) : 72.0);
+  const expRet = h.exp_return ? h.exp_return * 100 : 0.0;
+
+  return (
+    <tr
+      onClick={() => onSelectCoin(item.symbol, livePrice)}
+      className="matrix-row-virtual hover:bg-slate-800/60 cursor-pointer transition-colors group"
+      title="Click to view 15-minute historical signal records for this coin"
+    >
+      <AssetConfluenceCell
+        item={item}
+        livePrice={livePrice}
+        confTag={confTag}
+        isStarred={isStarredFn(item.symbol)}
+        toggleWatchlist={toggleWatchlist}
+        idx={idx}
+        serverPredictionTimeFallback={serverPredictionTimeFallback}
+        isStale={isStale}
+      />
+      <td className="py-3 px-4">
+        <span className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-bold font-sans ${
+          isLong ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
+                 : "bg-rose-500/20 text-rose-400 border border-rose-500/40"
+        }`}>
+          {isLong ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
+          {isLong ? "LONG BUY" : "SHORT SELL"}
+        </span>
+      </td>
+      <td className="py-3 px-4"><span className="font-bold text-cyan-300">{conv.toFixed(1)}%</span></td>
+      <td className="py-3 px-4 font-mono">
+        <span className="inline-flex items-center gap-1 rounded bg-purple-950/80 px-2 py-0.5 text-xs font-bold text-purple-300 border border-purple-500/40 shadow-sm shadow-purple-500/20">
+          🧠 {metaProb.toFixed(1)}%
+        </span>
+      </td>
+      <td className="py-3 px-4 font-bold text-emerald-400">{formatUsd(h.tp_price)}</td>
+      <td className="py-3 px-4 font-bold text-rose-400">{formatUsd(h.sl_price)}</td>
+      <td className="py-3 px-4">
+        <span className={`font-bold ${expRet >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatPercent(expRet)}</span>
+      </td>
+      <td className="py-3 px-4 text-right font-sans">
+        <div className="flex justify-end">{renderSignalCell(h)}</div>
+      </td>
+    </tr>
+  );
+});
+
+// ─── Main Component ──────────────────────────────────────────────────────────
+
 export default function AssetPredictionMatrix() {
   const { data: forecast, isLoading } = useForecastQuery();
   const { data: status } = useStatusQuery();
@@ -367,7 +537,64 @@ export default function AssetPredictionMatrix() {
 
   const activeHorizonKey: HorizonSortKey = sortHorizon || "scalp";
 
-  const leaderboard = useMemo(() => forecast?.scanner_leaderboard || [], [forecast?.scanner_leaderboard]);
+  // ── Stable per-symbol row cache ──────────────────────────────────────────
+  // Merges new leaderboard data into an existing map so rows retain their last
+  // known data while a fresh scan is still computing (instead of going blank).
+  const rowCacheRef = useRef<Map<string, any>>(new Map());
+  const prevScanVersionRef = useRef<number | null>(null);
+
+  const rawLeaderboard = useMemo(
+    () => forecast?.scanner_leaderboard || [],
+    [forecast?.scanner_leaderboard]
+  );
+
+  // Detect the current scan version (falls back to timestamp string)
+  const currentScanVersion: number | string =
+    (forecast as any)?.scan_version ??
+    (forecast as any)?.full_scan_version ??
+    forecast?.server_prediction_time ??
+    forecast?.timestamp ??
+    0;
+
+  // Merge incoming rows into cache; mark whether rows look stale
+  useEffect(() => {
+    rawLeaderboard.forEach((item: any) => {
+      rowCacheRef.current.set(item.symbol, item);
+    });
+  }, [rawLeaderboard]);
+
+  // Build the stable leaderboard from cache, patched with any fresh rows
+  const leaderboard = useMemo(() => {
+    if (rawLeaderboard.length === 0) {
+      // Still polling – return whatever we have cached
+      return Array.from(rowCacheRef.current.values());
+    }
+    // Build a symbol-indexed map of new data
+    const newMap = new Map<string, any>();
+    rawLeaderboard.forEach((item: any) => newMap.set(item.symbol, item));
+    // Merge: use new data when available, fall back to cache for missing symbols
+    const merged: any[] = [];
+    // First add all cached symbols (preserves order, retains stale rows)
+    rowCacheRef.current.forEach((cachedItem, sym) => {
+      merged.push(newMap.has(sym) ? newMap.get(sym) : cachedItem);
+    });
+    // Add brand-new symbols not yet in cache
+    rawLeaderboard.forEach((item: any) => {
+      if (!rowCacheRef.current.has(item.symbol)) merged.push(item);
+    });
+    return merged;
+  }, [rawLeaderboard]);
+
+  // Set of symbols currently "stale" (in cache but not yet in newest fetch)
+  const staleSymbols = useMemo(() => {
+    if (rawLeaderboard.length === 0) return new Set<string>();
+    const freshSet = new Set(rawLeaderboard.map((i: any) => i.symbol));
+    const stale = new Set<string>();
+    rowCacheRef.current.forEach((_, sym) => {
+      if (!freshSet.has(sym)) stale.add(sym);
+    });
+    return stale;
+  }, [rawLeaderboard]);
 
   // Live stance distribution counts for the active horizon
   const stanceCounts = useMemo(() => {
@@ -870,7 +1097,7 @@ export default function AssetPredictionMatrix() {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/60 bg-dark-950/40">
-            {isLoading ? (
+            {isLoading && leaderboard.length === 0 ? (
               <tr>
                 <td colSpan={12} className="py-12 text-center text-slate-500 font-sans">
                   Loading Top 200 asset predictions from latest multi-horizon scan...
@@ -884,21 +1111,13 @@ export default function AssetPredictionMatrix() {
               </tr>
             ) : (
               filteredAssets.map((item: any, idx: number) => {
-                const s = item.horizons?.scalp || {};
-                const h30m = item.horizons?.horizon_30m || {};
-                const w = item.horizons?.swing || {};
-                const h4h = item.horizons?.horizon_4h || {};
-                const h12h = item.horizons?.horizon_12h || {};
-                const m = item.horizons?.macro || {};
-                const h4d = item.horizons?.horizon_4d || {};
-                const h7d = item.horizons?.weekly || {};
-                const h15d = item.horizons?.biweekly || {};
-                const h30d = item.horizons?.monthly || {};
                 const isTriple = item.is_triple_confluence;
                 const confTag = item.confluence_tag || (isTriple ? "💎 TRIPLE CONFLUENCE" : `Score: ${item.alignment_score ?? 0}%`);
-                const phase = item.market_phase || "CONSOLIDATION";
+                const livePrice = livePrices[item.symbol] || livePrices[item.symbol.replace('/', '')] || item.current_price;
+                const isStale = staleSymbols.has(item.symbol);
+                const fallbackTime = forecast?.server_prediction_time || forecast?.timestamp;
 
-                // Specific Horizon View (e.g. 15M, 1H, 24H, 2D, 3D, 7D, 15D, 30D)
+                // Single-Horizon focused view
                 if (
                   selectedHorizon !== "all" &&
                   selectedHorizon !== "high_confluence" &&
@@ -906,184 +1125,39 @@ export default function AssetPredictionMatrix() {
                   selectedHorizon !== "trend_expansion" &&
                   selectedHorizon !== "watchlist"
                 ) {
-                  const h = item.horizons?.[selectedHorizon] || {};
-                  const isLong = h.direction === "BULLISH" || h.direction === "LONG";
-                  const conv = h.conviction ?? 50.0;
-                  const metaProb =
-                    h.meta_win_prob_pct ??
-                    (h.meta_win_prob !== undefined && h.meta_win_prob !== null
-                      ? h.meta_win_prob <= 1.0
-                        ? h.meta_win_prob * 100.0
-                        : h.meta_win_prob
-                      : h.conviction
-                      ? Math.min(94.5, Math.max(48.0, h.conviction * 0.86))
-                      : 72.0);
-                  const expRet = h.exp_return ? h.exp_return * 100 : 0.0;
-                  const livePrice = livePrices[item.symbol] || livePrices[item.symbol.replace('/', '')] || item.current_price;
-
                   return (
-                    <tr
+                    <AssetSingleHorizonRow
                       key={item.symbol}
-                      onClick={() => setSelectedCoin({ symbol: item.symbol, price: livePrice })}
-                      className="matrix-row-virtual hover:bg-slate-800/60 cursor-pointer transition-colors group"
-                      title="Click to view 15-minute historical signal records for this coin"
-                    >
-                      {/* Asset & Confluence Cell with Server Time */}
-                      <AssetConfluenceCell
-                        item={item}
-                        livePrice={livePrice}
-                        confTag={confTag}
-                        isStarred={isStarred(item.symbol)}
-                        toggleWatchlist={toggleWatchlist}
-                        idx={idx}
-                        serverPredictionTimeFallback={forecast?.server_prediction_time || forecast?.timestamp}
-                      />
-
-                      {/* Direction */}
-                      <td className="py-3 px-4">
-                        <span
-                          className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-bold font-sans ${
-                            isLong
-                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                              : "bg-rose-500/20 text-rose-400 border border-rose-500/40"
-                          }`}
-                        >
-                          {isLong ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
-                          {isLong ? "LONG BUY" : "SHORT SELL"}
-                        </span>
-                      </td>
-
-                      {/* Conviction */}
-                      <td className="py-3 px-4">
-                        <span className="font-bold text-cyan-300">{conv.toFixed(1)}%</span>
-                      </td>
-
-                      {/* 🧠 ML Win Prob */}
-                      <td className="py-3 px-4 font-mono">
-                        <span className="inline-flex items-center gap-1 rounded bg-purple-950/80 px-2 py-0.5 text-xs font-bold text-purple-300 border border-purple-500/40 shadow-sm shadow-purple-500/20">
-                          🧠 {metaProb.toFixed(1)}%
-                        </span>
-                      </td>
-
-                      {/* Take Profit */}
-                      <td className="py-3 px-4 font-bold text-emerald-400">
-                        {formatUsd(h.tp_price)}
-                      </td>
-
-                      {/* Stop Loss */}
-                      <td className="py-3 px-4 font-bold text-rose-400">
-                        {formatUsd(h.sl_price)}
-                      </td>
-
-                      {/* Exp Return */}
-                      <td className="py-3 px-4">
-                        <span className={`font-bold ${expRet >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                          {formatPercent(expRet)}
-                        </span>
-                      </td>
-
-                      {/* Signal Strength / Decision */}
-                      <td className="py-3 px-4 text-right font-sans">
-                        <div className="flex justify-end">
-                          {renderSignalCell(h)}
-                        </div>
-                      </td>
-                    </tr>
+                      item={item}
+                      idx={idx}
+                      livePrice={livePrice}
+                      confTag={confTag}
+                      isStarredFn={isStarred}
+                      toggleWatchlist={toggleWatchlist}
+                      selectedHorizon={selectedHorizon}
+                      serverPredictionTimeFallback={fallbackTime}
+                      onSelectCoin={(sym, price) => setSelectedCoin({ symbol: sym, price })}
+                      isStale={isStale}
+                    />
                   );
                 }
 
                 // All-Horizon / Confluence Overview Row
-                const livePrice = livePrices[item.symbol] || livePrices[item.symbol.replace('/', '')] || item.current_price;
-
                 return (
-                  <tr
+                  <AssetAllHorizonRow
                     key={item.symbol}
-                    onClick={() => setSelectedCoin({ symbol: item.symbol, price: livePrice })}
-                    className="matrix-row-virtual hover:bg-slate-800/60 cursor-pointer transition-colors group"
-                    title="Click to view 15-minute historical signal records for this coin"
-                  >
-                    {/* Asset & Confluence Cell with Server Time */}
-                    <AssetConfluenceCell
-                      item={item}
-                      livePrice={livePrice}
-                      confTag={confTag}
-                      isStarred={isStarred(item.symbol)}
-                      toggleWatchlist={toggleWatchlist}
-                      idx={idx}
-                      serverPredictionTimeFallback={forecast?.server_prediction_time || forecast?.timestamp}
-                    />
-
-                    {/* Scalp (15M) */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "scalp" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(s)}
-                    </td>
-
-                    {/* 30M */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_30m" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(h30m)}
-                    </td>
-
-                    {/* Swing (1H) */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "swing" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(w)}
-                    </td>
-
-                    {/* 4H (Intraday) */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4h" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(h4h)}
-                    </td>
-
-                    {/* 12H */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_12h" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(h12h)}
-                    </td>
-
-                    {/* Macro (24H) */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "macro" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(m)}
-                    </td>
-
-                    {/* 4D */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4d" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(h4d)}
-                    </td>
-
-                    {/* Weekly (7D) */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "weekly" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(h7d)}
-                    </td>
-
-                    {/* Bi-Weekly (15D) */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "biweekly" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(h15d)}
-                    </td>
-
-                    {/* Monthly (30D) */}
-                    <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "monthly" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>
-                      {renderSignalCell(h30d)}
-                    </td>
-
-                    {/* Alignment & Radar Meter */}
-                    <td className="py-3 px-4 text-right font-sans">
-                      <div className="flex flex-col items-end gap-1">
-                        <span
-                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-black border ${
-                            item.confluence_bull_count >= 6
-                              ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/60"
-                              : item.confluence_bear_count >= 6
-                              ? "bg-rose-950/80 text-rose-300 border-rose-500/60"
-                              : "bg-slate-900/90 text-slate-400 border-slate-800"
-                          }`}
-                        >
-                          <Activity className="h-3 w-3" />
-                          {item.confluence_bull_count ?? 0} Bulls / {item.confluence_bear_count ?? 0} Bears
-                        </span>
-                        <span className="text-[10px] font-mono text-slate-500">
-                          Align: {item.alignment_score !== undefined ? `${item.alignment_score > 0 ? "+" : ""}${item.alignment_score}%` : "—"}
-                        </span>
-                      </div>
-                    </td>
-                  </tr>
+                    item={item}
+                    idx={idx}
+                    livePrice={livePrice}
+                    confTag={confTag}
+                    isStarredFn={isStarred}
+                    toggleWatchlist={toggleWatchlist}
+                    activeHorizonKey={activeHorizonKey}
+                    sortOrder={sortOrder}
+                    serverPredictionTimeFallback={fallbackTime}
+                    onSelectCoin={(sym, price) => setSelectedCoin({ symbol: sym, price })}
+                    isStale={isStale}
+                  />
                 );
               })
             )}
