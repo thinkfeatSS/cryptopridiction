@@ -1322,8 +1322,8 @@ class TripleBarrierLabeler:
             pt_short = curr_c - (base_pt * curr_atr)
             sl_short = curr_c + (base_sl * curr_atr)
             
-            # Adaptive Triple-Barrier Target Labeling with 0.45% minimum gain hurdle
-            min_gain_hurdle = 0.0045 # 0.45% minimum return required to ensure fee profitability
+            # Adaptive Triple-Barrier Target Labeling with 0.85% minimum gain hurdle (Ensures high net profitability)
+            min_gain_hurdle = 0.0085 # 0.85% minimum return required to ensure robust profit after exchange fees
             if primary_signal == 1:
                 fav_excursion = max(0.0, window_high - curr_c)
                 adv_excursion = max(0.0, curr_c - window_low)
@@ -2486,11 +2486,11 @@ class SignalAuditTracker:
                 except Exception:
                     pass
 
-            # 0. Tier-0 Early Breakeven Guard (+0.65% gain raises SL to Soft BE)
-            if max_gain >= 0.65 and not is_tp1_locked and not is_tier0_locked and not is_hit_sl:
+            # 0. Tier-0 Early Breakeven Guard (+0.50% gain raises SL to Soft BE)
+            if max_gain >= 0.50 and not is_tp1_locked and not is_tier0_locked and not is_hit_sl:
                 r['is_tier0_locked'] = True
                 r['status'] = "TIER0_PROTECTED_BREAKEVEN"
-                soft_be_p = (entry_p * 0.998) if direction == "LONG" else (entry_p * 1.002)
+                soft_be_p = (entry_p * 1.001) if direction == "LONG" else (entry_p * 0.999)
                 r['sl_price'] = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
                 sl_p = r['sl_price']
                 r['outcome_label'] = "🛡️ TIER-0 PROTECTED (SOFT BE)"
@@ -3824,7 +3824,7 @@ class HybridQuantEngine:
                 priority = 4
 
         # 7. Calculate True Directional TP & SL Targets (Synchronized with Final h_dir & Adaptive Multipliers)
-        exp_ret_mag = max(0.001, (h_conf / 100.0) * live_norm_atr * (bars ** 0.5))
+        exp_ret_mag = max(0.002, (h_conf / 100.0) * live_norm_atr * (bars ** 0.5))
         exp_ret = exp_ret_mag if h_dir == "BULLISH" else -exp_ret_mag
         projected_target = current_price * (1.0 + exp_ret)
 
@@ -3832,7 +3832,8 @@ class HybridQuantEngine:
         live_low_c = float(live_candle['low'].values[0]) if 'low' in live_candle.columns else current_price
         live_high_c = float(live_candle['high'].values[0]) if 'high' in live_candle.columns else current_price
 
-        # Asymmetric R:R Architecture: TP1 at 1.15x actual risk, TP2 at 2.0x, TP3 at 3.0x
+        # Asymmetric R:R Architecture: TP1 at 1.25x actual risk (Enforces min 0.85% gain on 15M), TP2 at 2.0x, TP3 at 3.0x
+        min_tp1_dist = (0.0085 * current_price) if horizon_key == "scalp" else (1.15 * risk_dist)
         if h_dir == "BULLISH":
             sl_base = current_price - risk_dist
             if is_reversal_setup or is_bull_sweep:
@@ -3840,10 +3841,10 @@ class HybridQuantEngine:
             else:
                 sl_p = sl_base
             actual_risk = max(1e-8, current_price - sl_p)
-            tp1_p = current_price + (1.15 * actual_risk)
-            tp2_p = current_price + (2.00 * actual_risk)
-            tp3_p = current_price + (3.00 * actual_risk)
-            tp4_p = current_price + (4.00 * actual_risk)
+            tp1_p = current_price + max(1.20 * actual_risk, min_tp1_dist)
+            tp2_p = current_price + max(2.00 * actual_risk, min_tp1_dist * 1.8)
+            tp3_p = current_price + max(3.00 * actual_risk, min_tp1_dist * 2.8)
+            tp4_p = current_price + max(4.00 * actual_risk, min_tp1_dist * 3.8)
             tp_p = tp4_p
         else:
             sl_base = current_price + risk_dist
@@ -3853,16 +3854,16 @@ class HybridQuantEngine:
                 sl_p = sl_base
             actual_risk = max(1e-8, sl_p - current_price)
             min_floor = max(1e-8, current_price * 0.05)
-            tp1_p = max(min_floor, current_price - (1.15 * actual_risk))
-            tp2_p = max(min_floor, current_price - (2.00 * actual_risk))
-            tp3_p = max(min_floor, current_price - (3.00 * actual_risk))
-            tp4_p = max(min_floor, current_price - (4.00 * actual_risk))
+            tp1_p = max(min_floor, current_price - max(1.20 * actual_risk, min_tp1_dist))
+            tp2_p = max(min_floor, current_price - max(2.00 * actual_risk, min_tp1_dist * 1.8))
+            tp3_p = max(min_floor, current_price - max(3.00 * actual_risk, min_tp1_dist * 2.8))
+            tp4_p = max(min_floor, current_price - max(4.00 * actual_risk, min_tp1_dist * 3.8))
             tp_p = tp4_p
 
-        # 8. Minimum Profit Hurdle Check (Enforces >= 0.40% return to clear round-trip buy & sell fees)
+        # 8. Minimum Profit Hurdle Check (Enforces >= 0.85% return on 15M to guarantee high net profit after exchange fees)
         reward_pct = (abs(tp_p - current_price) / (current_price + 1e-10)) * 100.0
         min_reward_map = {
-            'scalp': 0.40,       # Minimum 0.40% profit hurdle for 15M (clears buy & sell exchange fees)
+            'scalp': 0.85,       # Minimum 0.85% profit hurdle for 15M (clears buy & sell exchange fees + delivers clean profit)
             'swing': 0.80,
             'macro': 1.80,
             'horizon_2d': 2.50,
@@ -3871,9 +3872,9 @@ class HybridQuantEngine:
             'biweekly': 8.00,
             'monthly': 12.00
         }
-        min_hurdle = min_reward_map.get(horizon_key, 0.40)
-        if reward_pct < min_hurdle or abs(exp_ret * 100.0) < 0.40:
-            decision = "⛔ FILTER (SUB-0.4% RETURN / FEE DRAG)"
+        min_hurdle = min_reward_map.get(horizon_key, 0.50)
+        if reward_pct < min_hurdle or abs(exp_ret * 100.0) < (0.80 if horizon_key == 'scalp' else 0.40):
+            decision = f"⛔ FILTER (SUB-{min_hurdle:.1f}% RETURN / FEE DRAG)"
             priority = 4
 
         # Generate Professional 3-Tier Signal Card (1:2 Risk to Reward Architecture)
@@ -4606,8 +4607,8 @@ class HybridQuantEngine:
         
         min_meta_prob = sig_cfg.get('min_meta_probability', 0.65)
         ban_parabolic_shorts = sig_cfg.get('ban_parabolic_shorts', True)
-        min_scalp_gain = sig_cfg.get('min_scalp_gain_pct', 0.45)
-        min_swing_gain = sig_cfg.get('min_swing_gain_pct', 0.75)
+        min_scalp_gain = sig_cfg.get('min_scalp_gain_pct', 0.85)
+        min_swing_gain = sig_cfg.get('min_swing_gain_pct', 0.85)
         asset_cooldown_sec = sig_cfg.get('asset_cooldown_minutes', 60) * 60
 
         active_paper_symbols = {p['symbol'] for p in self.ledger.data.get('open_positions', [])}
@@ -4810,18 +4811,18 @@ class HybridQuantEngine:
 
         pool_for_selection = qualified_pool if len(qualified_pool) >= min_sig else all_signals
 
-        # Horizon-Separated High-Potential Signal Buckets (>= 0.40% Return & Quality Filter Enforcement)
+        # Horizon-Separated High-Potential Signal Buckets (>= 0.85% Return for Scalp & Quality Filter Enforcement)
         horizon_bucket_defs = [
-            {"key": "scalp", "tag": "15M", "label": "⚡ Scalp (15M)", "min_return": 0.40},
-            {"key": "horizon_30m", "tag": "30M", "label": "⏱️ 30M", "min_return": 0.40},
-            {"key": "swing", "tag": "1H", "label": "🌊 Swing (1H)", "min_return": 0.40},
-            {"key": "horizon_4h", "tag": "4H", "label": "⏳ Intraday (4H)", "min_return": 0.40},
-            {"key": "horizon_12h", "tag": "12H", "label": "🌗 12H", "min_return": 0.40},
-            {"key": "macro", "tag": "24H", "label": "🚀 Macro (24H)", "min_return": 0.40},
-            {"key": "horizon_4d", "tag": "4D", "label": "📅 4D", "min_return": 0.40},
-            {"key": "weekly", "tag": "7D", "label": "🗓️ Weekly (7D)", "min_return": 0.40},
-            {"key": "biweekly", "tag": "15D", "label": "📆 15D", "min_return": 0.40},
-            {"key": "monthly", "tag": "30D", "label": "🪐 Monthly (30D)", "min_return": 0.40}
+            {"key": "scalp", "tag": "15M", "label": "⚡ Scalp (15M)", "min_return": 0.85},
+            {"key": "horizon_30m", "tag": "30M", "label": "⏱️ 30M", "min_return": 0.85},
+            {"key": "swing", "tag": "1H", "label": "🌊 Swing (1H)", "min_return": 0.85},
+            {"key": "horizon_4h", "tag": "4H", "label": "⏳ Intraday (4H)", "min_return": 1.20},
+            {"key": "horizon_12h", "tag": "12H", "label": "🌗 12H", "min_return": 1.50},
+            {"key": "macro", "tag": "24H", "label": "🚀 Macro (24H)", "min_return": 1.80},
+            {"key": "horizon_4d", "tag": "4D", "label": "📅 4D", "min_return": 2.50},
+            {"key": "weekly", "tag": "7D", "label": "🗓️ Weekly (7D)", "min_return": 4.00},
+            {"key": "biweekly", "tag": "15D", "label": "📆 15D", "min_return": 6.00},
+            {"key": "monthly", "tag": "30D", "label": "🪐 Monthly (30D)", "min_return": 8.00}
         ]
 
         signals_by_horizon = {b["tag"]: [] for b in horizon_bucket_defs}

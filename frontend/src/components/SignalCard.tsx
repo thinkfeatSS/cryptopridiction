@@ -60,6 +60,11 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
   const medals = ["🥇 TOP PICK (#1)", "🥈 RUNNER UP (#2)", "🥉 BRONZE (#3)", "🎯 PICK (#4)", "🎯 PICK (#5)"];
   const rankLabel = signal.rank || (rankIndex < medals.length ? medals[rankIndex] : `#${rankIndex + 1}`);
 
+  const tp1Pct = entryPrice > 0 ? (Math.abs(tp1 - entryPrice) / entryPrice) * 100 : 0;
+  const tp2Pct = entryPrice > 0 ? (Math.abs(tp2 - entryPrice) / entryPrice) * 100 : 0;
+  const tp3Pct = entryPrice > 0 ? (Math.abs(tp3 - entryPrice) / entryPrice) * 100 : 0;
+  const slPct = entryPrice > 0 ? (Math.abs(entryPrice - sl) / entryPrice) * 100 : 0;
+
   return (
     <>
       {showShareModal && (
@@ -249,7 +254,8 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
               Invalidation Stop-Loss
             </span>
             <span className="text-sm font-black text-rose-400 font-mono mt-0.5">
-              {formatUsd(sl)}
+              {formatUsd(sl)}{" "}
+              <span className="text-[10px] text-rose-500 font-normal">(-{slPct.toFixed(2)}%)</span>
             </span>
           </div>
 
@@ -257,15 +263,18 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
             <span className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider flex items-center gap-1">
               <Target className="h-3 w-3" /> Targets (TP1 / TP2 / TP3)
             </span>
-            <div className="mt-1 flex items-center justify-between text-xs font-mono text-slate-200">
+            <div className="mt-1 flex items-center justify-between text-xs font-mono text-slate-200 flex-wrap gap-1">
               <span>
-                TP1: <strong className="text-emerald-400">{formatUsd(tp1)}</strong>
+                TP1: <strong className="text-emerald-400">{formatUsd(tp1)}</strong>{" "}
+                <span className="text-[10px] text-emerald-500 font-medium">(+{tp1Pct.toFixed(2)}%)</span>
               </span>
               <span>
-                TP2: <strong className="text-emerald-300">{formatUsd(tp2)}</strong>
+                TP2: <strong className="text-emerald-300">{formatUsd(tp2)}</strong>{" "}
+                <span className="text-[10px] text-emerald-500 font-medium">(+{tp2Pct.toFixed(2)}%)</span>
               </span>
               <span>
-                TP3: <strong className="text-emerald-200">{formatUsd(tp3)}</strong>
+                TP3: <strong className="text-emerald-200">{formatUsd(tp3)}</strong>{" "}
+                <span className="text-[10px] text-emerald-500 font-medium">(+{tp3Pct.toFixed(2)}%)</span>
               </span>
             </div>
           </div>
