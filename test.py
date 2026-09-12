@@ -4905,6 +4905,23 @@ class HybridQuantEngine:
                 r["server_prediction_time"] = now_iso
                 r["server_prediction_ts"] = now_ts
 
+        # Update master matrix universe with fresh results
+        if getattr(self, 'master_matrix_universe', None) is not None:
+            for r in scanner_results:
+                if isinstance(r, dict) and 'symbol' in r:
+                    self.master_matrix_universe[r['symbol']] = r
+            leaderboard_list = list(self.master_matrix_universe.values())
+        else:
+            leaderboard_list = list(scanner_results)
+
+        leaderboard_sorted = sorted(leaderboard_list, key=lambda x: (
+            x.get('best_priority', 4),
+            not x.get('is_triple_confluence', False),
+            -x.get('consistency_index', 50.0),
+            -abs(x.get('alignment_score', 0.0)),
+            -x.get('overall_score', 0.0)
+        ))
+
         payload = {
             "timestamp": now_iso,
             "server_prediction_time": now_iso,
@@ -4933,15 +4950,7 @@ class HybridQuantEngine:
             },
             "top_round_signals": self.institutional_signal_manager.get_display_signals() or top_signals or [],
             "signals_by_horizon": self.institutional_signal_manager.get_signals_by_horizon(),
-            "scanner_leaderboard": (lambda: [
-                self.master_matrix_universe.update({r['symbol']: r}) for r in scanner_results if isinstance(r, dict) and 'symbol' in r
-            ] and sorted(list(self.master_matrix_universe.values()), key=lambda x: (
-                x.get('best_priority', 4),
-                not x.get('is_triple_confluence', False),
-                -x.get('consistency_index', 50.0),
-                -abs(x.get('alignment_score', 0.0)),
-                -x.get('overall_score', 0.0)
-            )) if getattr(self, 'master_matrix_universe', None) else scanner_results)(),
+            "scanner_leaderboard": leaderboard_sorted,
             "deep_dive": deep_dive_result,
             "paper_portfolio": self.ledger.data
         }
