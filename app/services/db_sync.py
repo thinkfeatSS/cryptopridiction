@@ -122,8 +122,18 @@ def get_sync_state():
     }
 
 def get_cached_forecast():
-    """Returns in-memory cached forecast if available."""
-    global _CACHED_FORECAST
+    """Returns in-memory cached forecast, automatically refreshing if disk file was updated."""
+    global _CACHED_FORECAST, _LAST_SYNC_TIMES
+    try:
+        forecast_json = os.path.join(settings.EXPORT_DIR, "live_market_forecast.json")
+        if os.path.exists(forecast_json):
+            fmtime = os.path.getmtime(forecast_json)
+            if fmtime > _LAST_SYNC_TIMES.get("forecast", 0.0) or _CACHED_FORECAST is None:
+                with open(forecast_json, "r", encoding="utf-8") as f:
+                    _CACHED_FORECAST = json.load(f)
+                _LAST_SYNC_TIMES["forecast"] = fmtime
+    except Exception:
+        pass
     return _CACHED_FORECAST
 
 def set_cached_forecast(data):

@@ -3463,8 +3463,8 @@ class HybridQuantEngine:
             if len(unique_classes) < 2 and len(y_p_train) > 1:
                 y_p_train[0] = 1 - y_p_train[-1]
 
-            # Fast-Boot Model Checkpoint & Memory Cache (14 Day Lifetime)
-            cache_key = f"{symbol.replace('/', '_')}_{horizon_key}"
+            # Fast-Boot Model Checkpoint & Memory Cache (14 Day Lifetime, Keyed by Anchor Timeframe)
+            cache_key = f"{symbol.replace('/', '_')}_{anchor_tf}"
             now_ts = time.time()
 
             if cache_key in self.model_cache and (now_ts - self.model_cache[cache_key].get('ts', 0) < 86400 * 14):
@@ -4134,7 +4134,7 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
-            scan_deadline_seconds = 750.0
+            scan_deadline_seconds = 870.0
             last_partial_sync_ts = time.time()
             last_synced_count = 0
             max_threads = min(int(self.config.get('max_scan_workers', 16)), len(symbols_to_scan))
@@ -4149,9 +4149,10 @@ class HybridQuantEngine:
                         break
                     sym = future_to_sym[future]
                     try:
-                        res = future.result(timeout=20.0)
+                        res = future.result()
                         if res:
                             scanner_results.append(res)
+                            self.master_matrix_universe[sym] = res
                             live_prices[sym] = res['current_price']
                             live_highs[sym] = res['live_high']
                             live_lows[sym] = res['live_low']
@@ -4382,6 +4383,9 @@ class HybridQuantEngine:
                 with open(json_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
 
+                now_iso = datetime.now(timezone.utc).isoformat()
+                data["timestamp"] = now_iso
+                data["server_prediction_time"] = now_iso
                 data["top_round_signals"] = self.institutional_signal_manager.get_display_signals()
                 data["signals_by_horizon"] = self.institutional_signal_manager.get_signals_by_horizon()
 
@@ -4405,6 +4409,10 @@ class HybridQuantEngine:
             if os.path.exists(json_path):
                 with open(json_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
+
+                now_iso = datetime.now(timezone.utc).isoformat()
+                data["timestamp"] = now_iso
+                data["server_prediction_time"] = now_iso
 
                 shield_payload = {
                     "active": self.btc_shield_active,
