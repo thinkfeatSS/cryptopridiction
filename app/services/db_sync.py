@@ -227,53 +227,59 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                         existing = existing_signals.get(sig_id)
                         if not existing:
                             try:
-                                sig_obj = SignalAudit(
-                                    signal_id=sig_id,
-                                    date_utc=str(r.get("date_utc", "")),
-                                    time_utc=str(r.get("time_utc", "")),
-                                    rank_label=str(r.get("rank", "")),
-                                    quality_grade=q_grade,
-                                    grade_tier=tier,
-                                    symbol=str(r.get("symbol", "")),
-                                    horizon=str(r.get("horizon", "")),
-                                    direction=str(r.get("direction", "LONG")),
-                                    conviction_pct=safe_f(r.get("conviction_pct"), 50.0),
-                                    entry_price=safe_f(r.get("entry_price"), 0.0),
-                                    tp1_price=safe_f(r.get("tp1_price"), 0.0),
-                                    tp2_price=safe_f(r.get("tp2_price"), 0.0),
-                                    tp3_price=safe_f(r.get("tp3_price"), 0.0),
-                                    sl_price=safe_f(r.get("sl_price"), 0.0),
-                                    risk_reward_ratio=str(r.get("risk_reward_ratio", "1:2.0")),
-                                    expected_return_pct=safe_f(r.get("expected_return_pct"), 0.0),
-                                    decision=str(r.get("decision", "")),
-                                    paper_trading_status=str(r.get("paper_trading_status", "")),
-                                    predicted_window=str(r.get("predicted_window", "")),
-                                    predicted_close_utc=pred_close or "N/A",
-                                    status=str(r.get("status", "PENDING_EVALUATION")),
-                                    outcome_label=str(r.get("outcome_label", "PENDING")),
-                                    peak_price_seen=safe_f(r.get("peak_price_seen"), 0.0),
-                                    trough_price_seen=safe_f(r.get("trough_price_seen"), 0.0),
-                                    max_potential_gain_pct=safe_f(r.get("max_potential_gain_pct"), 0.0),
-                                    exit_price=safe_f(r.get("exit_price"), None) if str(r.get("exit_price", "")) != "" else None,
-                                    realized_return_pct=ret_num,
-                                    evaluated_at_utc=str(r.get("evaluated_at_utc", "")) or None,
-                                )
-                                db.add(sig_obj)
+                                with db.begin_nested():
+                                    sig_obj = SignalAudit(
+                                        signal_id=sig_id,
+                                        date_utc=str(r.get("date_utc", "")),
+                                        time_utc=str(r.get("time_utc", "")),
+                                        rank_label=str(r.get("rank", "")),
+                                        quality_grade=q_grade,
+                                        grade_tier=tier,
+                                        symbol=str(r.get("symbol", "")),
+                                        horizon=str(r.get("horizon", "")),
+                                        direction=str(r.get("direction", "LONG")),
+                                        conviction_pct=safe_f(r.get("conviction_pct"), 50.0),
+                                        entry_price=safe_f(r.get("entry_price"), 0.0),
+                                        tp1_price=safe_f(r.get("tp1_price"), 0.0),
+                                        tp2_price=safe_f(r.get("tp2_price"), 0.0),
+                                        tp3_price=safe_f(r.get("tp3_price"), 0.0),
+                                        sl_price=safe_f(r.get("sl_price"), 0.0),
+                                        risk_reward_ratio=str(r.get("risk_reward_ratio", "1:2.0")),
+                                        expected_return_pct=safe_f(r.get("expected_return_pct"), 0.0),
+                                        decision=str(r.get("decision", "")),
+                                        paper_trading_status=str(r.get("paper_trading_status", "")),
+                                        predicted_window=str(r.get("predicted_window", "")),
+                                        predicted_close_utc=pred_close or "N/A",
+                                        status=str(r.get("status", "PENDING_EVALUATION")),
+                                        outcome_label=str(r.get("outcome_label", "PENDING")),
+                                        peak_price_seen=safe_f(r.get("peak_price_seen"), 0.0),
+                                        trough_price_seen=safe_f(r.get("trough_price_seen"), 0.0),
+                                        max_potential_gain_pct=safe_f(r.get("max_potential_gain_pct"), 0.0),
+                                        exit_price=safe_f(r.get("exit_price"), None) if str(r.get("exit_price", "")) != "" else None,
+                                        realized_return_pct=ret_num,
+                                        evaluated_at_utc=str(r.get("evaluated_at_utc", "")) or None,
+                                    )
+                                    db.add(sig_obj)
+                                    db.flush()
                                 existing_signals[sig_id] = sig_obj
                             except Exception:
                                 pass
                         else:
-                            existing.status = str(r.get("status", existing.status))
-                            existing.outcome_label = str(r.get("outcome_label", existing.outcome_label))
-                            existing.peak_price_seen = safe_f(r.get("peak_price_seen"), existing.peak_price_seen)
-                            existing.trough_price_seen = safe_f(r.get("trough_price_seen"), existing.trough_price_seen)
-                            existing.max_potential_gain_pct = safe_f(r.get("max_potential_gain_pct"), existing.max_potential_gain_pct)
-                            if str(r.get("exit_price", "")) != "":
-                                existing.exit_price = safe_f(r.get("exit_price"), existing.exit_price)
-                            if ret_num is not None:
-                                existing.realized_return_pct = ret_num
-                            if r.get("evaluated_at_utc"):
-                                existing.evaluated_at_utc = str(r.get("evaluated_at_utc"))
+                            try:
+                                with db.begin_nested():
+                                    existing.status = str(r.get("status", existing.status))
+                                    existing.outcome_label = str(r.get("outcome_label", existing.outcome_label))
+                                    existing.peak_price_seen = safe_f(r.get("peak_price_seen"), existing.peak_price_seen)
+                                    existing.trough_price_seen = safe_f(r.get("trough_price_seen"), existing.trough_price_seen)
+                                    existing.max_potential_gain_pct = safe_f(r.get("max_potential_gain_pct"), existing.max_potential_gain_pct)
+                                    if str(r.get("exit_price", "")) != "":
+                                        existing.exit_price = safe_f(r.get("exit_price"), existing.exit_price)
+                                    if ret_num is not None:
+                                        existing.realized_return_pct = ret_num
+                                    if r.get("evaluated_at_utc"):
+                                        existing.evaluated_at_utc = str(r.get("evaluated_at_utc"))
+                            except Exception:
+                                pass
                             if pred_close and (not existing.predicted_close_utc or existing.predicted_close_utc == "N/A"):
                                 existing.predicted_close_utc = pred_close
 
