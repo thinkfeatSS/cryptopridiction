@@ -97,16 +97,7 @@ export function getHorizonStance(h?: any): "bullish" | "consolidate" | "bearish"
     return "consolidate";
   }
 
-  // Filtered / defensive / macro conflict are sidelined in consolidation
-  if (
-    decision.includes("FILTER") ||
-    decision.includes("DEFENSIVE") ||
-    decision.includes("WAIT")
-  ) {
-    return "consolidate";
-  }
-
-  // Bullish signals
+  // Bullish signals: check directional bias
   if (
     direction === "BULLISH" ||
     direction === "LONG" ||
@@ -117,7 +108,7 @@ export function getHorizonStance(h?: any): "bullish" | "consolidate" | "bearish"
     return "bullish";
   }
 
-  // Bearish signals
+  // Bearish signals: check directional bias
   if (
     direction === "BEARISH" ||
     direction === "SHORT" ||
@@ -126,6 +117,15 @@ export function getHorizonStance(h?: any): "bullish" | "consolidate" | "bearish"
     decision.includes("TOP-REVERSAL")
   ) {
     return "bearish";
+  }
+
+  // Sidelined / Defensive / Filter without direction
+  if (
+    decision.includes("FILTER") ||
+    decision.includes("DEFENSIVE") ||
+    decision.includes("WAIT")
+  ) {
+    return "consolidate";
   }
 
   return "consolidate";
@@ -1078,7 +1078,7 @@ export default function AssetPredictionMatrix() {
           <thead className="bg-dark-900/90 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
             <tr>
               <th className="py-3 px-4 min-w-[215px]"># / Asset &amp; Confluence</th>
-              {selectedHorizon === "all" || selectedHorizon === "high_confluence" || selectedHorizon === "reversals" || selectedHorizon === "trend_expansion" || selectedHorizon === "watchlist" ? (
+              {selectedHorizon === "all" || selectedHorizon === "high_confluence" || selectedHorizon === "high_yield" || selectedHorizon === "reversals" || selectedHorizon === "trend_expansion" || selectedHorizon === "watchlist" ? (
                 <>
                   {renderSortableHeader("scalp", "⚡ 15M")}
                   {renderSortableHeader("horizon_30m", "⏱️ 30M")}
@@ -1139,8 +1139,20 @@ export default function AssetPredictionMatrix() {
               </tr>
             ) : filteredAssets.length === 0 ? (
               <tr>
-                <td colSpan={12} className="py-12 text-center text-slate-500 font-sans">
-                  No assets match the selected filter.
+                <td colSpan={12} className="py-12 text-center font-sans">
+                  <div className="flex flex-col items-center justify-center gap-3">
+                    <SlidersHorizontal className="h-8 w-8 text-slate-600" />
+                    <p className="text-slate-400 font-medium text-sm">
+                      No assets match the selected filter{biasFilter !== "all" ? ` (${biasFilter} stance)` : ""}{search ? ` matching "${search}"` : ""}.
+                    </p>
+                    <button
+                      onClick={handleResetSort}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-cyan-600/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-600/30 text-xs font-semibold transition-all shadow-sm cursor-pointer"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      Reset All Filters &amp; View All 200 Assets
+                    </button>
+                  </div>
                 </td>
               </tr>
             ) : (
@@ -1155,6 +1167,7 @@ export default function AssetPredictionMatrix() {
                 if (
                   selectedHorizon !== "all" &&
                   selectedHorizon !== "high_confluence" &&
+                  selectedHorizon !== "high_yield" &&
                   selectedHorizon !== "reversals" &&
                   selectedHorizon !== "trend_expansion" &&
                   selectedHorizon !== "watchlist"
