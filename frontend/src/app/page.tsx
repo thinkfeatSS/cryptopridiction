@@ -35,56 +35,15 @@ export default function DashboardPage() {
     { key: "30D", label: "🪐 Monthly (30D)", tag: "30D" },
   ];
 
-  // Helper to count active setups per horizon category
-  const getHorizonCount = (tag: string) => {
-    let list = topSignals;
-    if (directionFilter === "LONG") {
-      list = list.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH");
-    } else if (directionFilter === "SHORT") {
-      list = list.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH");
-    }
-
-    if (tag === "ALL") return list.length;
-    if (signalsByHorizon[tag] && directionFilter === "ALL") return signalsByHorizon[tag].length;
-    return list.filter((s: any) => {
-      const hStr = (s.horizon_tag || s.horizon || s.horizon_name || s.horizon_key || "").toUpperCase();
-      if (tag === "15M") return hStr.includes("15M") || hStr.includes("SCALP");
-      if (tag === "30M") return hStr.includes("30M");
-      if (tag === "1H") return hStr.includes("1H") || hStr.includes("SWING");
-      if (tag === "4H") return hStr.includes("4H") || hStr.includes("INTRADAY") || hStr.includes("4-HOUR");
-      if (tag === "12H") return hStr.includes("12H");
-      if (tag === "24H") return hStr.includes("24H") || hStr.includes("MACRO") || hStr.includes("1D");
-      if (tag === "4D") return hStr.includes("4D");
-      if (tag === "7D") return hStr.includes("7D") || hStr.includes("WEEKLY");
-      if (tag === "15D") return hStr.includes("15D") || hStr.includes("BIWEEKLY");
-      if (tag === "30D") return hStr.includes("30D") || hStr.includes("MONTHLY");
-      return false;
-    }).length;
-  };
-
-  const longCount = useMemo(() => {
-    return topSignals.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH").length;
-  }, [topSignals]);
-
-  const shortCount = useMemo(() => {
-    return topSignals.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH").length;
-  }, [topSignals]);
-
-  // Filter signals according to active horizon & direction filter
-  const filteredTopSignals = useMemo(() => {
+  // Deduplicate signals per coin (keeping the latest active signal)
+  const currentHorizonSignals = useMemo(() => {
     let list: any[] = [];
     if (activeHorizon === "ALL") {
-      list = topSignals.filter((s: any) => {
-        const exp = s.expected_return_pct ?? (s.exp_return ? s.exp_return * 100 : 0.0);
-        return Math.abs(exp) >= 0.40;
-      });
-    } else if (signalsByHorizon[activeHorizon] && signalsByHorizon[activeHorizon].length > 0 && directionFilter === "ALL") {
+      list = topSignals;
+    } else if (signalsByHorizon[activeHorizon] && signalsByHorizon[activeHorizon].length > 0) {
       list = signalsByHorizon[activeHorizon];
     } else {
       list = topSignals.filter((s: any) => {
-        const exp = s.expected_return_pct ?? (s.exp_return ? s.exp_return * 100 : 0.0);
-        if (Math.abs(exp) < 0.40) return false;
-
         const hStr = (s.horizon_tag || s.horizon || s.horizon_name || s.horizon_key || "").toUpperCase();
         if (activeHorizon === "15M") return hStr.includes("15M") || hStr.includes("SCALP");
         if (activeHorizon === "30M") return hStr.includes("30M");
@@ -100,14 +59,78 @@ export default function DashboardPage() {
       });
     }
 
-    if (directionFilter === "LONG") {
-      list = list.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH");
-    } else if (directionFilter === "SHORT") {
-      list = list.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH");
+    const seenCoins = new Set<string>();
+    const deduped: any[] = [];
+    for (const s of list) {
+      const sym = (s.symbol || "").toUpperCase().replace("/", "").replace(":USDT", "");
+      if (!seenCoins.has(sym)) {
+        seenCoins.add(sym);
+        deduped.push(s);
+      }
+    }
+    return deduped;
+  }, [topSignals, signalsByHorizon, activeHorizon]);
+
+  // Helper to count active setups per horizon category
+  const getHorizonCount = (tag: string) => {
+    let list: any[] = [];
+    if (tag === "ALL") {
+      list = topSignals;
+    } else if (signalsByHorizon[tag] && signalsByHorizon[tag].length > 0) {
+      list = signalsByHorizon[tag];
+    } else {
+      list = topSignals.filter((s: any) => {
+        const hStr = (s.horizon_tag || s.horizon || s.horizon_name || s.horizon_key || "").toUpperCase();
+        if (tag === "15M") return hStr.includes("15M") || hStr.includes("SCALP");
+        if (tag === "30M") return hStr.includes("30M");
+        if (tag === "1H") return hStr.includes("1H") || hStr.includes("SWING");
+        if (tag === "4H") return hStr.includes("4H") || hStr.includes("INTRADAY") || hStr.includes("4-HOUR");
+        if (tag === "12H") return hStr.includes("12H");
+        if (tag === "24H") return hStr.includes("24H") || hStr.includes("MACRO") || hStr.includes("1D");
+        if (tag === "4D") return hStr.includes("4D");
+        if (tag === "7D") return hStr.includes("7D") || hStr.includes("WEEKLY");
+        if (tag === "15D") return hStr.includes("15D") || hStr.includes("BIWEEKLY");
+        if (tag === "30D") return hStr.includes("30D") || hStr.includes("MONTHLY");
+        return false;
+      });
     }
 
-    return list;
-  }, [topSignals, signalsByHorizon, activeHorizon, directionFilter]);
+    const seenCoins = new Set<string>();
+    const dedupedList: any[] = [];
+    for (const s of list) {
+      const sym = (s.symbol || "").toUpperCase().replace("/", "").replace(":USDT", "");
+      if (!seenCoins.has(sym)) {
+        seenCoins.add(sym);
+        dedupedList.push(s);
+      }
+    }
+
+    if (directionFilter === "LONG") {
+      return dedupedList.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH").length;
+    } else if (directionFilter === "SHORT") {
+      return dedupedList.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH").length;
+    }
+
+    return dedupedList.length;
+  };
+
+  const longCount = useMemo(() => {
+    return currentHorizonSignals.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH").length;
+  }, [currentHorizonSignals]);
+
+  const shortCount = useMemo(() => {
+    return currentHorizonSignals.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH").length;
+  }, [currentHorizonSignals]);
+
+  // Filter signals according to active horizon & direction filter
+  const filteredTopSignals = useMemo(() => {
+    if (directionFilter === "LONG") {
+      return currentHorizonSignals.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH");
+    } else if (directionFilter === "SHORT") {
+      return currentHorizonSignals.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH");
+    }
+    return currentHorizonSignals;
+  }, [currentHorizonSignals, directionFilter]);
 
   return (
     <div className="space-y-8">

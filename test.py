@@ -2662,9 +2662,18 @@ class ActiveInstitutionalSignalManager:
         self.active_signals = {}  # key: f"{symbol}:{horizon_tag}" -> dict
         self.load_state()
 
+    def _clean_sym(self, sym: str) -> str:
+        if not sym:
+            return ""
+        s = str(sym).strip().upper().replace(':USDT', '')
+        if '/' not in s and s.endswith('USDT'):
+            s = s[:-4] + '/USDT'
+        return s
+
     def _make_key(self, sym: str, h_key: str) -> str:
+        clean_s = self._clean_sym(sym)
         h_tag = resolve_horizon_tag(h_key)
-        return f"{sym.upper()}:{h_tag.upper()}"
+        return f"{clean_s}:{h_tag.upper()}"
 
     def load_state(self):
         if os.path.exists(self.filepath):
@@ -2963,14 +2972,21 @@ class ActiveInstitutionalSignalManager:
         return updated
 
     def get_display_signals(self) -> list:
-        """Returns sorted active signals followed by recently resolved signals."""
+        """Returns sorted active signals followed by recently resolved signals, deduplicated to 1 latest per coin per horizon."""
         active_list = []
         resolved_list = []
+        seen_active_pairs = set()
 
         for s in self.active_signals.values():
             status = s.get('status', 'ACTIVE')
-            if status in ["ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
-                active_list.append(s)
+            sym = self._clean_sym(s.get('symbol', ''))
+            h_tag = s.get('horizon_tag') or resolve_horizon_tag(s.get('horizon_key', 'scalp'))
+            pair_key = (sym, h_tag)
+
+            if status in ["ACTIVE", "PENDING_EVALUATION", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]:
+                if pair_key not in seen_active_pairs:
+                    seen_active_pairs.add(pair_key)
+                    active_list.append(s)
             else:
                 resolved_list.append(s)
 
@@ -2996,16 +3012,22 @@ class ActiveInstitutionalSignalManager:
         return combined
 
     def get_signals_by_horizon(self) -> dict:
-        """Groups display signals by standard horizon tags."""
+        """Groups display signals by standard horizon tags, guaranteeing 1 latest active signal per coin."""
         tags = ["15M", "30M", "1H", "4H", "12H", "24H", "4D", "7D", "15D", "30D"]
         res = {t: [] for t in tags}
+        seen_by_tag = {t: set() for t in tags}
 
         for s in self.get_display_signals():
             h_tag = s.get('horizon_tag') or resolve_horizon_tag(s.get('horizon_key', 'scalp'))
-            if h_tag in res:
-                res[h_tag].append(s)
-            else:
-                res['15M'].append(s)
+            if h_tag not in res:
+                h_tag = "15M"
+
+            sym = self._clean_sym(s.get('symbol', ''))
+            if sym and sym in seen_by_tag[h_tag]:
+                continue
+            if sym:
+                seen_by_tag[h_tag].add(sym)
+            res[h_tag].append(s)
 
         return res
 
@@ -3511,7 +3533,7 @@ class HybridQuantEngine:
                 scaler = cached['scaler']
                 cat = cached['cat']
                 xgb_m = cached['xgb_m']
-                lgb_m = cached.get('lgb_m')
+                lgb_m = cached.get('lgb_m') if HAS_LIGHTGBM else None
                 et = cached['et']
                 w_cat, w_xgb, w_lgb, w_et = cached.get('weights', (0.35, 0.35, 0.20, 0.10))
                 elite_acc = cached['elite_acc']
@@ -4561,6 +4583,7 @@ class HybridQuantEngine:
         asset_cooldown_sec = sig_cfg.get('asset_cooldown_minutes', 60) * 60
 
         active_paper_symbols = {p['symbol'] for p in self.ledger.data.get('open_positions', [])}
+        active_mgr_symbols = set(self.institutional_signal_manager.get_active_symbols())
         all_signals = []
         seen_pairs = set()
         now_ts = time.time()
@@ -4641,7 +4664,8 @@ class HybridQuantEngine:
                 # 3. 2-Strike Asset Blacklist Quarantine Check & Deduplication
                 is_quarantined, quar_reason = self.signal_tracker.is_asset_quarantined(sym)
                 last_sym_time = self.symbol_last_signal_time.get(sym, 0)
-                is_asset_locked = ((now_ts - last_sym_time) < asset_cooldown_sec and not is_triple) or is_quarantined
+                is_already_active = sym in active_mgr_symbols
+                is_asset_locked = (((now_ts - last_sym_time) < asset_cooldown_sec and not is_triple) or is_quarantined) if not is_already_active else is_quarantined
                 if is_quarantined:
                     decision = f"⛔ {quar_reason}"
                     prio = 5
@@ -4778,7 +4802,7 @@ class HybridQuantEngine:
             h_tag = b["tag"]
             min_ret = b["min_return"]
 
-            # Filter candidates for this exact horizon with Grade A+ Quality Filter Gate
+            # Filter candidates for this exact horizon with Quality Filter Gate
             h_candidates = [
                 s for s in all_signals
                 if (s['horizon_key'] == h_k or h_tag.lower() in s['horizon_key'].lower())
@@ -4787,37 +4811,40 @@ class HybridQuantEngine:
                 and not s['is_fee_drag_rejected']
                 and not s.get('is_asset_locked', False)
                 and abs(s.get('exp_return', 0.0) * 100.0) >= min_ret
-                and (
-                    (s['grade_tier'] == 1 and (s['meta_win_prob'] >= 0.65 or s['conviction'] >= 75.0)) or
-                    (s['grade_tier'] == 2 and s['conviction'] >= 72.0 and s['meta_win_prob'] >= 0.70)
-                )
             ]
 
-            # Sort by Grade Tier -> Meta Win Prob -> Composite Score
-            h_candidates.sort(key=lambda x: (x['grade_tier'], -x['meta_win_prob'], -x['composite_score'], -x['conviction']))
+            # Priority 1: High Conviction Grade A+ / Grade A setups
+            tier_high = [
+                s for s in h_candidates
+                if ((s['grade_tier'] == 1 and (s['meta_win_prob'] >= 0.60 or s['conviction'] >= 70.0)) or
+                    (s['grade_tier'] == 2 and s['conviction'] >= 65.0 and s['meta_win_prob'] >= 0.60))
+            ]
+            pool = tier_high if tier_high else [s for s in h_candidates if s['conviction'] >= 52.0]
+            pool.sort(key=lambda x: (x['grade_tier'], -x['meta_win_prob'], -x['composite_score'], -x['conviction']))
 
-            if h_candidates:
-                top_h_picks = h_candidates[:2]  # Top 1-2 per horizon
-                for pick in top_h_picks:
-                    pick['horizon_tag'] = h_tag
-                    signals_by_horizon[h_tag].append(pick)
-                    if (pick['symbol'], h_k) not in selected_symbols_horizon:
-                        selected_signals.append(pick)
-                        selected_symbols_horizon.add((pick['symbol'], h_k))
-            else:
-                # No qualifying signal in this horizon this round -> Skip cleanly
-                signals_by_horizon[h_tag] = []
+            # Deduplicate by symbol within this horizon: exactly 1 setup per coin
+            seen_in_h = set()
+            top_h_picks = []
+            for pick in pool:
+                clean_sym = self.institutional_signal_manager._clean_sym(pick['symbol'])
+                if clean_sym not in seen_in_h:
+                    seen_in_h.add(clean_sym)
+                    top_h_picks.append(pick)
+                if len(top_h_picks) >= 2:
+                    break
 
-        # If overall selected signals is empty, fallback to top qualified pick to guarantee live monitoring
-        if not selected_signals:
-            fallback = [s for s in all_signals if not s['is_shield_blocked'] and abs(s.get('exp_return', 0.0) * 100.0) >= 0.40]
-            if fallback:
-                top_pick = fallback[0]
-                top_pick['horizon_tag'] = "15M" if "scalp" in top_pick['horizon_key'] else ("1H" if "swing" in top_pick['horizon_key'] else "24H")
-                selected_signals.append(top_pick)
-                signals_by_horizon[top_pick['horizon_tag']].append(top_pick)
+            for pick in top_h_picks:
+                pick['horizon_tag'] = h_tag
+                if (pick['symbol'], h_k) not in selected_symbols_horizon:
+                    selected_signals.append(pick)
+                    selected_symbols_horizon.add((pick['symbol'], h_k))
 
-        self.signals_by_horizon = signals_by_horizon
+        # Always upsert selected candidate signals into ActiveInstitutionalSignalManager
+        if selected_signals:
+            self.institutional_signal_manager.upsert_signals(selected_signals)
+
+        # Synchronize signals_by_horizon authoritative state from signal manager
+        self.signals_by_horizon = self.institutional_signal_manager.get_signals_by_horizon()
 
         # Update Cooldown Timestamps for Dispatched Signals (Final round only)
         if verbose:
@@ -4877,12 +4904,7 @@ class HybridQuantEngine:
             print(tabulate(df_selected, headers="keys", tablefmt="simple", showindex=False))
             print("=" * 145 + "\n")
 
-        if verbose:
-            persistent_signals = self.institutional_signal_manager.upsert_signals(selected_signals)
-            self.signals_by_horizon = self.institutional_signal_manager.get_signals_by_horizon()
-            return persistent_signals
-        else:
-            return self.institutional_signal_manager.get_display_signals()
+        return self.institutional_signal_manager.get_display_signals()
 
     # Backwards compatibility alias
     def render_professional_trading_signals(self, scanner_results: list):
@@ -4929,8 +4951,8 @@ class HybridQuantEngine:
                 "vol_ratio": getattr(self, "btc_vol_ratio", 1.0),
                 "altcoin_longs_allowed": not self.btc_shield_active,
             },
-            "top_round_signals": top_signals or [],
-            "signals_by_horizon": getattr(self, "signals_by_horizon", {}),
+            "top_round_signals": self.institutional_signal_manager.get_display_signals() or top_signals or [],
+            "signals_by_horizon": self.institutional_signal_manager.get_signals_by_horizon(),
             "scanner_leaderboard": scanner_results,
             "deep_dive": deep_dive_result,
             "paper_portfolio": self.ledger.data
