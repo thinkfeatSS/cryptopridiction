@@ -9,14 +9,15 @@ from app.routers import signals_router, forecast_router, portfolio_router, healt
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Initialize database schema & run initial migration from CSV/JSON once
+    # Startup: Initialize database schema & run initial migration from CSV/JSON asynchronously
     print("[BACKEND ⚡] Starting Quantitative Crypto FastAPI Backend...")
     try:
         init_db()
     except Exception as e:
         print(f"[BACKEND ⚠️] init_db notice: {e}")
     try:
-        migrate_files_to_db()
+        import threading
+        threading.Thread(target=migrate_files_to_db, daemon=True).start()
     except Exception as e:
         print(f"[BACKEND ⚠️] migrate_files_to_db notice: {e}")
     yield

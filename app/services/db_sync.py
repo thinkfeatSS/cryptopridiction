@@ -191,7 +191,10 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                     existing_signals = {s.signal_id: s for s in db.query(SignalAudit).all()}
                     seen_in_batch = set(existing_signals.keys())
 
-                    for r in records:
+                    # For incremental updates, focus on the latest active signal window for max performance
+                    records_to_process = records[-300:] if (not force and len(records) > 300) else records
+
+                    for r in records_to_process:
                         sig_id = str(r.get("signal_id", "")).strip()
                         if not sig_id:
                             continue
