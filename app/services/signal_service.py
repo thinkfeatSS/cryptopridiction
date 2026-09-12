@@ -622,11 +622,6 @@ class SignalService:
 
     def get_latest_forecast(self, db: Session) -> Dict[str, Any]:
         """Retrieves the most recent market forecast scan with in-memory cache and live price overlay."""
-        try:
-            sync_files_to_db_live()
-        except Exception:
-            pass
-
         cached = get_cached_forecast()
         if cached:
             return self.overlay_live_prices(cached)
