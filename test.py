@@ -73,6 +73,24 @@ def trim_process_memory():
     except Exception:
         pass
 
+def _safe_float(v, default=0.0):
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
+def _safe_sort_key(x):
+    if not isinstance(x, dict):
+        return (4, True, 0.0, 0.0, 0.0)
+    bp = _safe_float(x.get('best_priority'), 4.0)
+    tc = not bool(x.get('is_triple_confluence', False))
+    ci = _safe_float(x.get('consistency_index'), 50.0)
+    als = abs(_safe_float(x.get('alignment_score'), 0.0))
+    oscore = _safe_float(x.get('overall_score'), 0.0)
+    return (bp, tc, -ci, -als, -oscore)
+
 print("[SYSTEM] Running in High-Performance CPU Mode.")
 
 # ------------------------------------------------------------------------------
@@ -4167,13 +4185,7 @@ class HybridQuantEngine:
                                 elapsed_now = time.time() - self.last_scan_started_ts
                                 print(f"[SCANNER 🛰️ STREAM] Streamed {len(scanner_results)}/{len(symbols_to_scan)} assets to UI (Latest: {sym}) - Elapsed: {elapsed_now:.1f}s", flush=True)
                                 try:
-                                    partial_sorted = sorted(scanner_results, key=lambda x: (
-                                        x['best_priority'],
-                                        not x['is_triple_confluence'],
-                                        -x.get('consistency_index', 50.0),
-                                        -abs(x.get('alignment_score', 0.0)),
-                                        -x['overall_score']
-                                    ))
+                                    partial_sorted = sorted(scanner_results, key=_safe_sort_key)
                                     partial_signals = self.render_top_round_signals(partial_sorted, verbose=False)
                                     self.export_web_app_json(
                                         partial_sorted,
@@ -4186,8 +4198,8 @@ class HybridQuantEngine:
                                         sync_files_to_db_live(force=True)
                                     last_synced_count = len(scanner_results)
                                     last_partial_sync_ts = time.time()
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    print(f"[STREAM SYNC ERROR] {e}", flush=True)
                     except Exception as e:
                         pass
             finally:
@@ -4223,13 +4235,7 @@ class HybridQuantEngine:
                 pass
 
             # Sort by best priority, triple confluence, consistency index, and alignment strength
-            scanner_results.sort(key=lambda x: (
-                x['best_priority'],
-                not x['is_triple_confluence'],
-                -x.get('consistency_index', 50.0),
-                -abs(x.get('alignment_score', 0.0)),
-                -x['overall_score']
-            ))
+            scanner_results.sort(key=_safe_sort_key)
             self.render_multi_horizon_leaderboard(scanner_results)
 
         # 2. Single-Coin Deep Dive
@@ -4800,7 +4806,12 @@ class HybridQuantEngine:
                     (s['grade_tier'] == 2 and s['conviction'] >= 65.0 and s['meta_win_prob'] >= 0.60))
             ]
             pool = tier_high if tier_high else [s for s in h_candidates if s['conviction'] >= 52.0]
-            pool.sort(key=lambda x: (x['grade_tier'], -x['meta_win_prob'], -x['composite_score'], -x['conviction']))
+            pool.sort(key=lambda x: (
+                _safe_float(x.get('grade_tier'), 3),
+                -_safe_float(x.get('meta_win_prob'), 0.5),
+                -_safe_float(x.get('composite_score'), 0.0),
+                -_safe_float(x.get('conviction'), 50.0)
+            ))
 
             # Deduplicate by symbol within this horizon: exactly 1 setup per coin
             seen_in_h = set()
@@ -4914,13 +4925,7 @@ class HybridQuantEngine:
         else:
             leaderboard_list = list(scanner_results)
 
-        leaderboard_sorted = sorted(leaderboard_list, key=lambda x: (
-            x.get('best_priority', 4),
-            not x.get('is_triple_confluence', False),
-            -x.get('consistency_index', 50.0),
-            -abs(x.get('alignment_score', 0.0)),
-            -x.get('overall_score', 0.0)
-        ))
+        leaderboard_sorted = sorted(leaderboard_list, key=_safe_sort_key)
 
         payload = {
             "timestamp": now_iso,
