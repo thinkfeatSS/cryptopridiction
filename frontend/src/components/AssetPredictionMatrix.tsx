@@ -537,58 +537,73 @@ export default function AssetPredictionMatrix() {
 
   const activeHorizonKey: HorizonSortKey = sortHorizon || "scalp";
 
-  // ── Stable per-symbol row cache ──────────────────────────────────────────
-  // Merges new leaderboard data into an existing map so rows retain their last
-  // known data while a fresh scan is still computing (instead of going blank).
+  // ── Stable per-symbol row cache (stable object references) ─────────────────
+  //
+  // Key insight: React.memo only prevents re-renders when props are shallowly
+  // equal. If we replace item objects every poll (even with identical data),
+  // every row re-renders. The fix: keep the SAME object reference in the cache
+  // unless the data actually changed (detected via server_prediction_time or
+  // a JSON fingerprint).
   const rowCacheRef = useRef<Map<string, any>>(new Map());
-  const prevScanVersionRef = useRef<number | null>(null);
+  // Tracks the insertion order of symbols (so table order is stable)
+  const symbolOrderRef = useRef<string[]>([]);
 
   const rawLeaderboard = useMemo(
     () => forecast?.scanner_leaderboard || [],
     [forecast?.scanner_leaderboard]
   );
 
-  // Detect the current scan version (falls back to timestamp string)
-  const currentScanVersion: number | string =
-    (forecast as any)?.scan_version ??
-    (forecast as any)?.full_scan_version ??
-    forecast?.server_prediction_time ??
-    forecast?.timestamp ??
-    0;
-
-  // Merge incoming rows into cache; mark whether rows look stale
+  // Merge incoming rows into the stable cache.
+  // Only replace a cached entry if the data has actually changed.
   useEffect(() => {
-    rawLeaderboard.forEach((item: any) => {
-      rowCacheRef.current.set(item.symbol, item);
+    const incoming = rawLeaderboard;
+    if (incoming.length === 0) return;
+
+    const isNewSymbol = (sym: string) => !rowCacheRef.current.has(sym);
+
+    incoming.forEach((item: any) => {
+      const sym = item.symbol;
+      const cached = rowCacheRef.current.get(sym);
+
+      if (!cached) {
+        // Brand-new symbol – insert
+        rowCacheRef.current.set(sym, item);
+        symbolOrderRef.current.push(sym);
+      } else {
+        // Only replace the reference when data actually changed.
+        // Use server_prediction_time as a fast change detector.
+        const newTime = item.server_prediction_time || item.server_prediction_ts || item.timestamp || "";
+        const oldTime = cached.server_prediction_time || cached.server_prediction_ts || cached.timestamp || "";
+        if (newTime !== oldTime || cached._fingerprint !== JSON.stringify(item.horizons)) {
+          // Stamp a fingerprint so we can detect horizon-only changes too
+          rowCacheRef.current.set(sym, { ...item, _fingerprint: JSON.stringify(item.horizons) });
+        }
+        // else: keep the EXACT same object reference → React.memo skips re-render
+      }
     });
   }, [rawLeaderboard]);
 
-  // Build the stable leaderboard from cache, patched with any fresh rows
+  // Build a stable leaderboard from the cache.
+  // When rawLeaderboard is non-empty, honour the fresh order from the server
+  // (which reflects the new ranking). When empty (between polls), keep the last.
   const leaderboard = useMemo(() => {
     if (rawLeaderboard.length === 0) {
-      // Still polling – return whatever we have cached
-      return Array.from(rowCacheRef.current.values());
+      // Between polls – return cached data so rows don't disappear
+      return symbolOrderRef.current
+        .map(sym => rowCacheRef.current.get(sym))
+        .filter(Boolean);
     }
-    // Build a symbol-indexed map of new data
-    const newMap = new Map<string, any>();
-    rawLeaderboard.forEach((item: any) => newMap.set(item.symbol, item));
-    // Merge: use new data when available, fall back to cache for missing symbols
-    const merged: any[] = [];
-    // First add all cached symbols (preserves order, retains stale rows)
-    rowCacheRef.current.forEach((cachedItem, sym) => {
-      merged.push(newMap.has(sym) ? newMap.get(sym) : cachedItem);
-    });
-    // Add brand-new symbols not yet in cache
-    rawLeaderboard.forEach((item: any) => {
-      if (!rowCacheRef.current.has(item.symbol)) merged.push(item);
-    });
-    return merged;
+    // Use the server's ordering (fresh scan rank), but pull object refs from cache
+    // so unchanged rows have stable identity for React.memo.
+    return rawLeaderboard.map((item: any) =>
+      rowCacheRef.current.get(item.symbol) ?? item
+    );
   }, [rawLeaderboard]);
 
-  // Set of symbols currently "stale" (in cache but not yet in newest fetch)
+  // Set of symbols that are in the cache but NOT in the latest fetch → still scanning
   const staleSymbols = useMemo(() => {
     if (rawLeaderboard.length === 0) return new Set<string>();
-    const freshSet = new Set(rawLeaderboard.map((i: any) => i.symbol));
+    const freshSet = new Set(rawLeaderboard.map((i: any) => i.symbol as string));
     const stale = new Set<string>();
     rowCacheRef.current.forEach((_, sym) => {
       if (!freshSet.has(sym)) stale.add(sym);
