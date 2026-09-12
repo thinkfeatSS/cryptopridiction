@@ -46,12 +46,22 @@ def fetch_live_binance_prices(max_age_seconds: float = 2.5) -> Dict[str, float]:
     return _LIVE_PRICES_CACHE or {}
 
 class SignalService:
-    def resolve_pending_signals_live(self, db: Session):
+    def __init__(self):
+        self._last_resolve_ts = 0.0
+        self._last_sync_ts = 0.0
+
+    def resolve_pending_signals_live(self, db: Session, force: bool = False):
         """
         Evaluates pending signals in the database against live Binance spot prices:
         - Resolves expired signals when predicted_close_utc has passed.
         - Resolves TP1 / TP2 / TP3 / SL hits in real time.
+        - Throttled to run at most once every 15 seconds to keep API responses instant.
         """
+        now_t = time.time()
+        if not force and (now_t - self._last_resolve_ts) < 15.0:
+            return
+        self._last_resolve_ts = now_t
+
         try:
             pending = db.query(SignalAudit).filter(
                 or_(
@@ -62,7 +72,7 @@ class SignalService:
             if not pending:
                 return
 
-            live_prices = fetch_live_binance_prices(max_age_seconds=2.0)
+            live_prices = fetch_live_binance_prices(max_age_seconds=5.0)
             if not live_prices:
                 return
 
@@ -199,7 +209,13 @@ class SignalService:
 
     def get_kpi_summary(self, db: Session) -> Dict[str, Any]:
         """Calculates executive KPI metrics in a single optimized pass."""
-        sync_files_to_db_live()
+        now_t = time.time()
+        if (now_t - self._last_sync_ts) >= 30.0:
+            self._last_sync_ts = now_t
+            try:
+                sync_files_to_db_live()
+            except Exception:
+                pass
         self.resolve_pending_signals_live(db)
         signals = db.query(
             SignalAudit.outcome_label,
