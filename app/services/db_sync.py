@@ -45,6 +45,9 @@ def init_db():
                     "ALTER TABLE paper_positions ADD COLUMN tp2_price DOUBLE",
                     "ALTER TABLE paper_positions ADD COLUMN tp3_price DOUBLE",
                     "ALTER TABLE paper_positions ADD COLUMN unrealized_gross_pnl_usd DOUBLE DEFAULT 0.0",
+                    "ALTER TABLE paper_positions ADD COLUMN buy_fee_usd DOUBLE DEFAULT 0.0",
+                    "ALTER TABLE paper_positions ADD COLUMN est_sell_fee_usd DOUBLE DEFAULT 0.0",
+                    "ALTER TABLE paper_positions ADD COLUMN unrealized_fee_usd DOUBLE DEFAULT 0.0",
                 ]:
                     try:
                         conn.execute(text(_stmt))
@@ -56,6 +59,11 @@ def init_db():
                 for _stmt in [
                     "ALTER TABLE closed_trades ADD COLUMN execution_engine VARCHAR(64) DEFAULT 'paper'",
                     "ALTER TABLE closed_trades ADD COLUMN raw_entry_price DOUBLE",
+                    "ALTER TABLE closed_trades ADD COLUMN gross_pnl_usd DOUBLE DEFAULT 0.0",
+                    "ALTER TABLE closed_trades ADD COLUMN buy_fee_usd DOUBLE DEFAULT 0.0",
+                    "ALTER TABLE closed_trades ADD COLUMN sell_fee_usd DOUBLE DEFAULT 0.0",
+                    "ALTER TABLE closed_trades ADD COLUMN total_fee_usd DOUBLE DEFAULT 0.0",
+                    "ALTER TABLE closed_trades ADD COLUMN binance_fee_usd DOUBLE DEFAULT 0.0",
                 ]:
                     try:
                         conn.execute(text(_stmt))
