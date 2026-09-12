@@ -72,6 +72,9 @@ try:
 except ImportError:
     HAS_LIGHTGBM = False
 
+import threading
+_LGBM_LOCK = threading.Lock()
+
 try:
     from app.services.db_sync import sync_files_to_db_live
     HAS_DB_SYNC = True
@@ -3520,7 +3523,14 @@ class HybridQuantEngine:
                 
                 p_cat_live = float(cat.predict_proba(X_live_scaled)[0, 1]) if cat else 0.50
                 p_xgb_live = float(xgb_m.predict_proba(X_live_scaled)[0, 1]) if xgb_m else 0.50
-                p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1]) if lgb_m else p_xgb_live
+                if lgb_m:
+                    try:
+                        with _LGBM_LOCK:
+                            p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1])
+                    except Exception:
+                        p_lgb_live = p_xgb_live
+                else:
+                    p_lgb_live = p_xgb_live
                 p_et_live = float(et.predict_proba(X_live_scaled)[0, 1]) if et else 0.50
             else:
                 scaler = RobustScaler()
@@ -3550,13 +3560,14 @@ class HybridQuantEngine:
                     p_xgb_live = 0.55 if d1_macro_bull else 0.45
                     p_test_xgb = np.array([p_xgb_live] * max(1, len(X_test_scaled)))
 
-                # 3. LightGBM Classifier
+                # 3. LightGBM Classifier (Protected with _LGBM_LOCK for thread safety)
                 try:
                     lgb_m = QuantModelFactory.build_primary_lightgbm(self.config['lgb_clf'])
                     if lgb_m:
-                        lgb_m.fit(X_train_scaled, y_p_train)
-                        p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1])
-                        p_test_lgb = lgb_m.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_lgb_live])
+                        with _LGBM_LOCK:
+                            lgb_m.fit(X_train_scaled, y_p_train)
+                            p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1])
+                            p_test_lgb = lgb_m.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_lgb_live])
                     else:
                         lgb_m = None
                         p_lgb_live = p_xgb_live
