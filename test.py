@@ -1324,53 +1324,9 @@ class TripleBarrierLabeler:
         return data
 
 # ------------------------------------------------------------------------------
-# 5. MULTI-HEAD SELF-ATTENTION RESNET + SUPER LEARNER ENSEMBLE
+# 5. SUPER LEARNER MODEL FACTORY (CatBoost, XGBoost, ExtraTrees)
 # ------------------------------------------------------------------------------
-def focal_loss(gamma=2.0, alpha=0.5):
-    def focal_loss_fixed(y_true, y_pred):
-        y_true = tf.cast(y_true, tf.float32)
-        epsilon = K.epsilon()
-        y_pred = K.clip(y_pred, epsilon, 1.0 - epsilon)
-        p_t = tf.where(K.equal(y_true, 1.0), y_pred, 1.0 - y_pred)
-        alpha_t = tf.where(K.equal(y_true, 1.0), alpha, 1.0 - alpha)
-        loss = -alpha_t * K.pow(1.0 - p_t, gamma) * K.log(p_t)
-        return K.mean(loss)
-    return focal_loss_fixed
-
 class QuantModelFactory:
-    @staticmethod
-    def build_primary_dnn(input_dim: int, cfg: dict) -> tf.keras.Model:
-        l2 = regularizers.l2(cfg['l2_reg'])
-        inputs = layers.Input(shape=(input_dim,))
-        x_proj = layers.Dense(128, kernel_regularizer=l2)(inputs)
-        x_proj = layers.BatchNormalization()(x_proj)
-        x_proj = layers.Activation('swish')(x_proj)
-        
-        x_reshaped = layers.Reshape((1, 128))(x_proj)
-        attn_out = layers.MultiHeadAttention(num_heads=4, key_dim=32)(x_reshaped, x_reshaped)
-        attn_flat = layers.Flatten()(attn_out)
-        attn_skip = layers.Add()([x_proj, attn_flat])
-        attn_skip = layers.LayerNormalization()(attn_skip)
-        
-        x1 = layers.Dense(128, kernel_regularizer=l2)(attn_skip)
-        x1 = layers.BatchNormalization()(x1)
-        x1 = layers.Activation('swish')(x1)
-        x1 = layers.Dropout(cfg['dropout'])(x1)
-        
-        x2 = layers.Dense(128, kernel_regularizer=l2)(x1)
-        x2 = layers.BatchNormalization()(x2)
-        x2 = layers.Activation('swish')(x2)
-        skip1 = layers.Add()([attn_skip, x2])
-        
-        outputs = layers.Dense(1, activation='sigmoid')(skip1)
-        model = models.Model(inputs=inputs, outputs=outputs)
-        
-        model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=cfg['learning_rate']),
-            loss=focal_loss(gamma=cfg.get('focal_gamma', 2.0), alpha=0.5),
-            metrics=['accuracy']
-        )
-        return model
 
     @staticmethod
     def build_primary_catboost(cfg: dict) -> CatBoostClassifier:
