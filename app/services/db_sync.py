@@ -130,272 +130,294 @@ def set_cached_forecast(data):
     global _CACHED_FORECAST
     _CACHED_FORECAST = data
 
+_SYNC_LOCK = threading.Lock()
+
 def sync_files_to_db_live(force: bool = False) -> bool:
     """
     High-performance live synchronizer:
     Detects if CSV or JSON files have been modified by test.py,
     and updates the database tables using bulk mappings.
+    Guarded by non-blocking lock to prevent database lock contention.
     """
     global _LAST_SYNC_TIMES, _LAST_CHECK_TIME, _FULL_SCAN_VERSION, _PORTFOLIO_VERSION, _LAST_SCAN_TIMESTAMP, _CACHED_FORECAST
-    now_ts = time.time()
     
-    # Cooldown check (skip disk stats if checked less than 2.0s ago unless forced)
-    if not force and (now_ts - _LAST_CHECK_TIME) < 2.0:
-        return False
-    _LAST_CHECK_TIME = now_ts
-
-    export_dir = settings.EXPORT_DIR
-    signals_csv = os.path.join(export_dir, "trader_signals_tracker.csv")
-    portfolio_json = os.path.join(export_dir, "paper_trading_ledger.json")
-    forecast_json = os.path.join(export_dir, "live_market_forecast.json")
-
-    portfolio_changed = False
-    forecast_changed = False
-
-    csv_mtime = os.path.getmtime(signals_csv) if os.path.exists(signals_csv) else 0.0
-    portfolio_mtime = os.path.getmtime(portfolio_json) if os.path.exists(portfolio_json) else 0.0
-    forecast_mtime = os.path.getmtime(forecast_json) if os.path.exists(forecast_json) else 0.0
-
-    if not force and csv_mtime <= _LAST_SYNC_TIMES["csv"] and portfolio_mtime <= _LAST_SYNC_TIMES["portfolio"] and forecast_mtime <= _LAST_SYNC_TIMES["forecast"]:
+    if not _SYNC_LOCK.acquire(blocking=False):
+        # Another sync is actively executing; skip without blocking
         return False
 
-    db: Session = SessionLocal()
     try:
-        # 1. Sync Signals Tracker CSV (Insert new + update existing outcomes & returns)
-        if os.path.exists(signals_csv) and (force or csv_mtime > _LAST_SYNC_TIMES["csv"]):
-            try:
-                df = pd.read_csv(signals_csv, keep_default_na=False).fillna("")
-                records = df.to_dict(orient="records")
-                
-                # Bulk fetch existing signals into dictionary
-                existing_signals = {s.signal_id: s for s in db.query(SignalAudit).all()}
+        now_ts = time.time()
+        
+        # Cooldown check (skip disk stats if checked less than 2.0s ago unless forced)
+        if not force and (now_ts - _LAST_CHECK_TIME) < 2.0:
+            return False
+        _LAST_CHECK_TIME = now_ts
 
-                for r in records:
-                    sig_id = str(r.get("signal_id", "")).strip()
-                    if not sig_id:
-                        continue
+        export_dir = settings.EXPORT_DIR
+        signals_csv = os.path.join(export_dir, "trader_signals_tracker.csv")
+        portfolio_json = os.path.join(export_dir, "paper_trading_ledger.json")
+        forecast_json = os.path.join(export_dir, "live_market_forecast.json")
 
-                    # Clean numeric return
-                    ret_num = None
-                    ret_raw = r.get("realized_return_pct")
-                    if ret_raw is not None:
-                        ret_str = str(ret_raw).replace("%", "").replace("+", "").strip()
-                        if ret_str != "" and ret_str.lower() not in ["nan", "none", "null"]:
+        portfolio_changed = False
+        forecast_changed = False
+
+        csv_mtime = os.path.getmtime(signals_csv) if os.path.exists(signals_csv) else 0.0
+        portfolio_mtime = os.path.getmtime(portfolio_json) if os.path.exists(portfolio_json) else 0.0
+        forecast_mtime = os.path.getmtime(forecast_json) if os.path.exists(forecast_json) else 0.0
+
+        if not force and csv_mtime <= _LAST_SYNC_TIMES["csv"] and portfolio_mtime <= _LAST_SYNC_TIMES["portfolio"] and forecast_mtime <= _LAST_SYNC_TIMES["forecast"]:
+            return False
+
+        db: Session = SessionLocal()
+        try:
+            # 1. Sync Signals Tracker CSV (Insert new + update existing outcomes & returns)
+            if os.path.exists(signals_csv) and (force or csv_mtime > _LAST_SYNC_TIMES["csv"]):
+                try:
+                    df = pd.read_csv(signals_csv, keep_default_na=False).fillna("")
+                    records = df.to_dict(orient="records")
+                    
+                    # Bulk fetch existing signals into dictionary
+                    existing_signals = {s.signal_id: s for s in db.query(SignalAudit).all()}
+
+                    for r in records:
+                        sig_id = str(r.get("signal_id", "")).strip()
+                        if not sig_id:
+                            continue
+
+                        # Clean numeric return
+                        ret_num = None
+                        ret_raw = r.get("realized_return_pct")
+                        if ret_raw is not None:
+                            ret_str = str(ret_raw).replace("%", "").replace("+", "").strip()
+                            if ret_str != "" and ret_str.lower() not in ["nan", "none", "null"]:
+                                try:
+                                    val = float(ret_str)
+                                    if not (math.isnan(val) or math.isinf(val)):
+                                        ret_num = val
+                                except Exception:
+                                    pass
+
+                        q_grade = str(r.get("quality_grade", ""))
+                        tier = 1 if "A+" in q_grade else (2 if "GRADE A" in q_grade.upper() else (3 if "B+" in q_grade else 4))
+
+                        def safe_f(v, fallback=0.0):
                             try:
-                                val = float(ret_str)
-                                if not (math.isnan(val) or math.isinf(val)):
-                                    ret_num = val
+                                return float(v) if v != "" else fallback
+                            except Exception:
+                                return fallback
+
+                        pred_close = str(r.get("predicted_close_utc", "")).strip()
+                        if not pred_close or pred_close == "N/A":
+                            p_win = str(r.get("predicted_window", ""))
+                            if "➔" in p_win:
+                                after_arrow = p_win.split("➔")[-1].strip()
+                                pred_close = after_arrow.split("(")[0].strip() if "(" in after_arrow else after_arrow.strip()
+
+                        existing = existing_signals.get(sig_id)
+                        if not existing:
+                            try:
+                                sig_obj = SignalAudit(
+                                    signal_id=sig_id,
+                                    date_utc=str(r.get("date_utc", "")),
+                                    time_utc=str(r.get("time_utc", "")),
+                                    rank_label=str(r.get("rank", "")),
+                                    quality_grade=q_grade,
+                                    grade_tier=tier,
+                                    symbol=str(r.get("symbol", "")),
+                                    horizon=str(r.get("horizon", "")),
+                                    direction=str(r.get("direction", "LONG")),
+                                    conviction_pct=safe_f(r.get("conviction_pct"), 50.0),
+                                    entry_price=safe_f(r.get("entry_price"), 0.0),
+                                    tp1_price=safe_f(r.get("tp1_price"), 0.0),
+                                    tp2_price=safe_f(r.get("tp2_price"), 0.0),
+                                    tp3_price=safe_f(r.get("tp3_price"), 0.0),
+                                    sl_price=safe_f(r.get("sl_price"), 0.0),
+                                    risk_reward_ratio=str(r.get("risk_reward_ratio", "1:2.0")),
+                                    expected_return_pct=safe_f(r.get("expected_return_pct"), 0.0),
+                                    decision=str(r.get("decision", "")),
+                                    paper_trading_status=str(r.get("paper_trading_status", "")),
+                                    predicted_window=str(r.get("predicted_window", "")),
+                                    predicted_close_utc=pred_close or "N/A",
+                                    status=str(r.get("status", "PENDING_EVALUATION")),
+                                    outcome_label=str(r.get("outcome_label", "PENDING")),
+                                    peak_price_seen=safe_f(r.get("peak_price_seen"), 0.0),
+                                    trough_price_seen=safe_f(r.get("trough_price_seen"), 0.0),
+                                    max_potential_gain_pct=safe_f(r.get("max_potential_gain_pct"), 0.0),
+                                    exit_price=safe_f(r.get("exit_price"), None) if str(r.get("exit_price", "")) != "" else None,
+                                    realized_return_pct=ret_num,
+                                    evaluated_at_utc=str(r.get("evaluated_at_utc", "")) or None,
+                                )
+                                db.add(sig_obj)
+                                existing_signals[sig_id] = sig_obj
                             except Exception:
                                 pass
+                        else:
+                            existing.status = str(r.get("status", existing.status))
+                            existing.outcome_label = str(r.get("outcome_label", existing.outcome_label))
+                            existing.peak_price_seen = safe_f(r.get("peak_price_seen"), existing.peak_price_seen)
+                            existing.trough_price_seen = safe_f(r.get("trough_price_seen"), existing.trough_price_seen)
+                            existing.max_potential_gain_pct = safe_f(r.get("max_potential_gain_pct"), existing.max_potential_gain_pct)
+                            if str(r.get("exit_price", "")) != "":
+                                existing.exit_price = safe_f(r.get("exit_price"), existing.exit_price)
+                            if ret_num is not None:
+                                existing.realized_return_pct = ret_num
+                            if r.get("evaluated_at_utc"):
+                                existing.evaluated_at_utc = str(r.get("evaluated_at_utc"))
+                            if pred_close and (not existing.predicted_close_utc or existing.predicted_close_utc == "N/A"):
+                                existing.predicted_close_utc = pred_close
 
-                    q_grade = str(r.get("quality_grade", ""))
-                    tier = 1 if "A+" in q_grade else (2 if "GRADE A" in q_grade.upper() else (3 if "B+" in q_grade else 4))
+                    db.commit()
+                    _LAST_SYNC_TIMES["csv"] = csv_mtime
+                    portfolio_changed = True
+                except Exception as e:
+                    db.rollback()
+                    print(f"[LIVE SYNC ERROR] Signals CSV sync: {e}")
 
-                    def safe_f(v, fallback=0.0):
+            # 2. Sync Portfolio JSON
+            if os.path.exists(portfolio_json) and (force or portfolio_mtime > _LAST_SYNC_TIMES["portfolio"]):
+                try:
+                    with open(portfolio_json, "r", encoding="utf-8") as f:
+                        p_data = json.load(f)
+
+                    def safe_float(v, fallback=0.0):
+                        """Convert a value to float safely; returns fallback on None/empty/invalid."""
+                        if v is None:
+                            return fallback
                         try:
-                            return float(v) if v != "" else fallback
-                        except Exception:
+                            val = float(v)
+                            return val if not (math.isnan(val) or math.isinf(val)) else fallback
+                        except (TypeError, ValueError):
                             return fallback
 
-                    pred_close = str(r.get("predicted_close_utc", "")).strip()
-                    if not pred_close or pred_close == "N/A":
-                        p_win = str(r.get("predicted_window", ""))
-                        if "➔" in p_win:
-                            after_arrow = p_win.split("➔")[-1].strip()
-                            pred_close = after_arrow.split("(")[0].strip() if "(" in after_arrow else after_arrow.strip()
-
-                    existing = existing_signals.get(sig_id)
-                    if not existing:
-                        sig_obj = SignalAudit(
-                            signal_id=sig_id,
-                            date_utc=str(r.get("date_utc", "")),
-                            time_utc=str(r.get("time_utc", "")),
-                            rank_label=str(r.get("rank", "")),
-                            quality_grade=q_grade,
-                            grade_tier=tier,
-                            symbol=str(r.get("symbol", "")),
-                            horizon=str(r.get("horizon", "")),
-                            direction=str(r.get("direction", "LONG")),
-                            conviction_pct=safe_f(r.get("conviction_pct"), 50.0),
-                            entry_price=safe_f(r.get("entry_price"), 0.0),
-                            tp1_price=safe_f(r.get("tp1_price"), 0.0),
-                            tp2_price=safe_f(r.get("tp2_price"), 0.0),
-                            tp3_price=safe_f(r.get("tp3_price"), 0.0),
-                            sl_price=safe_f(r.get("sl_price"), 0.0),
-                            risk_reward_ratio=str(r.get("risk_reward_ratio", "1:2.0")),
-                            expected_return_pct=safe_f(r.get("expected_return_pct"), 0.0),
-                            decision=str(r.get("decision", "")),
-                            paper_trading_status=str(r.get("paper_trading_status", "")),
-                            predicted_window=str(r.get("predicted_window", "")),
-                            predicted_close_utc=pred_close or "N/A",
-                            status=str(r.get("status", "PENDING_EVALUATION")),
-                            outcome_label=str(r.get("outcome_label", "PENDING")),
-                            peak_price_seen=safe_f(r.get("peak_price_seen"), 0.0),
-                            trough_price_seen=safe_f(r.get("trough_price_seen"), 0.0),
-                            max_potential_gain_pct=safe_f(r.get("max_potential_gain_pct"), 0.0),
-                            exit_price=safe_f(r.get("exit_price"), None) if str(r.get("exit_price", "")) != "" else None,
-                            realized_return_pct=ret_num,
-                            evaluated_at_utc=str(r.get("evaluated_at_utc", "")) or None,
-                        )
-                        db.add(sig_obj)
-                        existing_signals[sig_id] = sig_obj
-                    else:
-                        existing.status = str(r.get("status", existing.status))
-                        existing.outcome_label = str(r.get("outcome_label", existing.outcome_label))
-                        existing.peak_price_seen = safe_f(r.get("peak_price_seen"), existing.peak_price_seen)
-                        existing.trough_price_seen = safe_f(r.get("trough_price_seen"), existing.trough_price_seen)
-                        existing.max_potential_gain_pct = safe_f(r.get("max_potential_gain_pct"), existing.max_potential_gain_pct)
-                        if str(r.get("exit_price", "")) != "":
-                            existing.exit_price = safe_f(r.get("exit_price"), existing.exit_price)
-                        if ret_num is not None:
-                            existing.realized_return_pct = ret_num
-                        if r.get("evaluated_at_utc"):
-                            existing.evaluated_at_utc = str(r.get("evaluated_at_utc"))
-                        if pred_close and (not existing.predicted_close_utc or existing.predicted_close_utc == "N/A"):
-                            existing.predicted_close_utc = pred_close
-
-                db.commit()
-                _LAST_SYNC_TIMES["csv"] = csv_mtime
-                portfolio_changed = True
-            except Exception as e:
-                db.rollback()
-                print(f"[LIVE SYNC ERROR] Signals CSV sync: {e}")
-
-        # 2. Sync Portfolio JSON
-        if os.path.exists(portfolio_json) and (force or portfolio_mtime > _LAST_SYNC_TIMES["portfolio"]):
-            try:
-                with open(portfolio_json, "r", encoding="utf-8") as f:
-                    p_data = json.load(f)
-
-                def safe_float(v, fallback=0.0):
-                    """Convert a value to float safely; returns fallback on None/empty/invalid."""
-                    if v is None:
-                        return fallback
-                    try:
-                        val = float(v)
-                        return val if not (math.isnan(val) or math.isinf(val)) else fallback
-                    except (TypeError, ValueError):
-                        return fallback
-
-                # Replace current open positions
-                db.query(PaperPosition).delete()
-                for op in p_data.get("open_positions", []):
-                    tid = op.get("trade_id") or f"POS_{op.get('symbol')}_{op.get('horizon')}"
-                    pos = PaperPosition(
-                        trade_id=tid,
-                        symbol=str(op.get("symbol", "")),
-                        horizon=str(op.get("horizon", "")),
-                        direction=str(op.get("direction", "")),
-                        execution_engine=str(op.get("execution_engine", "paper")),
-                        allocated_usd=safe_float(op.get("allocated_usd"), 100.0),
-                        entry_price=safe_float(op.get("entry_price")),
-                        raw_entry_price=safe_float(op.get("raw_entry_price") or op.get("entry_price")),
-                        current_price=safe_float(op.get("current_price")),
-                        tp_price=safe_float(op.get("tp_price") or op.get("tp1_price")),
-                        tp1_price=safe_float(op.get("tp1_price") or op.get("tp_price")),
-                        tp2_price=safe_float(op.get("tp2_price")),
-                        tp3_price=safe_float(op.get("tp3_price")),
-                        sl_price=safe_float(op.get("sl_price")),
-                        unrealized_gross_pnl_usd=safe_float(op.get("unrealized_gross_pnl_usd")),
-                        unrealized_pnl_usd=safe_float(op.get("unrealized_pnl_usd")),
-                        unrealized_pnl_pct=safe_float(op.get("unrealized_pnl_pct")),
-                        target_progress_pct=safe_float(op.get("target_progress_pct")),
-                        buy_fee_usd=safe_float(op.get("buy_fee_usd") or op.get("entry_fee_usd")),
-                        est_sell_fee_usd=safe_float(op.get("est_sell_fee_usd")),
-                        unrealized_fee_usd=safe_float(op.get("unrealized_fee_usd")),
-                        opened_at=str(op.get("opened_at", "")),
-                        expiry_time=str(op.get("expiry_time", "")),
-                    )
-                    db.add(pos)
-
-                # Sync Closed Trades in exact parity with ledger
-                ledger_closed = p_data.get("closed_trades_history", [])
-                ledger_trade_ids = {ct.get("trade_id") for ct in ledger_closed if ct.get("trade_id")}
-                
-                # If ledger was reset (0 closed trades), purge historical DB records
-                if not ledger_closed:
-                    db.query(ClosedTrade).delete()
-                else:
-                    # Remove any DB closed trades that are not in the current ledger
-                    db.query(ClosedTrade).filter(~ClosedTrade.trade_id.in_(ledger_trade_ids)).delete(synchronize_session=False)
-
-                existing_trades = {t[0] for t in db.query(ClosedTrade.trade_id).all()}
-                for ct in ledger_closed:
-                    tid = ct.get("trade_id") or f"TRADE_{ct.get('symbol')}_{ct.get('closed_at')}"
-                    if tid not in existing_trades:
-                        tr = ClosedTrade(
+                    # Replace current open positions
+                    db.query(PaperPosition).delete()
+                    for op in p_data.get("open_positions", []):
+                        tid = op.get("trade_id") or f"POS_{op.get('symbol')}_{op.get('horizon')}"
+                        pos = PaperPosition(
                             trade_id=tid,
-                            symbol=str(ct.get("symbol", "")),
-                            horizon=str(ct.get("horizon", "")),
-                            direction=str(ct.get("direction", "")),
-                            execution_engine=str(ct.get("execution_engine", "paper")),
-                            entry_price=safe_float(ct.get("entry_price")),
-                            raw_entry_price=safe_float(ct.get("raw_entry_price") or ct.get("entry_price")),
-                            exit_price=safe_float(ct.get("exit_price")),
-                            exit_reason=str(ct.get("exit_reason", "")),
-                            outcome=str(ct.get("outcome", "")),
-                            gross_pnl_usd=safe_float(ct.get("gross_pnl_usd")),
-                            buy_fee_usd=safe_float(ct.get("buy_fee_usd")),
-                            sell_fee_usd=safe_float(ct.get("sell_fee_usd")),
-                            binance_fee_usd=safe_float(ct.get("binance_fee_usd")),
-                            realized_pnl_usd=safe_float(ct.get("realized_pnl_usd")),
-                            realized_pnl_pct=safe_float(ct.get("realized_pnl_pct")),
-                            duration_str=str(ct.get("duration_str", "")),
-                            opened_at=str(ct.get("opened_at", "")),
-                            closed_at=str(ct.get("closed_at", "")),
+                            symbol=str(op.get("symbol", "")),
+                            horizon=str(op.get("horizon", "")),
+                            direction=str(op.get("direction", "")),
+                            execution_engine=str(op.get("execution_engine", "paper")),
+                            allocated_usd=safe_float(op.get("allocated_usd"), 100.0),
+                            entry_price=safe_float(op.get("entry_price")),
+                            raw_entry_price=safe_float(op.get("raw_entry_price") or op.get("entry_price")),
+                            current_price=safe_float(op.get("current_price")),
+                            tp_price=safe_float(op.get("tp_price") or op.get("tp1_price")),
+                            tp1_price=safe_float(op.get("tp1_price") or op.get("tp_price")),
+                            tp2_price=safe_float(op.get("tp2_price")),
+                            tp3_price=safe_float(op.get("tp3_price")),
+                            sl_price=safe_float(op.get("sl_price")),
+                            unrealized_gross_pnl_usd=safe_float(op.get("unrealized_gross_pnl_usd")),
+                            unrealized_pnl_usd=safe_float(op.get("unrealized_pnl_usd")),
+                            unrealized_pnl_pct=safe_float(op.get("unrealized_pnl_pct")),
+                            target_progress_pct=safe_float(op.get("target_progress_pct")),
+                            buy_fee_usd=safe_float(op.get("buy_fee_usd") or op.get("entry_fee_usd")),
+                            est_sell_fee_usd=safe_float(op.get("est_sell_fee_usd")),
+                            unrealized_fee_usd=safe_float(op.get("unrealized_fee_usd")),
+                            opened_at=str(op.get("opened_at", "")),
+                            expiry_time=str(op.get("expiry_time", "")),
                         )
-                        db.add(tr)
-                        existing_trades.add(tid)
+                        db.add(pos)
 
-                db.commit()
-                _LAST_SYNC_TIMES["portfolio"] = portfolio_mtime
-                portfolio_changed = True
-            except Exception as e:
-                db.rollback()
-                print(f"[LIVE SYNC ERROR] Portfolio sync: {e}")
+                    # Sync Closed Trades in exact parity with ledger
+                    ledger_closed = p_data.get("closed_trades_history", [])
+                    ledger_trade_ids = {ct.get("trade_id") for ct in ledger_closed if ct.get("trade_id")}
+                    
+                    # If ledger was reset (0 closed trades), purge historical DB records
+                    if not ledger_closed:
+                        db.query(ClosedTrade).delete()
+                    else:
+                        # Remove any DB closed trades that are not in the current ledger
+                        db.query(ClosedTrade).filter(~ClosedTrade.trade_id.in_(ledger_trade_ids)).delete(synchronize_session=False)
 
-        # 3. Sync Forecast JSON
-        if os.path.exists(forecast_json) and (force or forecast_mtime > _LAST_SYNC_TIMES["forecast"]):
-            try:
-                with open(forecast_json, "r", encoding="utf-8") as f:
-                    f_data = json.load(f)
-                ts = f_data.get("timestamp", datetime.now(timezone.utc).isoformat())
-                _LAST_SCAN_TIMESTAMP = ts
-                _CACHED_FORECAST = f_data
+                    existing_trades = {t[0] for t in db.query(ClosedTrade.trade_id).all()}
+                    for ct in ledger_closed:
+                        tid = ct.get("trade_id") or f"TRADE_{ct.get('symbol')}_{ct.get('closed_at')}"
+                        if tid not in existing_trades:
+                            tr = ClosedTrade(
+                                trade_id=tid,
+                                symbol=str(ct.get("symbol", "")),
+                                horizon=str(ct.get("horizon", "")),
+                                direction=str(ct.get("direction", "")),
+                                execution_engine=str(ct.get("execution_engine", "paper")),
+                                entry_price=safe_float(ct.get("entry_price")),
+                                raw_entry_price=safe_float(ct.get("raw_entry_price") or ct.get("entry_price")),
+                                exit_price=safe_float(ct.get("exit_price")),
+                                exit_reason=str(ct.get("exit_reason", "")),
+                                outcome=str(ct.get("outcome", "")),
+                                gross_pnl_usd=safe_float(ct.get("gross_pnl_usd")),
+                                buy_fee_usd=safe_float(ct.get("buy_fee_usd")),
+                                sell_fee_usd=safe_float(ct.get("sell_fee_usd")),
+                                binance_fee_usd=safe_float(ct.get("binance_fee_usd")),
+                                realized_pnl_usd=safe_float(ct.get("realized_pnl_usd")),
+                                realized_pnl_pct=safe_float(ct.get("realized_pnl_pct")),
+                                duration_str=str(ct.get("duration_str", "")),
+                                opened_at=str(ct.get("opened_at", "")),
+                                closed_at=str(ct.get("closed_at", "")),
+                            )
+                            db.add(tr)
+                            existing_trades.add(tid)
 
-                # Insert new forecast record
-                existing_f = db.query(MarketForecast).filter(MarketForecast.timestamp_utc == ts).first()
-                if not existing_f:
-                    mf = MarketForecast(
-                        timestamp_utc=ts,
-                        strategy_name=f_data.get("strategy", "Multi-Horizon Engine"),
-                        top_round_signals_json=json.dumps(f_data.get("top_round_signals", [])),
-                        scanner_leaderboard_json=json.dumps(f_data.get("scanner_leaderboard", [])),
-                        deep_dive_json=json.dumps(f_data.get("deep_dive", {})),
-                        btc_market_shield_json=json.dumps(f_data.get("btc_market_shield", {"active": False, "reason": "RANGE CONSOLIDATION"})),
-                    )
-                    db.add(mf)
                     db.commit()
-                else:
-                    existing_f.btc_market_shield_json = json.dumps(f_data.get("btc_market_shield", {"active": False, "reason": "RANGE CONSOLIDATION"}))
+                    _LAST_SYNC_TIMES["portfolio"] = portfolio_mtime
+                    portfolio_changed = True
+                except Exception as e:
+                    db.rollback()
+                    print(f"[LIVE SYNC ERROR] Portfolio sync: {e}")
+
+            # 3. Sync Forecast JSON (Full Update: Always refresh leaderboard & signals)
+            if os.path.exists(forecast_json) and (force or forecast_mtime > _LAST_SYNC_TIMES["forecast"]):
+                try:
+                    with open(forecast_json, "r", encoding="utf-8") as f:
+                        f_data = json.load(f)
+                    ts = f_data.get("timestamp", datetime.now(timezone.utc).isoformat())
+                    _LAST_SCAN_TIMESTAMP = ts
+                    _CACHED_FORECAST = f_data
+
+                    top_signals_json = json.dumps(f_data.get("top_round_signals", []))
+                    leaderboard_json = json.dumps(f_data.get("scanner_leaderboard", []))
+                    deep_dive_json = json.dumps(f_data.get("deep_dive", {}))
+                    shield_json = json.dumps(f_data.get("btc_market_shield", {"active": False, "reason": "RANGE CONSOLIDATION"}))
+
+                    # Insert new forecast record or update existing
+                    existing_f = db.query(MarketForecast).filter(MarketForecast.timestamp_utc == ts).first()
+                    if not existing_f:
+                        mf = MarketForecast(
+                            timestamp_utc=ts,
+                            strategy_name=f_data.get("strategy", "Multi-Horizon Engine"),
+                            top_round_signals_json=top_signals_json,
+                            scanner_leaderboard_json=leaderboard_json,
+                            deep_dive_json=deep_dive_json,
+                            btc_market_shield_json=shield_json,
+                        )
+                        db.add(mf)
+                    else:
+                        existing_f.strategy_name = f_data.get("strategy", "Multi-Horizon Engine")
+                        existing_f.top_round_signals_json = top_signals_json
+                        existing_f.scanner_leaderboard_json = leaderboard_json
+                        existing_f.deep_dive_json = deep_dive_json
+                        existing_f.btc_market_shield_json = shield_json
                     db.commit()
 
-                _LAST_SYNC_TIMES["forecast"] = forecast_mtime
-                forecast_changed = True
-            except Exception as e:
-                db.rollback()
-                print(f"[LIVE SYNC ERROR] Forecast sync: {e}")
+                    _LAST_SYNC_TIMES["forecast"] = forecast_mtime
+                    forecast_changed = True
+                except Exception as e:
+                    db.rollback()
+                    print(f"[LIVE SYNC ERROR] Forecast sync: {e}")
 
-        if forecast_changed:
-            _FULL_SCAN_VERSION += 1
-            print(f"[LIVE SYNC ⚡] Full AI 100-Coin Scan Synchronized to Scan Version v{_FULL_SCAN_VERSION} ({_LAST_SCAN_TIMESTAMP}).")
-        
-        if portfolio_changed:
-            _PORTFOLIO_VERSION += 1
+            if forecast_changed:
+                _FULL_SCAN_VERSION += 1
+                print(f"[LIVE SYNC ⚡] Full AI 100-Coin Scan Synchronized to Scan Version v{_FULL_SCAN_VERSION} ({_LAST_SCAN_TIMESTAMP}).")
+            
+            if portfolio_changed:
+                _PORTFOLIO_VERSION += 1
 
-        return forecast_changed or portfolio_changed
+            return forecast_changed or portfolio_changed
+        finally:
+            db.close()
     finally:
-        db.close()
+        _SYNC_LOCK.release()
 
 def migrate_files_to_db():
     """Initial startup synchronization."""

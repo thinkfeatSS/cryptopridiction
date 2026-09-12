@@ -3129,7 +3129,7 @@ class HybridQuantEngine:
         os.makedirs(self.config['models_export_dir'], exist_ok=True)
         os.makedirs(self.config['app_export_dir'], exist_ok=True)
 
-    def _prune_model_cache(self, max_size: int = 1500, max_age_seconds: float = 86400):
+    def _prune_model_cache(self, max_size: int = 3000, max_age_seconds: float = 86400 * 14):
         """
         OS Memory Guard: Prunes expired and excess models from RAM cache.
         Prevents unbounded growth across continuous multi-day scanning cycles.
@@ -3463,11 +3463,11 @@ class HybridQuantEngine:
             if len(unique_classes) < 2 and len(y_p_train) > 1:
                 y_p_train[0] = 1 - y_p_train[-1]
 
-            # Fast-Boot Model Checkpoint & Memory Cache (6 Hour Expiry)
+            # Fast-Boot Model Checkpoint & Memory Cache (14 Day Lifetime)
             cache_key = f"{symbol.replace('/', '_')}_{horizon_key}"
             now_ts = time.time()
 
-            if cache_key in self.model_cache and (now_ts - self.model_cache[cache_key]['ts'] < 21600):
+            if cache_key in self.model_cache and (now_ts - self.model_cache[cache_key].get('ts', 0) < 86400 * 14):
                 cached = self.model_cache[cache_key]
                 cached['ts'] = now_ts  # Update LRU access timestamp
                 scaler = cached['scaler']
@@ -3575,8 +3575,8 @@ class HybridQuantEngine:
                         'elite_acc': elite_acc,
                         'ts': now_ts
                     }
-                    if len(self.model_cache) > 1200:
-                        self._prune_model_cache(max_size=1000)
+                    if len(self.model_cache) > 3000:
+                        self._prune_model_cache(max_size=2500, max_age_seconds=86400 * 14)
 
         # 1. Base ML Direction & Calibrated Probability with Hysteresis Smoothing
         h_prob = (p_cat_live * w_cat) + (p_xgb_live * w_xgb) + (p_lgb_live * w_lgb) + (p_et_live * w_et)
@@ -4197,7 +4197,7 @@ class HybridQuantEngine:
             # Persist warmed model cache to disk so subsequent scans load hot in zero seconds
             try:
                 if hasattr(self, 'model_cache') and self.model_cache:
-                    joblib.dump(self.model_cache, self.model_cache_path + ".tmp")
+                    joblib.dump(self.model_cache, self.model_cache_path + ".tmp", compress=3)
                     os.replace(self.model_cache_path + ".tmp", self.model_cache_path)
             except Exception:
                 pass

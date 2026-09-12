@@ -626,17 +626,6 @@ class SignalService:
         if cached:
             return self.overlay_live_prices(cached)
 
-        sync_files_to_db_live()
-        cached = get_cached_forecast()
-        if cached:
-            return self.overlay_live_prices(cached)
-
-        latest = db.query(MarketForecast).order_by(desc(MarketForecast.id)).first()
-        if latest:
-            res = latest.to_dict()
-            set_cached_forecast(res)
-            return self.overlay_live_prices(res)
-        
         # Fallback to direct file read if available
         try:
             forecast_path = os.path.join(settings.EXPORT_DIR, "live_market_forecast.json")
@@ -647,6 +636,12 @@ class SignalService:
                     return self.overlay_live_prices(data)
         except Exception:
             pass
+
+        latest = db.query(MarketForecast).order_by(desc(MarketForecast.id)).first()
+        if latest:
+            res = latest.to_dict()
+            set_cached_forecast(res)
+            return self.overlay_live_prices(res)
 
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -659,7 +654,6 @@ class SignalService:
 
     def get_engine_status(self) -> Dict[str, Any]:
         """Calculates 15-minute countdown, market shield status, and server state."""
-        sync_files_to_db_live()
         sync_state = get_sync_state()
         now = datetime.now(timezone.utc)
         current_minute = now.minute
