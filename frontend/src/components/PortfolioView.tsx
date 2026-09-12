@@ -69,8 +69,8 @@ export default function PortfolioView() {
               <li>Close &amp; delete all active open positions</li>
               <li>Wipe previous closed trade history</li>
               <li>Reset wallet capital back to clean <span className="text-emerald-400 font-bold">$100.00</span></li>
-              <li>Activate 4H / 24H / Daily spot trades ($10 max 10 trades)</li>
-              <li>Enforce &ge; 5.0% net profit target with 100% real Binance Spot fees (0.10% buy + 0.10% sell)</li>
+              <li>Activate Multi-Horizon Long &amp; Short trades ($10 max 10 trades)</li>
+              <li>Enforce positive net profit target beating 100% real Binance fees (0.10% buy + 0.10% sell)</li>
             </ul>
 
             <div className="mt-5 flex items-center justify-end gap-3">
@@ -140,13 +140,13 @@ export default function PortfolioView() {
               💰 $100.00 Wallet ($10 / trade)
             </span>
             <span className="rounded-md bg-indigo-950/60 px-2 py-1 text-indigo-300 border border-indigo-800/60">
-              📅 4H / 24H / Daily
+              📅 Multi-Horizon (Scalp, Swing, 4H, Daily)
             </span>
             <span className="rounded-md bg-cyan-950/60 px-2 py-1 text-cyan-300 border border-cyan-800/60">
-              🎯 Min +5.0% Net Profit
+              🎯 Net Profitable (Beats Fees)
             </span>
             <span className="rounded-md bg-amber-950/60 px-2 py-1 text-amber-300 border border-amber-800/60">
-              ⚡ Binance Spot (0.10% Buy + 0.10% Sell Fee)
+              ⚡ Binance Spot &amp; Futures (0.10% Fee)
             </span>
           </div>
 
@@ -173,7 +173,7 @@ export default function PortfolioView() {
           </div>
           <h3 className="text-sm font-bold text-white">No Open Positions Active</h3>
           <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-            The trading engine will automatically open virtual positions when Grade A+ setups fire on 4-hour, 24-hour, and daily candle horizons with &ge; 5.0% net expected return under Binance Convert.
+            The trading engine automatically opens virtual Long &amp; Short positions when institutional setups fire across Scalp, Swing, 4H, and Daily horizons beating real Binance fees.
           </p>
         </div>
       ) : (

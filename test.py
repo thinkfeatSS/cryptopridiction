@@ -226,22 +226,22 @@ CONFIG = {
     },
     "paper_trading": {
         "enabled": True,
-        "spot_only": True,                  # Only SPOT trades (BULLISH / LONG positions only)
+        "spot_only": False,                 # Allow both LONG and SHORT paper trades (Futures & Spot)
         "start_balance_usd": 100.0,         # $100.00 Virtual Wallet
         "position_size_usd": 10.0,          # Fixed $10.00 position size per trade
         "dynamic_sizing": False,            # Fixed $10.00 per trade (no over-leveraging)
         "min_position_size_usd": 10.0,
         "max_concurrent_positions": 10,     # Up to 10 active trades ($10.00 x 10 = $100.00 total capital)
-        # Targeted Execution Horizons: 4H, 24H (1D), and Multi-Day Daily Setups
-        "allowed_horizons": ["horizon_4h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"],
-        "min_expected_return_pct": 5.0,     # Strict minimum 5.0% net profit target on trades (>= 5.0% gain to TP1)
-        "min_net_profit_usd": 0.50,         # Minimum $0.50 net profit target on $10.00 trades (5% of $10.00)
-        "require_positive_track_record": True, # Must have past winning signals > past losing signals
-        # Realistic Binance Spot Trading Fee Engine (0.10% Buy Fee + 0.10% Sell Fee Standard, or 0.075% BNB discount)
-        "execution_engine": "binance_spot", # "binance_spot" (100% real Binance Spot fees) or "binance_convert"
-        "binance_fee_rate": 0.0010,         # Standard Binance Spot 0.10% Maker/Taker Fee
-        "binance_buy_fee_rate": 0.0010,     # Explicit 0.10% Buy Fee
-        "binance_sell_fee_rate": 0.0010,    # Explicit 0.10% Sell Fee
+        # Targeted Execution Horizons: Multi-horizon execution across all high-conviction timeframes
+        "allowed_horizons": ["scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"],
+        "min_expected_return_pct": 0.40,    # Minimum expected return hurdle: >= 0.40% (clears round-trip Binance fees)
+        "min_net_profit_usd": 0.04,         # Minimum $0.04 net profit target on $10.00 trades (0.40% of $10.00)
+        "require_positive_track_record": False, # Do not block untested coins; 2-strike quarantine blocks toxic assets
+        # Realistic Binance Trading Fee Engine (0.10% Buy Fee + 0.10% Sell Fee Standard, or 0.075% BNB discount)
+        "execution_engine": "binance_spot", # "binance_spot" (100% real Binance fees) or "binance_convert"
+        "binance_fee_rate": 0.0010,         # Standard Binance 0.10% Maker/Taker Fee
+        "binance_buy_fee_rate": 0.0010,     # Explicit 0.10% Entry Fee
+        "binance_sell_fee_rate": 0.0010,    # Explicit 0.10% Exit Fee
         "use_bnb_fee_discount": False,      # Set to True for 25% discount (0.075% fee)
         "slippage_rate": 0.0000,
         "convert_buy_spread_rate": 0.0010,  # Fallback for convert mode (+0.10% ask spread)
@@ -1489,10 +1489,10 @@ class PaperTradingLedger:
         self.convert_buy_spread_rate = float(self.config.get('convert_buy_spread_rate', 0.0010))
         self.convert_sell_spread_rate = float(self.config.get('convert_sell_spread_rate', 0.0010))
         self.allowed_horizons = set(self.config.get('allowed_horizons', [
-            "horizon_4h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"
+            "scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"
         ]))
-        self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 5.0))
-        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.50))
+        self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 0.40))
+        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.04))
 
         self.base_fee_rate = float(self.config.get('binance_fee_rate', 0.0010))
         self.use_bnb_discount = self.config.get('use_bnb_fee_discount', False)
@@ -1887,39 +1887,43 @@ class PaperTradingLedger:
             print(f"{'='*120}\n")
 
     def consider_new_trade(self, result: dict, horizon_key: str, signal_history: list = None):
-        if not self.config['enabled']:
+        if not self.config.get('enabled', True):
             return
 
-        # 0. Targeted Execution Horizons Guard: Only execute trades on allowed horizons (4H, 24H/1D, 2D, 3D, Weekly, Biweekly, Monthly)
+        # 0. Targeted Execution Horizons Guard: Only execute trades on allowed horizons
         if horizon_key not in self.allowed_horizons:
             return
 
-        decision = result['decision']
-        if "FILTER" in decision:
+        decision = result.get('decision', '')
+        if "FILTER" in decision or "PAUSED" in decision or "QUARANTINED" in decision:
             return
 
-        is_executable = ("EXECUTE" in decision) or ("DIP-BUY" in decision)
+        is_executable = any(k in decision for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "REVERSAL", "SWEEP"])
         if not is_executable:
             return
 
         sym = result['symbol']
-        direction = result['direction']
+        direction = result.get('direction', 'BULLISH')
+        is_short = direction in ["BEARISH", "SHORT"]
         
-        # 1. Strict Spot Only Guard: Spot trading allows only LONG / BULLISH trades
-        if self.config.get('spot_only', True) and direction not in ["BULLISH", "LONG"]:
+        # 1. Spot Only Guard: If spot_only is True, skip SHORT / BEARISH trades
+        if self.config.get('spot_only', False) and is_short:
             return
 
-        entry_p = result['current_price']
-        tp_p = result['tp_price']
-        tp1_p = result.get('tp1_price', tp_p)
-        tp2_p = result.get('tp2_price', tp_p)
-        tp3_p = result.get('tp3_price', tp_p)
-        sl_p = result['sl_price']
+        entry_p = float(result.get('current_price', 0.0) or 0.0)
+        tp_p = float(result.get('tp_price', 0.0) or 0.0)
+        tp1_p = float(result.get('tp1_price', tp_p) or tp_p)
+        tp2_p = float(result.get('tp2_price', tp_p) or tp_p)
+        tp3_p = float(result.get('tp3_price', tp_p) or tp_p)
+        sl_p = float(result.get('sl_price', 0.0) or 0.0)
+
+        if entry_p <= 0 or tp1_p <= 0 or sl_p <= 0:
+            return
 
         # Directional Invariant Guard: Prevent inverted targets from ever opening a position
-        if direction in ["BULLISH", "LONG"] and (tp_p <= entry_p or sl_p >= entry_p):
+        if not is_short and (tp_p <= entry_p or sl_p >= entry_p):
             return
-        if direction in ["BEARISH", "SHORT"] and (tp_p >= entry_p or sl_p <= entry_p):
+        if is_short and (tp_p >= entry_p or sl_p <= entry_p):
             return
 
         # 2. Cooldown Guard on Choppy/Breakeven Coins (45 min cooldown)
@@ -1938,35 +1942,40 @@ class PaperTradingLedger:
         # 4. Fixed Position Size: $10.00 per trade ($100 total capital / 10 trades)
         pos_size = float(self.config.get('position_size_usd', 10.0))
 
-        # 5. Strict Profit Hurdle: Minimum 5.0% Net Return after Binance Fees
+        # 5. Net Profit Hurdle: Must beat round-trip Binance trading fees
         if self.execution_engine == 'binance_convert':
-            eff_buy_entry = round(entry_p * (1.0 + self.convert_buy_spread_rate), 8)
-            eff_tp1_exit = round(tp1_p * (1.0 - self.convert_sell_spread_rate), 8)
-            expected_net_gain_pct = (eff_tp1_exit - eff_buy_entry) / eff_buy_entry
+            if is_short:
+                eff_entry = round(entry_p * (1.0 - self.convert_sell_spread_rate), 8)
+                eff_tp1_exit = round(tp1_p * (1.0 + self.convert_buy_spread_rate), 8)
+                expected_net_gain_pct = (eff_entry - eff_tp1_exit) / eff_entry
+            else:
+                eff_entry = round(entry_p * (1.0 + self.convert_buy_spread_rate), 8)
+                eff_tp1_exit = round(tp1_p * (1.0 - self.convert_sell_spread_rate), 8)
+                expected_net_gain_pct = (eff_tp1_exit - eff_entry) / eff_entry
             est_net_profit_usd = round(pos_size * expected_net_gain_pct, 4)
+            fill_entry_p = eff_entry
         else:
-            eff_buy_entry = entry_p
-            expected_gain_pct = abs(tp1_p - entry_p) / entry_p
+            eff_entry = entry_p
+            fill_entry_p = entry_p
+            expected_gain_pct = abs(entry_p - tp1_p) / entry_p
             est_nominal_fees = round((pos_size * self.buy_fee_rate) + (pos_size * (1.0 + expected_gain_pct) * self.sell_fee_rate), 4)
             est_net_profit_usd = (pos_size * expected_gain_pct) - est_nominal_fees
             expected_net_gain_pct = est_net_profit_usd / pos_size
 
         if (expected_net_gain_pct * 100.0) < self.min_expected_return_pct or est_net_profit_usd < self.min_net_profit_usd:
-            return  # Skip trade: Expected net profit is below 5.0% ($0.50 on $10.00)
+            return  # Skip trade: Expected net profit after fees is below hurdle
 
-        # 6. Strict Track Record Requirement: Selected trade MUST have past winning signals > signals lost
+        # 6. Track Record & Quarantine Check: Block assets with proven negative alpha (2+ consecutive losses)
         past_won = 0
         past_lost = 0
-        if self.config.get('require_positive_track_record', True):
-            if not signal_history:
-                return  # No track record available: wait for validated historical edge
+        if signal_history:
             coin_signals = [s for s in signal_history if s.get('symbol') == sym]
             past_won = sum(1 for s in coin_signals if "WON" in str(s.get('outcome_label', '')).upper())
             past_lost = sum(1 for s in coin_signals if "LOST" in str(s.get('outcome_label', '')).upper())
             
-            # Must have past winning signals MORE than signals lost (past_won > past_lost)
-            if past_won <= past_lost:
-                return  # Skip trade: Coin does not have past winning signals > signals lost
+            # Block asset if it has recorded 2+ stop-outs and negative win/loss track record
+            if past_lost >= 2 and past_lost > past_won:
+                return
 
         # Check Active Queue Capacity & Liquid Cash
         max_concurrent = int(self.config.get('max_concurrent_positions', 10))
@@ -1982,9 +1991,9 @@ class PaperTradingLedger:
                     "trade_id": f"QUEUED_{sym.replace('/', '_')}_{horizon_key}_{int(time.time())}",
                     "symbol": sym,
                     "horizon": horizon_key,
-                    "direction": "SPOT LONG",
+                    "direction": "SHORT" if is_short else "LONG",
                     "execution_engine": self.execution_engine,
-                    "entry_price": eff_buy_entry,
+                    "entry_price": fill_entry_p,
                     "raw_entry_price": entry_p,
                     "tp_price": tp_p,
                     "tp1_price": tp1_p,
@@ -2009,8 +2018,10 @@ class PaperTradingLedger:
         # Calculate full duration from actual fill timestamp
         tf_delta_map = {
             'scalp': timedelta(minutes=15),
+            'horizon_30m': timedelta(minutes=30),
             'swing': timedelta(hours=2),
             'horizon_4h': timedelta(hours=4),
+            'horizon_12h': timedelta(hours=12),
             'macro': timedelta(hours=24),
             'horizon_2d': timedelta(days=2),
             'horizon_3d': timedelta(days=3),
@@ -2022,18 +2033,15 @@ class PaperTradingLedger:
         expiry_dt = now_utc + duration
 
         if self.execution_engine == 'binance_convert':
-            fill_entry_p = eff_buy_entry
             buy_fee = 0.0
             est_sell_fee = 0.0
-            spread_cost_entry = round(pos_size * self.convert_buy_spread_rate, 4)
+            spread_cost_entry = round(pos_size * (self.convert_sell_spread_rate if is_short else self.convert_buy_spread_rate), 4)
             unrealized_fee = 0.0
             unrealized_pnl = -round(spread_cost_entry, 4)
-            unrealized_pct = -round(self.convert_buy_spread_rate * 100.0, 2)
+            unrealized_pct = -round((spread_cost_entry / pos_size) * 100.0, 2)
         else:
-            fill_entry_p = entry_p
             buy_fee = round(pos_size * self.buy_fee_rate, 4)
             est_sell_fee = round(pos_size * self.sell_fee_rate, 4)
-            spread_cost_entry = 0.0
             unrealized_fee = round(buy_fee + est_sell_fee, 4)
             unrealized_pnl = -unrealized_fee
             unrealized_pct = round((-unrealized_fee / pos_size) * 100.0, 2)
@@ -2045,7 +2053,8 @@ class PaperTradingLedger:
             "trade_id": f"PAPER_{sym.replace('/', '_')}_{horizon_key}_{int(time.time())}",
             "symbol": sym,
             "horizon": horizon_key,
-            "direction": "BULLISH",
+            "direction": "BEARISH" if is_short else "BULLISH",
+            "direction_label": "SHORT" if is_short else "LONG",
             "execution_engine": self.execution_engine,
             "entry_price": fill_entry_p,
             "raw_entry_price": entry_p,
@@ -4258,14 +4267,28 @@ class HybridQuantEngine:
             # Extract executable candidate signals from Alpha Signal Engine (Filtered to Allowed Horizons)
             allowed_pt_horizons = self.ledger.allowed_horizons
             all_candidates = []
+
+            # 1. Direct Top Priority: Institutional Top Signals for this round
+            if top_round_signals:
+                for sig in top_round_signals:
+                    h_k = sig.get('horizon_key', 'scalp')
+                    if h_k in allowed_pt_horizons:
+                        all_candidates.append((sig, h_k))
+
+            # 2. Scanner Leaderboard candidates
             for r in scanner_results:
                 for h_key, h in r['horizons'].items():
                     if h_key not in allowed_pt_horizons:
                         continue
-                    if h['priority'] <= 2 or "EXECUTE" in h['decision'] or "DIP-BUY" in h['decision'] or "REVERSAL" in h['decision']:
-                        all_candidates.append((h, h_key))
+                    dec = h.get('decision', '')
+                    if "FILTER" in dec or "PAUSED" in dec or "QUARANTINED" in dec:
+                        continue
+                    if h['priority'] <= 2 or any(k in dec for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "REVERSAL", "SWEEP"]):
+                        # Avoid duplicating signals already added from top_round_signals
+                        if not any(c[0].get('symbol') == h.get('symbol') and c[1] == h_key for c in all_candidates):
+                            all_candidates.append((h, h_key))
 
-            # Rank candidates: Prioritize Grade A+, Macro/Daily/4H setups, and Conviction/Alpha edge
+            # Rank candidates: Prioritize Institutional Top Picks first, then Grade A+, Macro/Daily/4H setups, and Conviction/Alpha edge
             horizon_tier = {
                 'monthly': 8,
                 'biweekly': 7,
@@ -4273,14 +4296,18 @@ class HybridQuantEngine:
                 'horizon_3d': 5,
                 'horizon_2d': 4,
                 'macro': 3,
+                'horizon_12h': 2.5,
                 'horizon_4h': 2,
                 'swing': 1,
+                'horizon_30m': 0.5,
                 'scalp': 0
             }
+            top_sigs_set = set(id(s) for s in (top_round_signals or []))
             all_candidates.sort(key=lambda x: (
-                x[0]['priority'],
+                0 if id(x[0]) in top_sigs_set else 1,
+                x[0].get('priority', 2),
                 -horizon_tier.get(x[1], 1),
-                -(x[0]['conviction'] * abs(x[0].get('exp_return', 0.01)) + 5.0 * max(0.0, x[0].get('rs_btc', 0.0)))
+                -(x[0].get('conviction', 50.0) * abs(x[0].get('exp_return', 0.01)) + 5.0 * max(0.0, x[0].get('rs_btc', 0.0)))
             ))
 
             # Route top ranked signals into Order Execution Manager
