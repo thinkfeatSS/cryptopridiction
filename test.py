@@ -23,32 +23,6 @@ if sys.stdout.encoding != 'utf-8':
     except Exception:
         pass
 
-import subprocess
-
-def install_dependencies():
-    packages = [
-        ("ccxt", "ccxt"),
-        ("xgboost", "xgboost"),
-        ("catboost", "catboost"),
-        ("lightgbm", "lightgbm"),
-        ("tabulate", "tabulate"),
-        ("sklearn", "scikit-learn"),
-        ("pandas", "pandas"),
-        ("numpy", "numpy"),
-        ("joblib", "joblib"),
-        ("scipy", "scipy"),
-        ("requests", "requests"),
-        ("tensorflow", "tensorflow")
-    ]
-    for import_name, pip_pkg in packages:
-        try:
-            __import__(import_name)
-        except ImportError:
-            print(f"[SETUP] Installing {pip_pkg}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", pip_pkg])
-
-install_dependencies()
-
 import json
 import time
 import math
@@ -83,10 +57,6 @@ from sklearn.model_selection import TimeSeriesSplit
 
 warnings.filterwarnings("ignore")
 
-import tensorflow as tf
-from tensorflow.keras import layers, models, regularizers, callbacks
-import tensorflow.keras.backend as K
-
 import gc
 import ctypes
 
@@ -113,8 +83,9 @@ CONFIG = {
     "continuous_loop": True,      # 24/7 Background Watcher Loop
     "scanner_mode": "top_volume", # "top_volume" (dynamic auto-discovery of all active Binance coins), "expanded_universe", or "custom_list"
     "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "200")), # Top 200 volume Binance coins (full market coverage)
-    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "20")), # 20 Concurrency worker threads (high throughput)
+    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "8")), # Optimal 8 parallel worker threads (eliminates CPU contention & rate limits)
     "heartbeat_interval_seconds": int(os.getenv("HEARTBEAT_SECONDS", "4")), # Fast intra-candle position monitoring
+    "history_limit_per_tf": {"15m": 250, "1h": 250, "4h": 250, "1d": 250}, # 250 candles per TF (1 fast REST fetch, zero pagination lag)
     "single_symbol": "BTC/USDT",
     "scanner_symbols": [
         "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT",
@@ -3186,6 +3157,19 @@ class HybridQuantEngine:
         self.meta_classifier = SignalMetaClassifier(
             os.path.join(self.config.get('models_export_dir', './models_export_v3'), "signal_meta_classifier.joblib")
         )
+        self.master_matrix_universe = {}
+        forecast_path = os.path.join(self.config['app_export_dir'], "live_market_forecast.json")
+        if os.path.exists(forecast_path):
+            try:
+                with open(forecast_path, "r", encoding="utf-8") as f:
+                    f_data = json.load(f)
+                    for item in f_data.get("scanner_leaderboard", []):
+                        if isinstance(item, dict) and "symbol" in item:
+                            self.master_matrix_universe[item["symbol"]] = item
+                if self.master_matrix_universe:
+                    print(f"[PREDICTION MATRIX 🌐] Preloaded {len(self.master_matrix_universe)} existing asset predictions into memory.")
+            except Exception:
+                pass
         os.makedirs(self.config['models_export_dir'], exist_ok=True)
         os.makedirs(self.config['app_export_dir'], exist_ok=True)
 
@@ -4985,7 +4969,15 @@ class HybridQuantEngine:
             },
             "top_round_signals": self.institutional_signal_manager.get_display_signals() or top_signals or [],
             "signals_by_horizon": self.institutional_signal_manager.get_signals_by_horizon(),
-            "scanner_leaderboard": scanner_results,
+            "scanner_leaderboard": (lambda: [
+                self.master_matrix_universe.update({r['symbol']: r}) for r in scanner_results if isinstance(r, dict) and 'symbol' in r
+            ] and sorted(list(self.master_matrix_universe.values()), key=lambda x: (
+                x.get('best_priority', 4),
+                not x.get('is_triple_confluence', False),
+                -x.get('consistency_index', 50.0),
+                -abs(x.get('alignment_score', 0.0)),
+                -x.get('overall_score', 0.0)
+            )) if getattr(self, 'master_matrix_universe', None) else scanner_results)(),
             "deep_dive": deep_dive_result,
             "paper_portfolio": self.ledger.data
         }

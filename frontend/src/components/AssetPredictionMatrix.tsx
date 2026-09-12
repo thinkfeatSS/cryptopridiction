@@ -586,7 +586,7 @@ export default function AssetPredictionMatrix() {
 
   // Build a stable leaderboard from the cache.
   // When rawLeaderboard is non-empty, honour the fresh order from the server
-  // (which reflects the new ranking). When empty (between polls), keep the last.
+  // while preserving any previously cached symbols so the 200-coin matrix never drops rows.
   const leaderboard = useMemo(() => {
     if (rawLeaderboard.length === 0) {
       // Between polls – return cached data so rows don't disappear
@@ -594,11 +594,16 @@ export default function AssetPredictionMatrix() {
         .map(sym => rowCacheRef.current.get(sym))
         .filter(Boolean);
     }
-    // Use the server's ordering (fresh scan rank), but pull object refs from cache
-    // so unchanged rows have stable identity for React.memo.
-    return rawLeaderboard.map((item: any) =>
+    const freshSymbols = new Set(rawLeaderboard.map((item: any) => item.symbol));
+    const freshRows = rawLeaderboard.map((item: any) =>
       rowCacheRef.current.get(item.symbol) ?? item
     );
+    const remainingRows = symbolOrderRef.current
+      .filter(sym => !freshSymbols.has(sym))
+      .map(sym => rowCacheRef.current.get(sym))
+      .filter(Boolean);
+
+    return [...freshRows, ...remainingRows];
   }, [rawLeaderboard]);
 
   // Set of symbols that are in the cache but NOT in the latest fetch → still scanning
