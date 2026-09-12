@@ -36,6 +36,32 @@ def init_db():
                     conn.commit()
                 except Exception:
                     pass
+
+                # ── paper_positions: add new columns (idempotent) ────────────────
+                for _stmt in [
+                    "ALTER TABLE paper_positions ADD COLUMN execution_engine VARCHAR(64) DEFAULT 'paper'",
+                    "ALTER TABLE paper_positions ADD COLUMN raw_entry_price DOUBLE",
+                    "ALTER TABLE paper_positions ADD COLUMN tp1_price DOUBLE",
+                    "ALTER TABLE paper_positions ADD COLUMN tp2_price DOUBLE",
+                    "ALTER TABLE paper_positions ADD COLUMN tp3_price DOUBLE",
+                    "ALTER TABLE paper_positions ADD COLUMN unrealized_gross_pnl_usd DOUBLE DEFAULT 0.0",
+                ]:
+                    try:
+                        conn.execute(text(_stmt))
+                        conn.commit()
+                    except Exception:
+                        pass  # Column already exists — harmless
+
+                # ── closed_trades: add new columns (idempotent) ──────────────────
+                for _stmt in [
+                    "ALTER TABLE closed_trades ADD COLUMN execution_engine VARCHAR(64) DEFAULT 'paper'",
+                    "ALTER TABLE closed_trades ADD COLUMN raw_entry_price DOUBLE",
+                ]:
+                    try:
+                        conn.execute(text(_stmt))
+                        conn.commit()
+                    except Exception:
+                        pass  # Column already exists — harmless
         print("[DATABASE] All database tables verified and created.")
     except Exception as e:
         print(f"[DATABASE ERROR] Table creation error: {e}")
@@ -233,26 +259,42 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                 with open(portfolio_json, "r", encoding="utf-8") as f:
                     p_data = json.load(f)
 
+                def safe_float(v, fallback=0.0):
+                    """Convert a value to float safely; returns fallback on None/empty/invalid."""
+                    if v is None:
+                        return fallback
+                    try:
+                        val = float(v)
+                        return val if not (math.isnan(val) or math.isinf(val)) else fallback
+                    except (TypeError, ValueError):
+                        return fallback
+
                 # Replace current open positions
                 db.query(PaperPosition).delete()
                 for op in p_data.get("open_positions", []):
-                    tid = op.get("trade_id", f"POS_{op.get('symbol')}_{op.get('horizon')}")
+                    tid = op.get("trade_id") or f"POS_{op.get('symbol')}_{op.get('horizon')}"
                     pos = PaperPosition(
                         trade_id=tid,
-                        symbol=op.get("symbol"),
-                        horizon=op.get("horizon"),
-                        direction=op.get("direction"),
-                        allocated_usd=float(op.get("allocated_usd", 100.0)),
-                        entry_price=float(op.get("entry_price", 0.0)),
-                        current_price=float(op.get("current_price", 0.0)),
-                        tp_price=float(op.get("tp_price", 0.0)),
-                        sl_price=float(op.get("sl_price", 0.0)),
-                        unrealized_pnl_usd=float(op.get("unrealized_pnl_usd", 0.0)),
-                        unrealized_pnl_pct=float(op.get("unrealized_pnl_pct", 0.0)),
-                        target_progress_pct=float(op.get("target_progress_pct", 0.0)),
-                        buy_fee_usd=float(op.get("buy_fee_usd", op.get("entry_fee_usd", 0.0))),
-                        est_sell_fee_usd=float(op.get("est_sell_fee_usd", 0.0)),
-                        unrealized_fee_usd=float(op.get("unrealized_fee_usd", 0.0)),
+                        symbol=str(op.get("symbol", "")),
+                        horizon=str(op.get("horizon", "")),
+                        direction=str(op.get("direction", "")),
+                        execution_engine=str(op.get("execution_engine", "paper")),
+                        allocated_usd=safe_float(op.get("allocated_usd"), 100.0),
+                        entry_price=safe_float(op.get("entry_price")),
+                        raw_entry_price=safe_float(op.get("raw_entry_price") or op.get("entry_price")),
+                        current_price=safe_float(op.get("current_price")),
+                        tp_price=safe_float(op.get("tp_price") or op.get("tp1_price")),
+                        tp1_price=safe_float(op.get("tp1_price") or op.get("tp_price")),
+                        tp2_price=safe_float(op.get("tp2_price")),
+                        tp3_price=safe_float(op.get("tp3_price")),
+                        sl_price=safe_float(op.get("sl_price")),
+                        unrealized_gross_pnl_usd=safe_float(op.get("unrealized_gross_pnl_usd")),
+                        unrealized_pnl_usd=safe_float(op.get("unrealized_pnl_usd")),
+                        unrealized_pnl_pct=safe_float(op.get("unrealized_pnl_pct")),
+                        target_progress_pct=safe_float(op.get("target_progress_pct")),
+                        buy_fee_usd=safe_float(op.get("buy_fee_usd") or op.get("entry_fee_usd")),
+                        est_sell_fee_usd=safe_float(op.get("est_sell_fee_usd")),
+                        unrealized_fee_usd=safe_float(op.get("unrealized_fee_usd")),
                         opened_at=str(op.get("opened_at", "")),
                         expiry_time=str(op.get("expiry_time", "")),
                     )
@@ -271,23 +313,25 @@ def sync_files_to_db_live(force: bool = False) -> bool:
 
                 existing_trades = {t[0] for t in db.query(ClosedTrade.trade_id).all()}
                 for ct in ledger_closed:
-                    tid = ct.get("trade_id", f"TRADE_{ct.get('symbol')}_{ct.get('closed_at')}")
+                    tid = ct.get("trade_id") or f"TRADE_{ct.get('symbol')}_{ct.get('closed_at')}"
                     if tid not in existing_trades:
                         tr = ClosedTrade(
                             trade_id=tid,
-                            symbol=ct.get("symbol"),
-                            horizon=ct.get("horizon"),
-                            direction=ct.get("direction"),
-                            entry_price=float(ct.get("entry_price", 0.0)),
-                            exit_price=float(ct.get("exit_price", 0.0)),
+                            symbol=str(ct.get("symbol", "")),
+                            horizon=str(ct.get("horizon", "")),
+                            direction=str(ct.get("direction", "")),
+                            execution_engine=str(ct.get("execution_engine", "paper")),
+                            entry_price=safe_float(ct.get("entry_price")),
+                            raw_entry_price=safe_float(ct.get("raw_entry_price") or ct.get("entry_price")),
+                            exit_price=safe_float(ct.get("exit_price")),
                             exit_reason=str(ct.get("exit_reason", "")),
                             outcome=str(ct.get("outcome", "")),
-                            gross_pnl_usd=float(ct.get("gross_pnl_usd", 0.0)),
-                            buy_fee_usd=float(ct.get("buy_fee_usd", 0.0)),
-                            sell_fee_usd=float(ct.get("sell_fee_usd", 0.0)),
-                            binance_fee_usd=float(ct.get("binance_fee_usd", 0.0)),
-                            realized_pnl_usd=float(ct.get("realized_pnl_usd", 0.0)),
-                            realized_pnl_pct=float(ct.get("realized_pnl_pct", 0.0)),
+                            gross_pnl_usd=safe_float(ct.get("gross_pnl_usd")),
+                            buy_fee_usd=safe_float(ct.get("buy_fee_usd")),
+                            sell_fee_usd=safe_float(ct.get("sell_fee_usd")),
+                            binance_fee_usd=safe_float(ct.get("binance_fee_usd")),
+                            realized_pnl_usd=safe_float(ct.get("realized_pnl_usd")),
+                            realized_pnl_pct=safe_float(ct.get("realized_pnl_pct")),
                             duration_str=str(ct.get("duration_str", "")),
                             opened_at=str(ct.get("opened_at", "")),
                             closed_at=str(ct.get("closed_at", "")),
