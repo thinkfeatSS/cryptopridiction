@@ -66,12 +66,8 @@ import ccxt
 import xgboost as xgb
 from catboost import CatBoostClassifier
 from sklearn.ensemble import ExtraTreesClassifier
-try:
-    import lightgbm as lgb
-    HAS_LIGHTGBM = True
-except ImportError:
-    HAS_LIGHTGBM = False
-
+# Disable LightGBM in Linux container to eliminate OpenMP lib_lightgbm.so segfaults
+HAS_LIGHTGBM = False
 import threading
 _LGBM_LOCK = threading.Lock()
 
