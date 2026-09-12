@@ -223,6 +223,8 @@ export async function fetchSignals(params?: {
   outcome?: string;
   grade?: string;
   horizon?: string;
+  direction?: string;
+  min_return?: number;
   limit?: number;
   offset?: number;
 }): Promise<{ total: number; signals: SignalItem[] }> {
@@ -232,6 +234,10 @@ export async function fetchSignals(params?: {
   if (params?.outcome) query.append("outcome", params.outcome);
   if (params?.grade) query.append("grade", params.grade);
   if (params?.horizon) query.append("horizon", params.horizon);
+  if (params?.direction) query.append("direction", params.direction);
+  if (params?.min_return !== undefined && params?.min_return !== null && params?.min_return > 0) {
+    query.append("min_return", params.min_return.toString());
+  }
   if (params?.limit) query.append("limit", params.limit.toString());
   if (params?.offset) query.append("offset", params.offset.toString());
 

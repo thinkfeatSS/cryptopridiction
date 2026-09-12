@@ -29,6 +29,8 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
   const [outcomeFilter, setOutcomeFilter] = useState("");
   const [gradeFilter, setGradeFilter] = useState("");
   const [horizonFilter, setHorizonFilter] = useState("");
+  const [directionFilter, setDirectionFilter] = useState("");
+  const [minReturnFilter, setMinReturnFilter] = useState<number | undefined>(undefined);
   const [page, setPage] = useState(0);
   const pageSize = 20;
 
@@ -41,10 +43,12 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
       outcome: outcomeFilter || undefined,
       grade: gradeFilter || undefined,
       horizon: horizonFilter || undefined,
+      direction: directionFilter || undefined,
+      min_return: minReturnFilter,
       limit: pageSize,
       offset: page * pageSize,
     }),
-    [search, dateFilter, outcomeFilter, gradeFilter, horizonFilter, page]
+    [search, dateFilter, outcomeFilter, gradeFilter, horizonFilter, directionFilter, minReturnFilter, page]
   );
 
   const { data, isLoading, isFetching, refetch } = useSignalsQuery(queryParams);
@@ -70,6 +74,11 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
             {dateFilter && (
               <span className="rounded-md bg-cyan-950 px-2 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-800">
                 Filtered: {dateFilter}
+              </span>
+            )}
+            {minReturnFilter && (
+              <span className="rounded-md bg-emerald-950 px-2 py-0.5 text-xs font-semibold text-emerald-300 border border-emerald-800">
+                Yield ≥ {minReturnFilter}%
               </span>
             )}
           </h2>
@@ -98,9 +107,9 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
       </div>
 
       {/* Filter Ribbon */}
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-5">
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-7">
         {/* Search Input */}
-        <div className="relative">
+        <div className="relative md:col-span-2">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
           <input
             type="text"
@@ -114,6 +123,41 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
           />
         </div>
 
+        {/* Minimum Return Filter */}
+        <select
+          value={minReturnFilter === undefined ? "" : minReturnFilter}
+          onChange={(e) => {
+            const val = e.target.value;
+            setMinReturnFilter(val ? Number(val) : undefined);
+            setPage(0);
+          }}
+          className={`rounded-xl px-3 py-2 text-xs border focus:border-cyan-500 focus:outline-none font-bold transition-all ${
+            minReturnFilter && minReturnFilter >= 3
+              ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/50 shadow-sm"
+              : "bg-dark-900/90 text-slate-300 border-slate-800"
+          }`}
+        >
+          <option value="">📈 All Returns (≥0.4%)</option>
+          <option value="1">⚡ ≥ 1% Return</option>
+          <option value="3">🎯 ≥ 3% Return (High Yield)</option>
+          <option value="5">💎 ≥ 5% Return (Extended)</option>
+          <option value="10">🚀 ≥ 10% Return (Macro)</option>
+        </select>
+
+        {/* Direction Filter */}
+        <select
+          value={directionFilter}
+          onChange={(e) => {
+            setDirectionFilter(e.target.value);
+            setPage(0);
+          }}
+          className="rounded-xl bg-dark-900/90 px-3 py-2 text-xs text-slate-300 border border-slate-800 focus:border-cyan-500 focus:outline-none font-semibold"
+        >
+          <option value="">⚡ All Sides (Long & Short)</option>
+          <option value="LONG">🟢 Longs Only</option>
+          <option value="SHORT">🔴 Shorts Only</option>
+        </select>
+
         {/* Date Filter Dropdown */}
         <select
           value={dateFilter}
@@ -123,7 +167,7 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
           }}
           className="rounded-xl bg-dark-900/90 px-3 py-2 text-xs text-slate-300 border border-slate-800 focus:border-cyan-500 focus:outline-none"
         >
-          <option value="">📅 All Dates (Full History)</option>
+          <option value="">📅 All Dates</option>
           {dailyData?.map((d) => (
             <option key={d.date} value={d.date}>
               {d.date} ({d.won_count}W/{d.lost_count}L - {d.win_rate_pct}%)
@@ -141,10 +185,10 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
           className="rounded-xl bg-dark-900/90 px-3 py-2 text-xs text-slate-300 border border-slate-800 focus:border-cyan-500 focus:outline-none"
         >
           <option value="">🎯 All Outcomes</option>
-          <option value="WON">🟢 Won (Take-Profit Hit)</option>
-          <option value="LOST">🔴 Lost (Stop-Loss Hit)</option>
-          <option value="PENDING">⏳ Pending Evaluation</option>
-          <option value="EXPIRED">⏱️ Expired Trades</option>
+          <option value="WON">🟢 Won (TP Hit)</option>
+          <option value="LOST">🔴 Lost (SL Hit)</option>
+          <option value="PENDING">⏳ Pending</option>
+          <option value="EXPIRED">⏱️ Expired</option>
         </select>
 
         {/* Grade Filter */}
@@ -156,30 +200,10 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
           }}
           className="rounded-xl bg-dark-900/90 px-3 py-2 text-xs text-slate-300 border border-slate-800 focus:border-cyan-500 focus:outline-none"
         >
-          <option value="">💎 All Quality Grades</option>
+          <option value="">💎 All Grades</option>
           <option value="A+">💎 Grade A+ (Elite)</option>
           <option value="A">🟢 Grade A (High Conv)</option>
           <option value="B+">🟡 Grade B+ (Momentum)</option>
-        </select>
-
-        {/* Horizon Filter */}
-        <select
-          value={horizonFilter}
-          onChange={(e) => {
-            setHorizonFilter(e.target.value);
-            setPage(0);
-          }}
-          className="rounded-xl bg-dark-900/90 px-3 py-2 text-xs text-slate-300 border border-slate-800 focus:border-cyan-500 focus:outline-none"
-        >
-          <option value="">⏱️ All Horizons</option>
-          <option value="SCALP">⚡ Scalp (15M)</option>
-          <option value="SWING">🌊 Swing (1H-2H)</option>
-          <option value="MACRO">🚀 Macro (24H)</option>
-          <option value="2-DAY">🔮 2-Day (48H)</option>
-          <option value="3-DAY">🔭 3-Day (72H)</option>
-          <option value="WEEKLY">🗓️ Weekly (7D)</option>
-          <option value="BI-WEEKLY">🌕 Bi-Weekly (15D)</option>
-          <option value="MONTHLY">🪐 Monthly (30D)</option>
         </select>
       </div>
 

@@ -3720,9 +3720,24 @@ class HybridQuantEngine:
         is_dip_buy = d1_macro_bull and rsi_anchor <= 46.0 and (p_cat_live >= 0.48 or p_xgb_live >= 0.48)
         is_rally_sell = (not d1_macro_bull) and rsi_anchor >= 55.0 and (p_cat_live <= 0.52 or p_xgb_live <= 0.52)
 
-        # Quantitative Breakdown Short Engine (activated when market is weak/bearish or coin underperforms BTC)
+        # Quantitative Breakdown Short & Breakout Long Engines
         btc_regime = getattr(self, 'btc_market_regime', 'RANGE_CONSOLIDATION')
-        is_bear_regime = btc_regime in ["BEAR_MOMENTUM", "CIRCUIT_BREAKER", "ALERT_DUMP", "RANGE_CONSOLIDATION", "HIGH_VOLATILITY_CHOP"] or not d1_macro_bull
+        is_bear_regime = btc_regime in ["BEAR_MOMENTUM", "CIRCUIT_BREAKER", "ALERT_DUMP", "DUMP", "DEFENSIVE"]
+        is_bull_regime = btc_regime in ["BULL_MOMENTUM", "BULLISH", "DIP_ACCUMULATION", "EXPANSION"] or d1_macro_bull
+
+        # Quantitative Breakout Long Engine (activated on volume expansion, RS outperformance, or bullish price action)
+        is_breakout_long = (
+            (rs_btc >= 0.2 or is_bull_regime or d1_macro_bull) and
+            (rsi_anchor >= 50.0 and rsi_anchor <= 72.0) and
+            (h_dir == "BULLISH" or p_cat_live >= 0.50 or p_xgb_live >= 0.50 or h_prob >= 0.50) and
+            not is_neutral_zone
+        )
+        is_momentum_long = (
+            rs_btc >= 0.6 and
+            (p_cat_live >= 0.48 or p_xgb_live >= 0.48 or h_prob >= 0.49) and
+            rsi_anchor >= 46.0 and rsi_anchor <= 74.0
+        )
+
         is_breakdown_short = (
             is_bear_regime and
             rs_btc < 0.0 and
@@ -3757,21 +3772,33 @@ class HybridQuantEngine:
             decision = f"🎯 ELITE LIQUIDITY-SWEEP (SHORT){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
+        elif is_momentum_long and not is_neutral_zone:
+            h_dir = "BULLISH"
+            h_conf = max(70.0, min(96.0, h_conf + 10.0))
+            decision = f"🎯 ELITE MOMENTUM BREAKOUT (LONG){squeeze_boost_label}"
+            priority = 1
+            is_neutral_zone = False
         elif is_dip_buy:
             h_dir = "BULLISH"
-            h_conf = max(55.0, h_conf)
+            h_conf = max(60.0, h_conf)
             decision = f"🎯 ELITE DIP-BUY EXECUTE (LONG){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
         elif is_rally_sell:
             h_dir = "BEARISH"
-            h_conf = max(55.0, h_conf)
+            h_conf = max(60.0, h_conf)
             decision = f"🎯 ELITE RALLY-SELL EXECUTE (SHORT){squeeze_boost_label}"
+            priority = 1
+            is_neutral_zone = False
+        elif is_breakout_long and not is_neutral_zone:
+            h_dir = "BULLISH"
+            h_conf = max(66.0, min(95.0, h_conf + 7.0))
+            decision = f"🎯 ELITE BREAKOUT EXECUTE (LONG){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
         elif is_breakdown_short and not is_neutral_zone:
             h_dir = "BEARISH"
-            h_conf = max(66.0, min(95.0, h_conf + 8.0))
+            h_conf = max(66.0, min(95.0, h_conf + 7.0))
             decision = f"🎯 ELITE BREAKDOWN EXECUTE (SHORT){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
@@ -3780,15 +3807,16 @@ class HybridQuantEngine:
             priority = 4
         else:
             is_macro_aligned = (h_dir == "BULLISH" and d1_macro_bull) or (h_dir == "BEARISH" and not d1_macro_bull)
-            is_15m_scalp_exception = (horizon_key == "scalp" and h_conf >= 62.0)
+            is_alpha_exception = (h_dir == "BULLISH" and (rs_btc >= 0.4 or h_conf >= 62.0))
+            is_15m_scalp_exception = (horizon_key == "scalp" and h_conf >= 60.0)
 
-            if is_macro_aligned and h_conf >= (self.config['elite_conviction_threshold'] * 100.0):
+            if (is_macro_aligned or is_alpha_exception) and h_conf >= (self.config['elite_conviction_threshold'] * 100.0):
                 decision = f"🎯 ELITE EXECUTE {'LONG' if h_dir=='BULLISH' else 'SHORT'}{squeeze_boost_label}"
                 priority = 1
-            elif (is_macro_aligned or is_15m_scalp_exception) and h_conf >= 55.0:
+            elif (is_macro_aligned or is_alpha_exception or is_15m_scalp_exception) and h_conf >= 54.0:
                 decision = f"✅ STANDARD EXECUTE {'LONG' if h_dir=='BULLISH' else 'SHORT'}{squeeze_boost_label}"
                 priority = 2
-            elif not is_macro_aligned and not is_15m_scalp_exception:
+            elif not is_macro_aligned and not is_alpha_exception and not is_15m_scalp_exception:
                 decision = "⛔ FILTER (MACRO CONFLICT)"
                 priority = 3
             else:
@@ -4312,7 +4340,7 @@ class HybridQuantEngine:
                     dec = h.get('decision', '')
                     if "FILTER" in dec or "PAUSED" in dec or "QUARANTINED" in dec:
                         continue
-                    if h['priority'] <= 2 or any(k in dec for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "REVERSAL", "SWEEP"]):
+                    if h['priority'] <= 2 or any(k in dec for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT", "MOMENTUM", "REVERSAL", "SWEEP"]):
                         # Avoid duplicating signals already added from top_round_signals
                         if not any(c[0].get('symbol') == h.get('symbol') and c[1] == h_key for c in all_candidates):
                             all_candidates.append((h, h_key))
@@ -4670,19 +4698,22 @@ class HybridQuantEngine:
                     decision = f"⛔ {quar_reason}"
                     prio = 5
 
-                # 4. BTC Shield Check
+                # 4. BTC Shield Check (with Alpha Decoupling Exception)
                 is_shield_blocked = False
+                is_alpha_decoupled = (direction == "BULLISH" and rs_val >= 0.8 and conv >= 62.0)
+                is_systemic_crash = getattr(self, 'btc_shield_code', '') in ["ALERT_DUMP", "DUMP"]
                 if self.btc_shield_active and sym != "BTC/USDT" and direction == "BULLISH":
-                    is_shield_blocked = True
-                    decision = f"🛡️ PAUSED (BTC BETA SHIELD: {self.btc_shield_reason})"
-                    prio = 5
+                    if is_systemic_crash or not is_alpha_decoupled:
+                        is_shield_blocked = True
+                        decision = f"🛡️ PAUSED (BTC BETA SHIELD: {self.btc_shield_reason})"
+                        prio = 5
 
                 # ⏱️ Signal Cooldown Check
                 last_sig_time = self.signal_cooldown_tracker.get(pair_key, 0)
                 is_in_cooldown = (now_ts - last_sig_time) < cooldown_map.get(h_key, 1800)
 
                 # 💎 Grade Classification
-                is_exec_decision = any(k in decision for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "REVERSAL", "SWEEP"])
+                is_exec_decision = any(k in decision for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT", "MOMENTUM", "REVERSAL", "SWEEP"])
                 is_a_plus_candidate = (
                     (conv >= a_plus_cutoff or (is_triple and conv >= 70.0)) and
                     is_exec_decision and
@@ -4690,7 +4721,7 @@ class HybridQuantEngine:
                     not is_parabolic_short and
                     not is_fee_drag_rejected and
                     not is_quarantined and
-                    (rs_val >= 0.0 if direction == "BULLISH" else rs_val <= 0.2) and
+                    (rs_val >= -0.2 if direction == "BULLISH" else rs_val <= 0.2) and
                     elite_prec >= 0.55
                 )
 

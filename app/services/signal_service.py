@@ -298,10 +298,12 @@ class SignalService:
         outcome: Optional[str] = None,
         grade: Optional[str] = None,
         horizon: Optional[str] = None,
+        direction: Optional[str] = None,
+        min_return: Optional[float] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> Dict[str, Any]:
-        """Queries signals with search, filters, date filtering, and pagination."""
+        """Queries signals with search, filters, date filtering, min_return filtering, and pagination."""
         sync_files_to_db_live()
         self.resolve_pending_signals_live(db)
         query = db.query(SignalAudit)
@@ -340,6 +342,22 @@ class SignalService:
         if horizon:
             h_upper = horizon.upper().strip()
             query = query.filter(SignalAudit.horizon.ilike(f"%{h_upper}%"))
+
+        if direction:
+            d_upper = direction.upper().strip()
+            if d_upper in ["LONG", "BULLISH"]:
+                query = query.filter(or_(SignalAudit.direction == "LONG", SignalAudit.direction == "BULLISH"))
+            elif d_upper in ["SHORT", "BEARISH"]:
+                query = query.filter(or_(SignalAudit.direction == "SHORT", SignalAudit.direction == "BEARISH"))
+
+        if min_return is not None and min_return > 0:
+            query = query.filter(
+                or_(
+                    func.abs(SignalAudit.expected_return_pct) >= min_return,
+                    func.abs(SignalAudit.max_potential_gain_pct) >= min_return,
+                    func.abs(SignalAudit.realized_return_pct) >= min_return,
+                )
+            )
 
         total_count = query.count()
         signals = query.order_by(desc(SignalAudit.id)).offset(offset).limit(limit).all()

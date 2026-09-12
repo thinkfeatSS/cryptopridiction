@@ -17,6 +17,7 @@ export default function DashboardPage() {
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [activeHorizon, setActiveHorizon] = useState<string>("ALL");
   const [directionFilter, setDirectionFilter] = useState<"ALL" | "LONG" | "SHORT">("ALL");
+  const [minReturnFilter, setMinReturnFilter] = useState<number>(0);
 
   const topSignals = forecast?.top_round_signals || [];
   const signalsByHorizon = forecast?.signals_by_horizon || {};
@@ -35,7 +36,17 @@ export default function DashboardPage() {
     { key: "30D", label: "🪐 Monthly (30D)", tag: "30D" },
   ];
 
-  // Deduplicate signals per coin (keeping the latest active signal)
+  // Helper to extract effective return % of a signal
+  const getSignalReturnPct = (s: any): number => {
+    const rawExp = s.expected_return_pct !== undefined ? Math.abs(Number(s.expected_return_pct)) : 0;
+    const modelExp = s.exp_return !== undefined ? Math.abs(Number(s.exp_return) * 100) : 0;
+    const entry = Number(s.entry_price || s.current_price || 0);
+    const tp1 = Number(s.tp1_price || s.tp_price || 0);
+    const tpGain = entry > 0 && tp1 > 0 ? (Math.abs(tp1 - entry) / entry) * 100 : 0;
+    return Math.max(rawExp, modelExp, tpGain);
+  };
+
+  // Deduplicate signals per coin (keeping the latest active signal) and apply horizon
   const currentHorizonSignals = useMemo(() => {
     let list: any[] = [];
     if (activeHorizon === "ALL") {
@@ -105,32 +116,45 @@ export default function DashboardPage() {
       }
     }
 
+    let filtered = dedupedList;
     if (directionFilter === "LONG") {
-      return dedupedList.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH").length;
+      filtered = filtered.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH");
     } else if (directionFilter === "SHORT") {
-      return dedupedList.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH").length;
+      filtered = filtered.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH");
     }
 
-    return dedupedList.length;
+    if (minReturnFilter > 0) {
+      filtered = filtered.filter((s: any) => getSignalReturnPct(s) >= minReturnFilter);
+    }
+
+    return filtered.length;
   };
 
   const longCount = useMemo(() => {
-    return currentHorizonSignals.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH").length;
-  }, [currentHorizonSignals]);
+    return currentHorizonSignals
+      .filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH")
+      .filter((s: any) => minReturnFilter === 0 || getSignalReturnPct(s) >= minReturnFilter).length;
+  }, [currentHorizonSignals, minReturnFilter]);
 
   const shortCount = useMemo(() => {
-    return currentHorizonSignals.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH").length;
-  }, [currentHorizonSignals]);
+    return currentHorizonSignals
+      .filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH")
+      .filter((s: any) => minReturnFilter === 0 || getSignalReturnPct(s) >= minReturnFilter).length;
+  }, [currentHorizonSignals, minReturnFilter]);
 
-  // Filter signals according to active horizon & direction filter
+  // Filter signals according to active horizon, direction filter & minimum return filter
   const filteredTopSignals = useMemo(() => {
+    let list = currentHorizonSignals;
     if (directionFilter === "LONG") {
-      return currentHorizonSignals.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH");
+      list = list.filter((s: any) => s.direction === "LONG" || s.direction === "BULLISH");
     } else if (directionFilter === "SHORT") {
-      return currentHorizonSignals.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH");
+      list = list.filter((s: any) => s.direction === "SHORT" || s.direction === "BEARISH");
     }
-    return currentHorizonSignals;
-  }, [currentHorizonSignals, directionFilter]);
+    if (minReturnFilter > 0) {
+      list = list.filter((s: any) => getSignalReturnPct(s) >= minReturnFilter);
+    }
+    return list;
+  }, [currentHorizonSignals, directionFilter, minReturnFilter]);
 
   return (
     <div className="space-y-8">
@@ -168,55 +192,102 @@ export default function DashboardPage() {
             <h2 className="text-sm font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5 font-mono">
               <Sparkles className="h-4 w-4 text-cyan-400" /> Timeframe-Separated Actionable Signals ({filteredTopSignals.length} Active)
             </h2>
-            <span className="text-[11px] text-emerald-400 font-mono font-semibold flex items-center gap-1">
-              ✓ Min 0.40% Return Filter Active (Fees Protected)
-            </span>
+            <div className="flex items-center gap-2">
+              {minReturnFilter > 0 && (
+                <span className="rounded-lg bg-emerald-950 px-2.5 py-1 text-[11px] font-bold text-emerald-300 border border-emerald-700/60 flex items-center gap-1 font-mono">
+                  🎯 Minimum {minReturnFilter}% Gain Target Active
+                </span>
+              )}
+              <span className="text-[11px] text-emerald-400 font-mono font-semibold flex items-center gap-1">
+                ✓ Min 0.40% Return Filter Active (Fees Protected)
+              </span>
+            </div>
           </div>
 
-          {/* Controls Bar: Direction Filters + Horizon Category Tabs */}
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-4 bg-dark-900/80 p-2.5 rounded-2xl border border-slate-800/90">
-            {/* Direction Filter Buttons */}
-            <div className="flex items-center gap-1.5 bg-dark-950/90 p-1 rounded-xl border border-slate-800 shrink-0">
-              <span className="text-[10px] uppercase font-bold text-slate-500 px-2 font-mono">Side:</span>
-              <button
-                type="button"
-                onClick={() => setDirectionFilter("ALL")}
-                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
-                  directionFilter === "ALL"
-                    ? "bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 shadow-sm"
-                    : "text-slate-400 hover:text-white hover:bg-slate-800/50"
-                }`}
-              >
-                ⚡ All ({topSignals.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setDirectionFilter("LONG")}
-                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
-                  directionFilter === "LONG"
-                    ? "bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 shadow-sm shadow-emerald-500/20"
-                    : "text-slate-400 hover:text-emerald-300 hover:bg-slate-800/50"
-                }`}
-              >
-                <span>🟢 Longs</span>
-                <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-700/50">
-                  {longCount}
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setDirectionFilter("SHORT")}
-                className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
-                  directionFilter === "SHORT"
-                    ? "bg-rose-500/25 text-rose-300 border border-rose-500/50 shadow-sm shadow-rose-500/20"
-                    : "text-slate-400 hover:text-rose-300 hover:bg-slate-800/50"
-                }`}
-              >
-                <span>🔴 Shorts</span>
-                <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-rose-950 text-rose-300 border border-rose-700/50">
-                  {shortCount}
-                </span>
-              </button>
+          {/* Controls Bar: Direction Filters + Return Filters + Horizon Category Tabs */}
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 mb-4 bg-dark-900/80 p-2.5 rounded-2xl border border-slate-800/90">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Direction Filter Buttons */}
+              <div className="flex items-center gap-1.5 bg-dark-950/90 p-1 rounded-xl border border-slate-800 shrink-0">
+                <span className="text-[10px] uppercase font-bold text-slate-500 px-2 font-mono">Side:</span>
+                <button
+                  type="button"
+                  onClick={() => setDirectionFilter("ALL")}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                    directionFilter === "ALL"
+                      ? "bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 shadow-sm"
+                      : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+                  }`}
+                >
+                  ⚡ All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDirectionFilter("LONG")}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+                    directionFilter === "LONG"
+                      ? "bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 shadow-sm shadow-emerald-500/20"
+                      : "text-slate-400 hover:text-emerald-300 hover:bg-slate-800/50"
+                  }`}
+                >
+                  <span>🟢 Longs</span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-700/50">
+                    {longCount}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDirectionFilter("SHORT")}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+                    directionFilter === "SHORT"
+                      ? "bg-rose-500/25 text-rose-300 border border-rose-500/50 shadow-sm shadow-rose-500/20"
+                      : "text-slate-400 hover:text-rose-300 hover:bg-slate-800/50"
+                  }`}
+                >
+                  <span>🔴 Shorts</span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-rose-950 text-rose-300 border border-rose-700/50">
+                    {shortCount}
+                  </span>
+                </button>
+              </div>
+
+              {/* Minimum Return Filter Buttons */}
+              <div className="flex items-center gap-1 bg-dark-950/90 p-1 rounded-xl border border-slate-800 shrink-0">
+                <span className="text-[10px] uppercase font-bold text-slate-500 px-2 font-mono">Target Gain:</span>
+                <button
+                  type="button"
+                  onClick={() => setMinReturnFilter(0)}
+                  className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all ${
+                    minReturnFilter === 0
+                      ? "bg-cyan-500/25 text-cyan-200 border border-cyan-500/40"
+                      : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+                  }`}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMinReturnFilter(3)}
+                  className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${
+                    minReturnFilter === 3
+                      ? "bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 shadow-sm"
+                      : "text-slate-400 hover:text-emerald-300 hover:bg-slate-800/50"
+                  }`}
+                >
+                  🎯 ≥ 3% (High Yield)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMinReturnFilter(5)}
+                  className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${
+                    minReturnFilter === 5
+                      ? "bg-amber-500/25 text-amber-300 border border-amber-500/50 shadow-sm"
+                      : "text-slate-400 hover:text-amber-300 hover:bg-slate-800/50"
+                  }`}
+                >
+                  💎 ≥ 5%
+                </button>
+              </div>
             </div>
 
             {/* Horizon Category Tabs */}

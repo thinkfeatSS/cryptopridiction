@@ -16,6 +16,8 @@ def get_signals(
     outcome: Optional[str] = Query(None, description="Filter by outcome: WON, LOST, PENDING, EXPIRED"),
     grade: Optional[str] = Query(None, description="Filter by grade: A+, A, B+"),
     horizon: Optional[str] = Query(None, description="Filter by horizon: SCALP, SWING, MACRO, 2-DAY, 3-DAY, WEEKLY, BIWEEKLY, MONTHLY"),
+    direction: Optional[str] = Query(None, description="Filter by direction: LONG or SHORT"),
+    min_return: Optional[float] = Query(None, description="Filter by minimum target/realized return % (e.g. 3.0)"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -29,6 +31,8 @@ def get_signals(
         outcome=outcome,
         grade=grade,
         horizon=horizon,
+        direction=direction,
+        min_return=min_return,
         limit=limit,
         offset=offset,
     )

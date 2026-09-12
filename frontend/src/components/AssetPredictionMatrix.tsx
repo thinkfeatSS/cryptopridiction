@@ -38,6 +38,7 @@ import { useRelativeTime, formatRelativeMinutes, formatServerPredictionTime } fr
 type HorizonKey =
   | "all"
   | "high_confluence"
+  | "high_yield"
   | "reversals"
   | "trend_expansion"
   | "watchlist"
@@ -661,6 +662,18 @@ export default function AssetPredictionMatrix() {
           item.is_triple_confluence ||
           (item.consistency_index && item.consistency_index >= 80)
       );
+    } else if (selectedHorizon === "high_yield") {
+      list = list.filter((item: any) => {
+        if (!item.horizons) return false;
+        return Object.values(item.horizons).some((h: any) => {
+          const rawExp = h.expected_return_pct !== undefined ? Math.abs(Number(h.expected_return_pct)) : 0;
+          const modelExp = h.exp_return !== undefined ? Math.abs(Number(h.exp_return) * 100) : 0;
+          const entry = Number(h.current_price || h.entry_price || 0);
+          const tp = Number(h.tp_price || h.tp1_price || 0);
+          const gain = entry > 0 && tp > 0 ? (Math.abs(tp - entry) / entry) * 100 : 0;
+          return Math.max(rawExp, modelExp, gain) >= 3.0;
+        });
+      });
     } else if (selectedHorizon === "reversals") {
       list = list.filter(
         (item: any) =>
@@ -738,6 +751,7 @@ export default function AssetPredictionMatrix() {
     () => [
       { key: "all", label: "All Horizons Matrix (10TF)" },
       { key: "high_confluence", label: "💎 High Confluence (≥6/10)" },
+      { key: "high_yield", label: "🎯 High Yield (≥3% Target)" },
       { key: "reversals", label: "⚡ Reversals & Bounces" },
       { key: "trend_expansion", label: "🚀 Trend Expansion" },
       { key: "watchlist", label: `⭐ Watchlist (${watchlist.length})` },

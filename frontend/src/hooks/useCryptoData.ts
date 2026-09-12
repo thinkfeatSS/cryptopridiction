@@ -36,6 +36,8 @@ export function useSignalsQuery(params?: {
   outcome?: string;
   grade?: string;
   horizon?: string;
+  direction?: string;
+  min_return?: number;
   limit?: number;
   offset?: number;
 }) {
