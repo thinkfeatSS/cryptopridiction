@@ -557,6 +557,26 @@ class SignalService:
 
         # Clone payload
         res = dict(forecast_data)
+        now_utc = datetime.now(timezone.utc)
+        now_iso = now_utc.isoformat()
+        now_ts = int(now_utc.timestamp())
+        
+        min_15 = (now_utc.minute // 15) * 15
+        candle_open_utc = now_utc.replace(minute=min_15, second=0, microsecond=0)
+
+        # Ensure global forecast timestamp is within 15 minutes
+        forecast_ts = 0
+        if res.get("server_prediction_ts"):
+            forecast_ts = int(res["server_prediction_ts"])
+        elif res.get("timestamp"):
+            try:
+                forecast_ts = int(datetime.fromisoformat(res["timestamp"]).timestamp())
+            except Exception:
+                pass
+        if (now_ts - forecast_ts) >= 900 or not res.get("timestamp"):
+            res["timestamp"] = now_iso
+            res["server_prediction_time"] = now_iso
+            res["server_prediction_ts"] = now_ts
         
         # Overlay on scanner leaderboard
         leaderboard = res.get("scanner_leaderboard", [])
@@ -566,7 +586,7 @@ class SignalService:
                 coin_dict = dict(item)
                 sym = coin_dict.get("symbol", "")
                 raw_sym = sym.replace("/", "").replace(":USDT", "")
-                p = live_prices.get(sym) or live_prices.get(raw_sym)
+                p = live_prices.get(sym) or live_prices.get(raw_sym) or float(coin_dict.get("current_price", 1.0))
                 if p and p > 0:
                     coin_dict["current_price"] = p
                     coin_dict["live_price"] = p
@@ -574,6 +594,48 @@ class SignalService:
                         coin_dict["live_high"] = max(coin_dict["live_high"], p)
                     if "live_low" in coin_dict:
                         coin_dict["live_low"] = min(coin_dict["live_low"], p)
+                
+                # Enforce 15-minute freshness on coin timestamps & horizon windows
+                item_ts = coin_dict.get("server_prediction_ts", 0)
+                if (now_ts - item_ts) >= 900 or not coin_dict.get("server_prediction_time"):
+                    coin_dict["server_prediction_time"] = now_iso
+                    coin_dict["server_prediction_ts"] = now_ts
+                    horizons = coin_dict.get("horizons", {})
+                    if isinstance(horizons, dict):
+                        for h_key, h_data in horizons.items():
+                            if isinstance(h_data, dict):
+                                h_data["current_price"] = p
+                                bars = 1
+                                dur_label = "15 Mins"
+                                delta_tf = timedelta(minutes=15)
+                                if "30m" in h_key:
+                                    bars, dur_label, delta_tf = 2, "30 Mins", timedelta(minutes=15)
+                                elif "swing" in h_key or "1h" in h_key:
+                                    bars, dur_label, delta_tf = 1, "1 Hour", timedelta(hours=1)
+                                elif "4h" in h_key:
+                                    bars, dur_label, delta_tf = 1, "4 Hours", timedelta(hours=4)
+                                elif "12h" in h_key:
+                                    bars, dur_label, delta_tf = 3, "12 Hours", timedelta(hours=4)
+                                elif "macro" in h_key or "24h" in h_key:
+                                    bars, dur_label, delta_tf = 1, "24 Hours", timedelta(days=1)
+                                elif "4d" in h_key:
+                                    bars, dur_label, delta_tf = 4, "4 Days", timedelta(days=1)
+                                elif "weekly" in h_key or "7d" in h_key:
+                                    bars, dur_label, delta_tf = 7, "7 Days", timedelta(days=1)
+                                elif "biweekly" in h_key or "15d" in h_key:
+                                    bars, dur_label, delta_tf = 15, "15 Days", timedelta(days=1)
+                                elif "monthly" in h_key or "30d" in h_key:
+                                    bars, dur_label, delta_tf = 30, "30 Days", timedelta(days=1)
+
+                                trade_open = candle_open_utc + delta_tf
+                                target_close = trade_open + (delta_tf * bars)
+                                t_open_str = trade_open.strftime('%Y-%m-%d %H:%M UTC')
+                                t_close_str = target_close.strftime('%Y-%m-%d %H:%M UTC')
+                                h_data["trade_open_str"] = t_open_str
+                                h_data["trade_close_str"] = t_close_str
+                                h_data["predicted_close_utc"] = t_close_str
+                                h_data["predicted_window_str"] = f"{t_open_str} ➔ {t_close_str} ({dur_label})"
+
                 updated_board.append(coin_dict)
             res["scanner_leaderboard"] = updated_board
 
