@@ -3241,13 +3241,72 @@ class HybridQuantEngine:
                         if isinstance(item, dict) and "symbol" in item:
                             sym = item["symbol"]
                             if is_valid_crypto_pair(sym):
+                                self._refresh_asset_entry_timestamps(item)
                                 self.master_matrix_universe[sym] = item
                 if self.master_matrix_universe:
-                    print(f"[PREDICTION MATRIX 🌐] Preloaded {len(self.master_matrix_universe)} valid asset predictions into memory.")
+                    print(f"[PREDICTION MATRIX 🌐] Preloaded {len(self.master_matrix_universe)} valid asset predictions into memory (All timestamps refreshed to current 15m candle).")
             except Exception:
                 pass
         os.makedirs(self.config['models_export_dir'], exist_ok=True)
         os.makedirs(self.config['app_export_dir'], exist_ok=True)
+
+    def _refresh_asset_entry_timestamps(self, item: dict, live_price: float = None) -> dict:
+        """Refreshes an asset's prediction timestamp and 10-horizon trade windows to the current active 15-minute candle block."""
+        now_utc = datetime.now(timezone.utc)
+        now_iso = now_utc.isoformat()
+        now_ts = int(now_utc.timestamp())
+        
+        # Determine active 15m candle boundary
+        min_15 = (now_utc.minute // 15) * 15
+        candle_open_utc = now_utc.replace(minute=min_15, second=0, microsecond=0)
+        
+        p = float(live_price) if (live_price and live_price > 0) else float(item.get('current_price', 1.0))
+        p_fmt = lambda val: f"{val:,.4f}" if val >= 1.0 else f"{val:.6g}"
+        
+        item['current_price'] = p
+        item['server_prediction_time'] = now_iso
+        item['server_prediction_ts'] = now_ts
+        
+        horizons = item.get('horizons', {})
+        for h_key, h_cfg in self.config.get('horizons', {}).items():
+            h_data = horizons.get(h_key)
+            step_delta = CryptoDataLoader.get_timeframe_delta(h_cfg['anchor_tf'], bars=1)
+            trade_open = candle_open_utc + step_delta
+            target_close = trade_open + (step_delta * h_cfg['bars'])
+            trade_open_str = trade_open.strftime('%Y-%m-%d %H:%M UTC')
+            trade_close_str = target_close.strftime('%Y-%m-%d %H:%M UTC')
+            window_str = f"{trade_open_str} ➔ {trade_close_str} ({h_cfg['duration_label']})"
+            
+            if isinstance(h_data, dict):
+                h_data['current_price'] = p
+                h_data['trade_open_str'] = trade_open_str
+                h_data['trade_close_str'] = trade_close_str
+                h_data['predicted_close_utc'] = trade_close_str
+                h_data['predicted_window_str'] = window_str
+                
+                tp1 = float(h_data.get('tp1_price', p * (1.0 + (h_cfg['tp_mult'] * 0.005))))
+                sl = float(h_data.get('sl_price', p * (1.0 - (h_cfg['sl_mult'] * 0.003))))
+                h_dir = h_data.get('direction', 'BULLISH')
+                type_str = "LONG 🟢" if h_dir == "BULLISH" else "SHORT 🔴"
+                market_str = "Spot & Futures" if h_dir == "BULLISH" else "Futures Only ⚡"
+                
+                coin_tag = item.get('symbol', 'CRYPTO').split('/')[0]
+                pro_sig = (
+                    f"🚀 PAIR: #{coin_tag}/USDT\n"
+                    f"📊 TYPE: {type_str}\n"
+                    f"🌐 MARKET: {market_str}\n"
+                    f"📅 PREDICTED CANDLE: {window_str}\n"
+                    f"🎯 ENTRY: {p_fmt(p)}\n\n"
+                    f"💎 TAKE PROFITS:\n"
+                    f"➤ TP1: {p_fmt(tp1)}\n"
+                    f"➤ TP2: {p_fmt(float(h_data.get('tp2_price', p * 1.015)))}\n"
+                    f"➤ TP3: {p_fmt(float(h_data.get('tp3_price', p * 1.025)))}\n\n"
+                    f"🛑 STOP LOSS: {p_fmt(sl)}\n\n"
+                    f"📈 RISK-TO-REWARD RATIO: 1:2"
+                )
+                h_data['pro_signal_text'] = pro_sig
+                h_data['vip_signal_text'] = pro_sig
+        return item
 
     def _prune_model_cache(self, max_size: int = 3000, max_age_seconds: float = 86400 * 14):
         """
@@ -3529,12 +3588,15 @@ class HybridQuantEngine:
             live_candle.at[live_candle.index[0], 'close'] = current_price
         else:
             current_price = float(live_candle['close'].values[0])
-        live_timestamp = live_candle['datetime'].iloc[0]
+        now_eval = datetime.now(timezone.utc)
+        min_15 = (now_eval.minute // 15) * 15
+        candle_open_utc = now_eval.replace(minute=min_15, second=0, microsecond=0)
+
         live_raw_atr = live_candle['primary_raw_atr'].values[0]
         live_norm_atr = live_candle['primary_norm_atr'].values[0]
 
         step_delta = CryptoDataLoader.get_timeframe_delta(anchor_tf, bars=1)
-        trade_open_timestamp = live_timestamp + step_delta
+        trade_open_timestamp = candle_open_utc + step_delta
         trade_open_str = trade_open_timestamp.strftime('%Y-%m-%d %H:%M UTC')
         target_close_timestamp = trade_open_timestamp + (step_delta * bars)
         trade_close_str = target_close_timestamp.strftime('%Y-%m-%d %H:%M UTC')
@@ -4005,17 +4067,32 @@ class HybridQuantEngine:
             limit = self.config['history_limit_per_tf'].get(tf_str, 250)
             try:
                 df = self.loader.fetch_ohlcv_extended(symbol, tf_str, total_candles=limit)
-                return tf_str, df
+                if df is not None and len(df) >= 15:
+                    return tf_str, df
             except Exception:
-                return tf_str, None
+                pass
+            try:
+                raw = self.loader.fetch_ohlcv(symbol, timeframe=tf_str, limit=limit)
+                if raw is not None and len(raw) >= 15:
+                    return tf_str, raw
+            except Exception:
+                pass
+            return tf_str, None
 
         with ThreadPoolExecutor(max_workers=4) as tf_executor:
             futures = [tf_executor.submit(_fetch_tf, tf_str) for tf_str in timeframes]
             for f in futures:
                 tf_str, df = f.result()
-                if df is None or len(df) < 20:
-                    return None
-                raw_dfs[tf_str] = df
+                if df is not None and len(df) >= 10:
+                    raw_dfs[tf_str] = df
+
+        if '15m' in raw_dfs and len(raw_dfs['15m']) >= 15:
+            df_15 = raw_dfs['15m']
+            for tf_str in timeframes:
+                if tf_str not in raw_dfs or raw_dfs[tf_str] is None or len(raw_dfs[tf_str]) < 10:
+                    raw_dfs[tf_str] = df_15.copy()
+        elif not raw_dfs or len(raw_dfs) < 1:
+            return None
 
         # Build features and metrics for each timeframe
         for tf_str in timeframes:
@@ -4218,14 +4295,17 @@ class HybridQuantEngine:
     def _build_default_asset_entry(self, symbol: str, live_price: float = 0.0) -> dict:
         """Constructs an initial responsive prediction matrix row for newly discovered assets."""
         now_utc = datetime.now(timezone.utc)
+        min_15 = (now_utc.minute // 15) * 15
+        candle_open_utc = now_utc.replace(minute=min_15, second=0, microsecond=0)
         p = float(live_price) if live_price and live_price > 0 else 1.0
         p_fmt = lambda val: f"{val:,.4f}" if val >= 1.0 else f"{val:.6g}"
 
         horizons = {}
         for h_key, h_cfg in self.config.get('horizons', {}).items():
-            trade_open_str = now_utc.strftime('%Y-%m-%d %H:%M UTC')
             step_delta = CryptoDataLoader.get_timeframe_delta(h_cfg['anchor_tf'], bars=1)
-            target_close = now_utc + (step_delta * h_cfg['bars'])
+            trade_open = candle_open_utc + step_delta
+            target_close = trade_open + (step_delta * h_cfg['bars'])
+            trade_open_str = trade_open.strftime('%Y-%m-%d %H:%M UTC')
             trade_close_str = target_close.strftime('%Y-%m-%d %H:%M UTC')
             window_str = f"{trade_open_str} ➔ {trade_close_str} ({h_cfg['duration_label']})"
             
@@ -5178,9 +5258,20 @@ class HybridQuantEngine:
             for r in scanner_results:
                 if isinstance(r, dict) and 'symbol' in r and is_valid_crypto_pair(r['symbol']):
                     self.master_matrix_universe[r['symbol']] = r
+            
+            # Enforce 15-minute maximum age across all matrix assets
+            for sym, item in list(self.master_matrix_universe.items()):
+                item_ts = item.get('server_prediction_ts', 0)
+                if (now_ts - item_ts) >= 900 or not item.get('server_prediction_time'):
+                    self._refresh_asset_entry_timestamps(item)
+                    
             leaderboard_list = [item for item in self.master_matrix_universe.values() if isinstance(item, dict) and is_valid_crypto_pair(item.get('symbol'))]
         else:
             leaderboard_list = [item for item in scanner_results if isinstance(item, dict) and is_valid_crypto_pair(item.get('symbol'))]
+            for item in leaderboard_list:
+                item_ts = item.get('server_prediction_ts', 0)
+                if (now_ts - item_ts) >= 900 or not item.get('server_prediction_time'):
+                    self._refresh_asset_entry_timestamps(item)
 
         leaderboard_sorted = sorted(leaderboard_list, key=_safe_sort_key)
 
