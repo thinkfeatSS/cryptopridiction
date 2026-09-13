@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -5,12 +6,16 @@ from contextlib import asynccontextmanager
 
 from app.config import settings
 from app.services.db_sync import migrate_files_to_db, init_db
-from app.routers import signals_router, forecast_router, portfolio_router, health_router, models_router
+from app.services.websocket_manager import ws_manager
+from app.routers import signals_router, forecast_router, portfolio_router, health_router, models_router, websocket_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Initialize database schema & run initial migration from CSV/JSON asynchronously
     print("[BACKEND ⚡] Starting Quantitative Crypto FastAPI Backend...")
+    loop = asyncio.get_running_loop()
+    ws_manager.set_loop(loop)
+    watcher_task = asyncio.create_task(ws_manager.start_background_watcher(settings.EXPORT_DIR))
     try:
         init_db()
     except Exception as e:
@@ -22,6 +27,11 @@ async def lifespan(app: FastAPI):
         print(f"[BACKEND ⚠️] migrate_files_to_db notice: {e}")
     yield
     print("[BACKEND 🛑] Shutting down Quantitative Crypto Backend...")
+    watcher_task.cancel()
+    try:
+        await watcher_task
+    except asyncio.CancelledError:
+        pass
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -49,6 +59,7 @@ app.include_router(forecast_router)
 app.include_router(portfolio_router)
 app.include_router(health_router)
 app.include_router(models_router)
+app.include_router(websocket_router)
 
 from app.services.signal_service import signal_service
 

@@ -10,9 +10,11 @@ import SignalsTable from "@/components/SignalsTable";
 import PortfolioView from "@/components/PortfolioView";
 import QueuedTrades from "@/components/QueuedTrades";
 import { useForecastQuery } from "@/hooks/useCryptoData";
+import { useWebSocketStream } from "@/hooks/useWebSocketStream";
 import { Sparkles, Zap, ShieldCheck, Activity, BarChart2 } from "lucide-react";
 
 export default function DashboardPage() {
+  const wsStatus = useWebSocketStream();
   const { data: forecast, isLoading } = useForecastQuery();
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [activeHorizon, setActiveHorizon] = useState<string>("ALL");
@@ -179,6 +181,12 @@ export default function DashboardPage() {
           </div>
 
           <div className="flex items-center gap-2 text-xs font-mono">
+            <span className="rounded-lg bg-dark-900/90 px-3 py-1.5 text-slate-300 border border-slate-800 flex items-center gap-1.5">
+              <span className={`h-2 w-2 rounded-full ${wsStatus.isConnected ? "bg-emerald-400 animate-pulse shadow-sm shadow-emerald-400" : "bg-amber-400"}`} />
+              <span className="text-[11px] font-semibold text-slate-300">
+                {wsStatus.isConnected ? "⚡ Live WebSocket Stream" : "REST Sync"}
+              </span>
+            </span>
             <span className="rounded-lg bg-dark-900/90 px-3 py-1.5 text-slate-300 border border-slate-800 flex items-center gap-1.5">
               <Activity className="h-3.5 w-3.5 text-cyan-400" />
               <span>Active Signals: <strong className="text-cyan-300">{topSignals.length}</strong></span>
