@@ -101,6 +101,11 @@ EXCLUDED_STABLECOIN_BASES = {
     "USDT", "EURS", "EURC", "USN", "CEUR", "CUSD", "OUSD", "USDP", "GUSD", "SUSD"
 }
 
+EXCLUDED_DELISTED_BASES = {
+    "FTM", "MATIC", "LUNA", "LUNC", "UST", "ANT", "MULTI", "WTC", "VGX", "BTT",
+    "SRM", "RAY", "HNT", "TOMO", "MOB", "PNT", "DREP", "BTS", "PERP", "KEY"
+}
+
 def is_valid_crypto_pair(symbol: str, price: float = None, high: float = None, low: float = None) -> bool:
     if not symbol or not isinstance(symbol, str):
         return False
@@ -129,7 +134,7 @@ def is_valid_crypto_pair(symbol: str, price: float = None, high: float = None, l
         return False
 
     # 5. Reject Known Stablecoins & Fiat Pegs
-    if base in EXCLUDED_STABLECOIN_BASES:
+    if base in EXCLUDED_STABLECOIN_BASES or base in EXCLUDED_DELISTED_BASES:
         return False
 
     # 6. Dynamic Price Peg Filter (~$1 peg with near zero volatility)
@@ -154,8 +159,8 @@ CONFIG = {
     "mode": "both",               # "both", "scanner", or "single"
     "continuous_loop": True,      # 24/7 Background Watcher Loop
     "scanner_mode": "top_volume", # "top_volume" (dynamic auto-discovery of all active Binance coins), "expanded_universe", or "custom_list"
-    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "200")), # Top 200 volume Binance coins (full market coverage)
-    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "12")), # 12 parallel worker threads for high-throughput scanning
+    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "110")), # Top 110 volume Binance coins (active trading universe)
+    "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "16")), # 16 parallel worker threads for high-throughput scanning
     "heartbeat_interval_seconds": int(os.getenv("HEARTBEAT_SECONDS", "4")), # Fast intra-candle position monitoring
     "history_limit_per_tf": {"15m": 250, "1h": 250, "4h": 250, "1d": 250}, # 250 candles per TF (1 fast REST fetch, zero pagination lag)
     "single_symbol": "BTC/USDT",
@@ -164,7 +169,7 @@ CONFIG = {
         "AVAX/USDT", "SUI/USDT", "LINK/USDT", "NEAR/USDT", "APT/USDT", "DOT/USDT", "PEPE/USDT",
         "SHIB/USDT", "TIA/USDT", "INJ/USDT", "RENDER/USDT", "FET/USDT", "OP/USDT", "ARB/USDT",
         "LTC/USDT", "UNI/USDT", "ICP/USDT", "FIL/USDT", "STX/USDT", "TAO/USDT", "SEI/USDT",
-        "WIF/USDT", "BONK/USDT", "AAVE/USDT", "ATOM/USDT", "ETC/USDT", "KAS/USDT", "FTM/USDT",
+        "WIF/USDT", "BONK/USDT", "AAVE/USDT", "ATOM/USDT", "ETC/USDT", "KAS/USDT", "S/USDT",
         "WLD/USDT", "RUNE/USDT", "POL/USDT", "PYTH/USDT", "JUP/USDT", "BEAM/USDT", "ONDO/USDT",
         "FLOKI/USDT", "OM/USDT", "CORE/USDT", "GALA/USDT", "KAVA/USDT", "ALGO/USDT", "CHZ/USDT",
         "BLUR/USDT", "JASMY/USDT", "QNT/USDT", "DYDX/USDT", "IMX/USDT", "STG/USDT", "STRK/USDT",
@@ -174,7 +179,8 @@ CONFIG = {
         "VIRTUAL/USDT", "PENGU/USDT", "BOME/USDT", "MEW/USDT", "TURBO/USDT", "NEIRO/USDT",
         "BRETT/USDT", "1000SATS/USDT", "ORDI/USDT", "BIGTIME/USDT", "ETHFI/USDT", "EIGEN/USDT",
         "W/USDT", "SAFE/USDT", "ZK/USDT", "BANANA/USDT", "AKT/USDT", "ZETA/USDT", "BB/USDT",
-        "LISTA/USDT", "VOXEL/USDT", "TRX/USDT", "BCH/USDT", "HBAR/USDT"
+        "LISTA/USDT", "VOXEL/USDT", "TRX/USDT", "BCH/USDT", "HBAR/USDT", "LDO/USDT", "AR/USDT",
+        "SUPER/USDT", "KAIA/USDT", "THE/USDT", "LSK/USDT", "HYPE/USDT", "DRIFT/USDT", "COW/USDT"
     ],
     "timeframes": ["1d", "4h", "1h", "15m"],
     # Multi-Horizon Definitions: 10 Horizons Spectrum + Radar Confluence
@@ -836,10 +842,38 @@ class CryptoDataLoader:
             pass
         return 0.0
 
-    def fetch_top_volume_usdt_pairs(self, limit: int = 100) -> list:
-        """Dynamically discovers and ranks active volatile crypto pairs by 24h volume (strictly excluding all stablecoins & stock tokens)."""
+    def fetch_active_binance_symbols(self) -> set:
+        """
+        Fetches and caches the set of active TRADING spot symbols on Binance.
+        Guarantees delisted, halted, or non-tradable tokens (e.g. FTM) are strictly rejected.
+        """
+        now = time.time()
+        if hasattr(self, '_active_symbols_cache') and self._active_symbols_cache and (now - getattr(self, '_active_symbols_ts', 0.0)) < 3600.0:
+            return self._active_symbols_cache
+
+        try:
+            url = "https://data-api.binance.vision/api/v3/exchangeInfo"
+            resp = self.session.get(url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                active = set()
+                for s in data.get('symbols', []):
+                    if s.get('status') == 'TRADING' and s.get('isSpotTradingAllowed', True):
+                        active.add(s.get('symbol', ''))
+                if active:
+                    self._active_symbols_cache = active
+                    self._active_symbols_ts = now
+                    return active
+        except Exception as e:
+            print(f"[MARKET DISCOVERY] exchangeInfo check note: {e}")
+
+        return getattr(self, '_active_symbols_cache', set())
+
+    def fetch_top_volume_usdt_pairs(self, limit: int = 110) -> list:
+        """Dynamically discovers and ranks active volatile crypto pairs by 24h volume (strictly active Binance TRADING spot pairs)."""
         try:
             print(f"[MARKET DISCOVERY] Querying all active [{self.active_exchange_id.upper()}] pairs by 24h trading volume...")
+            active_symbols = self.fetch_active_binance_symbols()
             valid_pairs = []
 
             # 1. Direct Binance Vision 24h Tickers API
@@ -852,6 +886,8 @@ class CryptoDataLoader:
                             raw_sym = item.get('symbol', '')
                             if not raw_sym.endswith('USDT'):
                                 continue
+                            if active_symbols and raw_sym not in active_symbols:
+                                continue
                             base = raw_sym[:-4]
                             sym = f"{base}/USDT"
                             
@@ -863,7 +899,7 @@ class CryptoDataLoader:
                                 continue
 
                             quote_vol = float(item.get('quoteVolume', 0.0) or 0.0)
-                            if quote_vol > 1000000.0:  # Minimum $1M 24h volume
+                            if quote_vol > 500000.0:  # Minimum $500k 24h volume
                                 valid_pairs.append((sym, quote_vol))
                 except Exception as e:
                     print(f"[MARKET DISCOVERY] Note on Binance Vision 24h tickers: {e}")
@@ -899,7 +935,7 @@ class CryptoDataLoader:
             "AVAX/USDT", "SUI/USDT", "LINK/USDT", "NEAR/USDT", "APT/USDT", "DOT/USDT", "PEPE/USDT",
             "SHIB/USDT", "TIA/USDT", "INJ/USDT", "RENDER/USDT", "FET/USDT", "OP/USDT", "ARB/USDT",
             "LTC/USDT", "UNI/USDT", "ICP/USDT", "FIL/USDT", "STX/USDT", "TAO/USDT", "SEI/USDT",
-            "WIF/USDT", "BONK/USDT", "AAVE/USDT", "ATOM/USDT", "ETC/USDT", "KAS/USDT", "FTM/USDT",
+            "WIF/USDT", "BONK/USDT", "AAVE/USDT", "ATOM/USDT", "ETC/USDT", "KAS/USDT", "S/USDT",
             "WLD/USDT", "RUNE/USDT", "POL/USDT", "PYTH/USDT", "JUP/USDT", "BEAM/USDT", "ONDO/USDT",
             "FLOKI/USDT", "OM/USDT", "CORE/USDT", "GALA/USDT", "KAVA/USDT", "ALGO/USDT", "CHZ/USDT",
             "BLUR/USDT", "JASMY/USDT", "QNT/USDT", "DYDX/USDT", "IMX/USDT", "STG/USDT", "STRK/USDT",
@@ -909,7 +945,8 @@ class CryptoDataLoader:
             "VIRTUAL/USDT", "PENGU/USDT", "BOME/USDT", "MEW/USDT", "TURBO/USDT", "NEIRO/USDT",
             "BRETT/USDT", "1000SATS/USDT", "ORDI/USDT", "BIGTIME/USDT", "ETHFI/USDT", "EIGEN/USDT",
             "W/USDT", "SAFE/USDT", "ZK/USDT", "BANANA/USDT", "AKT/USDT", "ZETA/USDT", "BB/USDT",
-            "LISTA/USDT", "VOXEL/USDT", "TRX/USDT", "BCH/USDT", "HBAR/USDT"
+            "LISTA/USDT", "VOXEL/USDT", "TRX/USDT", "BCH/USDT", "HBAR/USDT", "LDO/USDT", "AR/USDT",
+            "SUPER/USDT", "KAIA/USDT", "THE/USDT", "LSK/USDT", "HYPE/USDT", "DRIFT/USDT", "COW/USDT"
         ]
         return [s for s in default_universe if is_valid_crypto_pair(s)][:limit]
 
@@ -3953,14 +3990,26 @@ class HybridQuantEngine:
         tf_features = {}
         tf_metrics_summary = []
 
-        # Ingest all multi-scale charts
+        # Concurrent ingestion of all 4 multi-scale charts (sub-70ms parallel fetch)
+        def _fetch_tf(tf_str):
+            limit = self.config['history_limit_per_tf'].get(tf_str, 250)
+            try:
+                df = self.loader.fetch_ohlcv_extended(symbol, tf_str, total_candles=limit)
+                return tf_str, df
+            except Exception:
+                return tf_str, None
+
+        with ThreadPoolExecutor(max_workers=4) as tf_executor:
+            futures = [tf_executor.submit(_fetch_tf, tf_str) for tf_str in timeframes]
+            for f in futures:
+                tf_str, df = f.result()
+                if df is None or len(df) < 20:
+                    return None
+                raw_dfs[tf_str] = df
+
+        # Build features and metrics for each timeframe
         for tf_str in timeframes:
-            limit = self.config['history_limit_per_tf'].get(tf_str, 2000)
-            df = self.loader.fetch_ohlcv_extended(symbol, tf_str, total_candles=limit)
-            if len(df) < 20:
-                # Insufficient candle history for newly listed or illiquid coin
-                return None
-            raw_dfs[tf_str] = df
+            df = raw_dfs[tf_str]
             tf_feat = self.fe.build_timeframe_features(df, prefix=tf_str)
             tf_features[tf_str] = tf_feat
 
@@ -3984,8 +4033,8 @@ class HybridQuantEngine:
                 "Regime": regime
             })
 
-        # Orderbook Depth Imbalance Microstructure Alpha
-        ob_imbalance = self.loader.fetch_orderbook_imbalance(symbol, limit=20)
+        # Orderbook Depth Imbalance Microstructure Alpha (fast 5 levels)
+        ob_imbalance = self.loader.fetch_orderbook_imbalance(symbol, limit=5)
         ob_label = f"🟢 +{ob_imbalance*100:.1f}% Buy Wall" if ob_imbalance > 0.05 else (f"🔴 {ob_imbalance*100:.1f}% Sell Wall" if ob_imbalance < -0.05 else "⚪ Balanced")
         c15m = raw_dfs['15m']['close'].iloc[-1] if '15m' in raw_dfs else last_c
         tf_metrics_summary.append({

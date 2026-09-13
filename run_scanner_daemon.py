@@ -22,22 +22,22 @@ except ImportError:
     HAS_MODEL_RETRAINER = False
 
 def run_daemon():
-    interval_seconds = int(os.getenv("SCAN_INTERVAL_SECONDS", "900"))  # Default: 15 minutes (900s)
+    interval_seconds = int(os.getenv("SCAN_INTERVAL_SECONDS", "60"))  # Default: 60 seconds continuous rolling refresh
     if os.getenv("SCAN_INTERVAL_MINUTES"):
         interval_seconds = int(os.getenv("SCAN_INTERVAL_MINUTES")) * 60
     
     run_once = os.getenv("RUN_ONCE", "false").lower() in ("true", "1", "yes")
-    scan_top_n = int(os.getenv("SCANNER_TOP_N", str(CONFIG.get("scanner_top_n", 200))))
-    max_workers = int(os.getenv("MAX_SCAN_WORKERS", str(CONFIG.get("max_scan_workers", 20))))
+    scan_top_n = int(os.getenv("SCANNER_TOP_N", str(CONFIG.get("scanner_top_n", 110))))
+    max_workers = int(os.getenv("MAX_SCAN_WORKERS", str(CONFIG.get("max_scan_workers", 16))))
     heartbeat_secs = int(os.getenv("HEARTBEAT_SECONDS", str(CONFIG.get("heartbeat_interval_seconds", 4))))
     CONFIG["scanner_top_n"] = scan_top_n
     CONFIG["max_scan_workers"] = max_workers
     CONFIG["continuous_loop"] = False
 
     print("=" * 80)
-    print("🚀 QUANTITATIVE 10-HORIZON CRYPTO PREDICTION SCANNER DAEMON (TOP 200 UNIVERSE)")
+    print("🚀 QUANTITATIVE 10-HORIZON CRYPTO PREDICTION SCANNER DAEMON (TOP 110 UNIVERSE)")
     print(f"📊 Top Coins Scanning Universe: {scan_top_n} Coins (Parallel Workers: {max_workers})")
-    print(f"⏱️  Scan Frequency: Every {interval_seconds} seconds ({interval_seconds // 60} minutes)")
+    print(f"⏱️  Scan Frequency: Every {interval_seconds} seconds ({interval_seconds // 60}m {interval_seconds % 60}s)")
     print(f"💓 Live Position Heartbeat: Every {heartbeat_secs} seconds")
     print(f"📁 Export Directory: {os.path.abspath(CONFIG.get('app_export_dir', 'export_app_data'))}")
     print("=" * 80)
@@ -54,7 +54,7 @@ def run_daemon():
         print(f"\n[SCANNER CYCLE #{scan_cycle}] Starting full market scan at {start_utc_str}...")
 
         try:
-            # Execute 8-horizon multi-coin scan (reusing warm model cache)
+            # Execute 10-horizon multi-coin scan (reusing warm model cache)
             engine.run_single_iteration()
 
             # Trigger live database synchronization immediately
@@ -82,18 +82,14 @@ def run_daemon():
             print("[SCANNER] RUN_ONCE is enabled. Exiting.")
             break
 
-        # Exact Zero-Drift 15M Candle Boundary Alignment (:00:02, :15:02, :30:02, :45:02 UTC)
+        # Fast Continuous Rolling Refresh (every interval_seconds with intra-candle position heartbeats)
         now_cycle = datetime.now(timezone.utc)
-        mins_past = now_cycle.minute % 15
-        secs_to_boundary = ((15 - mins_past) * 60) - now_cycle.second + 2
-        if secs_to_boundary <= 10:
-            secs_to_boundary += 900
-        next_scan_dt = now_cycle + timedelta(seconds=secs_to_boundary)
+        next_scan_dt = now_cycle + timedelta(seconds=interval_seconds)
         next_scan_ts = int(next_scan_dt.timestamp())
         next_scan_str = next_scan_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-        print(f"[SCANNER] Next full scan scheduled at: {next_scan_str} (in {secs_to_boundary}s, monitoring active trades every {heartbeat_secs}s)...")
+        print(f"[SCANNER] Next full scan scheduled at: {next_scan_str} (in {interval_seconds}s, monitoring active trades every {heartbeat_secs}s)...")
 
-        end_sleep_ts = next_scan_ts
+        end_sleep_ts = time.time() + interval_seconds
         last_signal_eval_ts = 0.0
 
         while time.time() < end_sleep_ts:

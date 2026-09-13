@@ -72,8 +72,8 @@ export function useForecastQuery() {
   return useQuery({
     queryKey: ["forecast"],
     queryFn: fetchForecast,
-    refetchInterval: 15000,
-    staleTime: 6000,
+    refetchInterval: 5000,
+    staleTime: 2000,
   });
 }
 
