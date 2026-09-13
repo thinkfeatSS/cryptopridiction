@@ -86,7 +86,7 @@ services:
       - EXPORT_DIR=/app/export_app_data
       - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-15}
       - SCANNER_TOP_N=${SCANNER_TOP_N:-200}
-      - MAX_SCAN_WORKERS=${MAX_SCAN_WORKERS:-8}
+      - MAX_SCAN_WORKERS=${MAX_SCAN_WORKERS:-12}
       - HEARTBEAT_SECONDS=${HEARTBEAT_SECONDS:-4}
     volumes:
       - app_exports:/app/export_app_data
