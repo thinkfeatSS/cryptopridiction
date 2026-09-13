@@ -106,6 +106,12 @@ EXCLUDED_DELISTED_BASES = {
     "SRM", "RAY", "HNT", "TOMO", "MOB", "PNT", "DREP", "BTS", "PERP", "KEY"
 }
 
+EXCLUDED_STOCK_AND_SYNTHETIC = {
+    "QQQB", "TSLAB", "NVDAB", "SPCXB", "SNDKB", "INTCB", "SOXLB", "MSTRB", "COINB",
+    "AAPLB", "AMZNB", "GOOGLB", "METAB", "MSFTB", "NVDA", "TSLA", "AAPL", "AMZN",
+    "GOOGL", "MSFT", "MARSCOIN", "COIN", "CRCLB"
+}
+
 def is_valid_crypto_pair(symbol: str, price: float = None, high: float = None, low: float = None) -> bool:
     if not symbol or not isinstance(symbol, str):
         return False
@@ -124,9 +130,11 @@ def is_valid_crypto_pair(symbol: str, price: float = None, high: float = None, l
     if not base.isalnum() or not base.isascii():
         return False
     
-    # 3. Reject leveraged / tokenized stocks ending with B (e.g. TSLAB, NVDAB, SPCXB, INTCB, SOXLB, MSTRB, CRCLB, SNDKB, QQQB, COINB)
-    if len(base) > 4 and base.endswith("B") and base not in {"SHIB", "FLOKI", "BOMB"}:
-        if base in {"NVDAB", "CRCLB", "SPCXB", "SNDKB", "INTCB", "SOXLB", "MSTRB", "TSLAB", "QQQB", "COINB", "AAPLB", "AMZNB", "GOOGLB", "METAB", "MSFTB"}:
+    # 3. Reject leveraged / tokenized stocks ending with B or synthetic tokens
+    if base in EXCLUDED_STOCK_AND_SYNTHETIC:
+        return False
+    if base.endswith("B") and len(base) >= 4 and base not in {"SHIB", "FLOKI", "BOMB", "BNB", "ARB", "BB", "ZRO"}:
+        if any(stock in base for stock in ["TSLA", "NVDA", "QQQ", "SPCX", "SNDK", "INTC", "SOXL", "MSTR", "COIN", "AAPL", "AMZN", "GOOGL", "META", "MSFT"]):
             return False
             
     # 4. Reject Leveraged Bull/Bear Tokens
@@ -870,9 +878,10 @@ class CryptoDataLoader:
         return getattr(self, '_active_symbols_cache', set())
 
     def fetch_top_volume_usdt_pairs(self, limit: int = 110) -> list:
-        """Dynamically discovers and ranks active volatile crypto pairs by 24h volume (strictly active Binance TRADING spot pairs)."""
+        """Dynamically discovers and ranks active volatile crypto pairs by 24h volume (strictly active Binance TRADING spot pairs, top 110 cap)."""
+        limit = min(110, int(limit or 110))
         try:
-            print(f"[MARKET DISCOVERY] Querying all active [{self.active_exchange_id.upper()}] pairs by 24h trading volume...")
+            print(f"[MARKET DISCOVERY] Querying all active [{self.active_exchange_id.upper()}] pairs by 24h trading volume (Top {limit} Cap)...")
             active_symbols = self.fetch_active_binance_symbols()
             valid_pairs = []
 
@@ -921,9 +930,10 @@ class CryptoDataLoader:
 
             if valid_pairs:
                 valid_pairs.sort(key=lambda x: x[1], reverse=True)
-                top_pairs = [p[0] for p in valid_pairs[:limit] if is_valid_crypto_pair(p[0])]
+                top_pairs = [p[0] for p in valid_pairs if is_valid_crypto_pair(p[0])][:limit]
                 if "BTC/USDT" not in top_pairs:
                     top_pairs.insert(0, "BTC/USDT")
+                    top_pairs = top_pairs[:limit]
                 print(f"[MARKET DISCOVERY] Loaded Top {len(top_pairs)} Most Active [{self.active_exchange_id.upper()}] Pairs: {', '.join(top_pairs[:8])}...")
                 return top_pairs
 
