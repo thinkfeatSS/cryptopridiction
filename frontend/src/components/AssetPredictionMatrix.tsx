@@ -518,6 +518,27 @@ const AssetSingleHorizonRow = React.memo(function AssetSingleHorizonRow({
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
+const EXCLUDED_STABLECOIN_BASES = new Set([
+  "USDC", "FDUSD", "TUSD", "USDD", "DAI", "BUSD", "EUR", "TRY", "PAXG", "WBTC",
+  "USDP", "AEUR", "T", "USTC", "EURI", "USD", "EURR", "RLUSD", "USD1", "U", "USDE",
+  "PYUSD", "GUSD", "LUSD", "FRAX", "CUSD", "EURT", "XAUT", "XAU", "XAG", "XUSD",
+  "USDS", "USDX", "SUSD", "USDJ", "USDK", "USDQ", "USDM", "USDL", "BGBP", "BIDR",
+  "IDRT", "BVND", "VND", "BRL", "GBP", "AUD", "NGN", "ZAR", "RUB", "UAH", "PLN",
+  "RON", "CZK", "HUF", "ARS", "COP", "MXN", "PHP", "THB", "PAX", "TBTC", "BTCB",
+  "USDT", "EURS", "EURC", "USN", "CEUR"
+]);
+
+function isValidCryptoSymbol(symbol: string): boolean {
+  if (!symbol) return false;
+  const clean = symbol.trim().toUpperCase().replace(":USDT", "");
+  const base = clean.split("/")[0];
+  if (/^COIN\d+$/.test(base)) return false;
+  if (!/^[A-Z0-9]+$/.test(base)) return false;
+  if (EXCLUDED_STABLECOIN_BASES.has(base)) return false;
+  if (base.length > 4 && base.endsWith("B") && ["NVDAB", "CRCLB", "SPCXB", "SNDKB", "INTCB", "SOXLB", "MSTRB", "TSLAB", "QQQB", "COINB"].includes(base)) return false;
+  return true;
+}
+
 export default function AssetPredictionMatrix() {
   const { data: forecast, isLoading } = useForecastQuery();
   const { data: status } = useStatusQuery();
@@ -539,28 +560,29 @@ export default function AssetPredictionMatrix() {
   const activeHorizonKey: HorizonSortKey = sortHorizon || "scalp";
 
   // ── Stable per-symbol row cache (stable object references) ─────────────────
-  //
-  // Key insight: React.memo only prevents re-renders when props are shallowly
-  // equal. If we replace item objects every poll (even with identical data),
-  // every row re-renders. The fix: keep the SAME object reference in the cache
-  // unless the data actually changed (detected via server_prediction_time or
-  // a JSON fingerprint).
   const rowCacheRef = useRef<Map<string, any>>(new Map());
   // Tracks the insertion order of symbols (so table order is stable)
   const symbolOrderRef = useRef<string[]>([]);
 
   const rawLeaderboard = useMemo(
-    () => forecast?.scanner_leaderboard || [],
+    () => (forecast?.scanner_leaderboard || []).filter((item: any) => isValidCryptoSymbol(item.symbol)),
     [forecast?.scanner_leaderboard]
   );
 
-  // Merge incoming rows into the stable cache.
-  // Only replace a cached entry if the data has actually changed.
+  // Merge incoming rows into the stable cache, pruning stale/removed coins.
   useEffect(() => {
     const incoming = rawLeaderboard;
     if (incoming.length === 0) return;
 
-    const isNewSymbol = (sym: string) => !rowCacheRef.current.has(sym);
+    const freshSymbols = new Set(incoming.map((item: any) => item.symbol));
+
+    // Prune stale/deleted symbols from cache
+    Array.from(rowCacheRef.current.keys()).forEach((sym) => {
+      if (!freshSymbols.has(sym)) {
+        rowCacheRef.current.delete(sym);
+      }
+    });
+    symbolOrderRef.current = symbolOrderRef.current.filter((sym) => freshSymbols.has(sym));
 
     incoming.forEach((item: any) => {
       const sym = item.symbol;
@@ -569,41 +591,30 @@ export default function AssetPredictionMatrix() {
       if (!cached) {
         // Brand-new symbol – insert
         rowCacheRef.current.set(sym, item);
-        symbolOrderRef.current.push(sym);
+        if (!symbolOrderRef.current.includes(sym)) {
+          symbolOrderRef.current.push(sym);
+        }
       } else {
         // Only replace the reference when data actually changed.
-        // Use server_prediction_time as a fast change detector.
         const newTime = item.server_prediction_time || item.server_prediction_ts || item.timestamp || "";
         const oldTime = cached.server_prediction_time || cached.server_prediction_ts || cached.timestamp || "";
         if (newTime !== oldTime || cached._fingerprint !== JSON.stringify(item.horizons)) {
-          // Stamp a fingerprint so we can detect horizon-only changes too
           rowCacheRef.current.set(sym, { ...item, _fingerprint: JSON.stringify(item.horizons) });
         }
-        // else: keep the EXACT same object reference → React.memo skips re-render
       }
     });
   }, [rawLeaderboard]);
 
-  // Build a stable leaderboard from the cache.
-  // When rawLeaderboard is non-empty, honour the fresh order from the server
-  // while preserving any previously cached symbols so the 200-coin matrix never drops rows.
+  // Build a stable leaderboard strictly aligned with fresh server leaderboard.
   const leaderboard = useMemo(() => {
     if (rawLeaderboard.length === 0) {
-      // Between polls – return cached data so rows don't disappear
       return symbolOrderRef.current
         .map(sym => rowCacheRef.current.get(sym))
         .filter(Boolean);
     }
-    const freshSymbols = new Set(rawLeaderboard.map((item: any) => item.symbol));
-    const freshRows = rawLeaderboard.map((item: any) =>
+    return rawLeaderboard.map((item: any) =>
       rowCacheRef.current.get(item.symbol) ?? item
     );
-    const remainingRows = symbolOrderRef.current
-      .filter(sym => !freshSymbols.has(sym))
-      .map(sym => rowCacheRef.current.get(sym))
-      .filter(Boolean);
-
-    return [...freshRows, ...remainingRows];
   }, [rawLeaderboard]);
 
   // Set of symbols that are in the cache but NOT in the latest fetch → still scanning

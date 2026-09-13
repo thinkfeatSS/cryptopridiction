@@ -91,6 +91,60 @@ def _safe_sort_key(x):
     oscore = _safe_float(x.get('overall_score'), 0.0)
     return (bp, tc, -ci, -als, -oscore)
 
+EXCLUDED_STABLECOIN_BASES = {
+    "USDC", "FDUSD", "TUSD", "USDD", "DAI", "BUSD", "EUR", "TRY", "PAXG", "WBTC",
+    "USDP", "AEUR", "T", "USTC", "EURI", "USD", "EURR", "RLUSD", "USD1", "U", "USDE",
+    "PYUSD", "GUSD", "LUSD", "FRAX", "CUSD", "EURT", "XAUT", "XAU", "XAG", "XUSD",
+    "USDS", "USDX", "SUSD", "USDJ", "USDK", "USDQ", "USDM", "USDL", "BGBP", "BIDR",
+    "IDRT", "BVND", "VND", "BRL", "GBP", "AUD", "NGN", "ZAR", "RUB", "UAH", "PLN",
+    "RON", "CZK", "HUF", "ARS", "COP", "MXN", "PHP", "THB", "PAX", "TBTC", "BTCB",
+    "USDT", "EURS", "EURC", "USN", "CEUR", "CUSD", "OUSD", "USDP", "GUSD", "SUSD"
+}
+
+def is_valid_crypto_pair(symbol: str, price: float = None, high: float = None, low: float = None) -> bool:
+    if not symbol or not isinstance(symbol, str):
+        return False
+    clean_sym = symbol.strip().upper().replace(':USDT', '')
+    if '/' not in clean_sym and clean_sym.endswith('USDT'):
+        clean_sym = clean_sym[:-4] + '/USDT'
+    if not clean_sym.endswith('/USDT'):
+        return False
+    base = clean_sym.split('/')[0]
+    
+    # 1. Reject synthetic test tokens (COIN0..COIN99)
+    if base.startswith("COIN") and base[4:].isdigit():
+        return False
+    
+    # 2. Reject non-ascii / non-alphanumeric tokens (e.g. Chinese characters)
+    if not base.isalnum() or not base.isascii():
+        return False
+    
+    # 3. Reject leveraged / tokenized stocks ending with B (e.g. TSLAB, NVDAB, SPCXB, INTCB, SOXLB, MSTRB, CRCLB, SNDKB, QQQB, COINB)
+    if len(base) > 4 and base.endswith("B") and base not in {"SHIB", "FLOKI", "BOMB"}:
+        if base in {"NVDAB", "CRCLB", "SPCXB", "SNDKB", "INTCB", "SOXLB", "MSTRB", "TSLAB", "QQQB", "COINB", "AAPLB", "AMZNB", "GOOGLB", "METAB", "MSFTB"}:
+            return False
+            
+    # 4. Reject Leveraged Bull/Bear Tokens
+    if base.endswith("UP") or base.endswith("DOWN") or base.endswith("BULL") or base.endswith("BEAR") or base.endswith("3L") or base.endswith("3S") or base.endswith("2L") or base.endswith("2S"):
+        return False
+
+    # 5. Reject Known Stablecoins & Fiat Pegs
+    if base in EXCLUDED_STABLECOIN_BASES:
+        return False
+
+    # 6. Dynamic Price Peg Filter (~$1 peg with near zero volatility)
+    if price is not None and price > 0:
+        if 0.97 <= price <= 1.03:
+            if high is not None and low is not None and high > 0 and low > 0:
+                vol_spread = (high - low) / max(0.001, price)
+                if vol_spread < 0.035:
+                    return False
+            else:
+                if 0.99 <= price <= 1.01:
+                    return False
+
+    return True
+
 print("[SYSTEM] Running in High-Performance CPU Mode.")
 
 # ------------------------------------------------------------------------------
@@ -783,15 +837,10 @@ class CryptoDataLoader:
         return 0.0
 
     def fetch_top_volume_usdt_pairs(self, limit: int = 100) -> list:
-        """Dynamically discovers and ranks active volatile crypto pairs by 24h volume (strictly excluding all stablecoins)."""
+        """Dynamically discovers and ranks active volatile crypto pairs by 24h volume (strictly excluding all stablecoins & stock tokens)."""
         try:
             print(f"[MARKET DISCOVERY] Querying all active [{self.active_exchange_id.upper()}] pairs by 24h trading volume...")
             valid_pairs = []
-            excluded_bases = {
-                "USDC", "FDUSD", "TUSD", "USDD", "DAI", "BUSD", "EUR", "TRY", "PAXG", "WBTC",
-                "USDP", "AEUR", "T", "USTC", "EURI", "USD", "EURR", "RLUSD", "USD1", "U", "USDE",
-                "PYUSD", "GUSD", "LUSD", "FRAX", "CUSD", "EURT", "XAUT", "XAU", "XAG", "FDUSD"
-            }
 
             # 1. Direct Binance Vision 24h Tickers API
             if self.is_binance_vision_direct or self.active_exchange_id == 'binance':
@@ -804,20 +853,18 @@ class CryptoDataLoader:
                             if not raw_sym.endswith('USDT'):
                                 continue
                             base = raw_sym[:-4]
-                            if base in excluded_bases or base.endswith("UP") or base.endswith("DOWN") or base.endswith("BULL") or base.endswith("BEAR"):
-                                continue
+                            sym = f"{base}/USDT"
                             
                             last_p = float(item.get('lastPrice', 0.0) or 0.0)
                             high_p = float(item.get('highPrice', 0.0) or 0.0)
                             low_p = float(item.get('lowPrice', 0.0) or 0.0)
                             
-                            # Dynamic Stablecoin Peg Filter: discard fiat-pegged tokens (~$1 with negligible 24h volatility)
-                            if 0.98 <= last_p <= 1.02 and (high_p - low_p) / max(0.001, last_p) < 0.015:
+                            if not is_valid_crypto_pair(sym, price=last_p, high=high_p, low=low_p):
                                 continue
 
                             quote_vol = float(item.get('quoteVolume', 0.0) or 0.0)
                             if quote_vol > 1000000.0:  # Minimum $1M 24h volume
-                                valid_pairs.append((f"{base}/USDT", quote_vol))
+                                valid_pairs.append((sym, quote_vol))
                 except Exception as e:
                     print(f"[MARKET DISCOVERY] Note on Binance Vision 24h tickers: {e}")
 
@@ -827,11 +874,10 @@ class CryptoDataLoader:
                 for sym, t in tickers.items():
                     if not sym.endswith('/USDT'):
                         continue
-                    base = sym.split('/')[0]
-                    if base in excluded_bases or base.endswith("UP") or base.endswith("DOWN") or base.endswith("BULL") or base.endswith("BEAR") or base.endswith("3L") or base.endswith("3S"):
-                        continue
                     last_p = float(t.get('last', 0.0) or 0.0)
-                    if 0.98 <= last_p <= 1.02:
+                    high_p = float(t.get('high', 0.0) or 0.0)
+                    low_p = float(t.get('low', 0.0) or 0.0)
+                    if not is_valid_crypto_pair(sym, price=last_p, high=high_p, low=low_p):
                         continue
                     quote_vol = t.get('quoteVolume', 0.0) or t.get('baseVolume', 0.0) or 0.0
                     if quote_vol > 0:
@@ -839,7 +885,7 @@ class CryptoDataLoader:
 
             if valid_pairs:
                 valid_pairs.sort(key=lambda x: x[1], reverse=True)
-                top_pairs = [p[0] for p in valid_pairs[:limit]]
+                top_pairs = [p[0] for p in valid_pairs[:limit] if is_valid_crypto_pair(p[0])]
                 if "BTC/USDT" not in top_pairs:
                     top_pairs.insert(0, "BTC/USDT")
                 print(f"[MARKET DISCOVERY] Loaded Top {len(top_pairs)} Most Active [{self.active_exchange_id.upper()}] Pairs: {', '.join(top_pairs[:8])}...")
@@ -848,7 +894,7 @@ class CryptoDataLoader:
         except Exception as e:
             print(f"[WARNING] Could not fetch tickers from {self.active_exchange_id} ({e}). Using default universe.")
 
-        return [
+        default_universe = [
             "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT", "ADA/USDT",
             "AVAX/USDT", "SUI/USDT", "LINK/USDT", "NEAR/USDT", "APT/USDT", "DOT/USDT", "PEPE/USDT",
             "SHIB/USDT", "TIA/USDT", "INJ/USDT", "RENDER/USDT", "FET/USDT", "OP/USDT", "ARB/USDT",
@@ -864,7 +910,8 @@ class CryptoDataLoader:
             "BRETT/USDT", "1000SATS/USDT", "ORDI/USDT", "BIGTIME/USDT", "ETHFI/USDT", "EIGEN/USDT",
             "W/USDT", "SAFE/USDT", "ZK/USDT", "BANANA/USDT", "AKT/USDT", "ZETA/USDT", "BB/USDT",
             "LISTA/USDT", "VOXEL/USDT", "TRX/USDT", "BCH/USDT", "HBAR/USDT"
-        ][:limit]
+        ]
+        return [s for s in default_universe if is_valid_crypto_pair(s)][:limit]
 
 # ------------------------------------------------------------------------------
 # 3. ADVANCED FEATURE ENGINEERING MODULE
@@ -1279,66 +1326,72 @@ class TripleBarrierLabeler:
     def apply_barriers(df: pd.DataFrame, horizon_bars: int = 1, base_pt: float = 2.0, base_sl: float = 1.0):
         data = df.copy()
         n = len(data)
-        
-        primary_direction = np.zeros(n)
-        meta_label = np.zeros(n)
-        forward_return = np.zeros(n)
-        excursion_score = np.zeros(n)
-        
-        close = data['close'].values
-        high = data['high'].values
-        low = data['low'].values
-        atr = data['primary_raw_atr'].values
+        if n <= horizon_bars + 1:
+            data['Target_Primary'] = np.nan
+            data['Target_Meta'] = np.nan
+            data['Target_Return'] = np.nan
+            data['Excursion_Score'] = np.nan
+            return data
 
-        effective_limit = n - horizon_bars - 1
+        close = data['close'].values.astype(np.float64)
+        high = data['high'].values.astype(np.float64)
+        low = data['low'].values.astype(np.float64)
+        atr = np.nan_to_num(data['primary_raw_atr'].values.astype(np.float64), nan=0.0)
 
-        for i in range(effective_limit):
-            curr_c = close[i]
-            curr_atr = atr[i]
-            if np.isnan(curr_atr) or curr_atr <= 0:
-                continue
-            
-            future_c = close[i + horizon_bars]
-            exp_ret = (future_c - curr_c) / (curr_c + 1e-10)
-            forward_return[i] = exp_ret
-            primary_signal = 1 if exp_ret > 0 else 0
-            primary_direction[i] = primary_signal
-            
-            window_high = np.max(high[i+1 : i+horizon_bars+1])
-            window_low = np.min(low[i+1 : i+horizon_bars+1])
-            pt_price = curr_c + (base_pt * curr_atr)
-            sl_price = curr_c - (base_sl * curr_atr)
-            pt_short = curr_c - (base_pt * curr_atr)
-            sl_short = curr_c + (base_sl * curr_atr)
-            
-            # Adaptive Triple-Barrier Target Labeling with 0.85% minimum gain hurdle (Ensures high net profitability)
-            min_gain_hurdle = 0.0085 # 0.85% minimum return required to ensure robust profit after exchange fees
-            if primary_signal == 1:
-                fav_excursion = max(0.0, window_high - curr_c)
-                adv_excursion = max(0.0, curr_c - window_low)
-                hit_pt = window_high >= pt_price
-                hit_sl = window_low <= sl_price
-                excursion_score[i] = (fav_excursion + 1e-10) / (adv_excursion + 1e-10)
-                meta_label[i] = 1 if (hit_pt and not hit_sl) or (exp_ret >= min_gain_hurdle and fav_excursion >= (adv_excursion * 1.5)) else 0
-            else:
-                fav_excursion = max(0.0, curr_c - window_low)
-                adv_excursion = max(0.0, window_high - curr_c)
-                hit_pt = window_low <= pt_short
-                hit_sl = window_high >= sl_short
-                excursion_score[i] = (fav_excursion + 1e-10) / (adv_excursion + 1e-10)
-                meta_label[i] = 1 if (hit_pt and not hit_sl) or (exp_ret <= -min_gain_hurdle and fav_excursion >= (adv_excursion * 1.5)) else 0
+        # Future close after horizon_bars
+        future_c = np.roll(close, -horizon_bars)
+        exp_ret = (future_c - close) / (close + 1e-10)
+        primary_direction = (exp_ret > 0).astype(np.float32)
 
-        data['Target_Primary'] = primary_direction.astype(np.float32)
-        data['Target_Meta'] = meta_label.astype(np.float32)
-        data['Target_Return'] = forward_return.astype(np.float32)
-        data['Excursion_Score'] = excursion_score.astype(np.float32)
-        
+        # Forward rolling max and min over window [i+1 : i+horizon_bars+1]
+        high_s = pd.Series(high)
+        low_s = pd.Series(low)
+        window_high = high_s.iloc[::-1].rolling(horizon_bars, min_periods=1).max().iloc[::-1].shift(-1).values
+        window_low = low_s.iloc[::-1].rolling(horizon_bars, min_periods=1).min().iloc[::-1].shift(-1).values
+
+        window_high = np.nan_to_num(window_high, nan=close)
+        window_low = np.nan_to_num(window_low, nan=close)
+
+        # Target barriers
+        pt_long = close + (base_pt * atr)
+        sl_long = close - (base_sl * atr)
+        pt_short = close - (base_pt * atr)
+        sl_short = close + (base_sl * atr)
+
+        min_gain_hurdle = 0.0085
+
+        # Long scenario
+        fav_long = np.maximum(0.0, window_high - close)
+        adv_long = np.maximum(0.0, close - window_low)
+        hit_pt_long = window_high >= pt_long
+        hit_sl_long = window_low <= sl_long
+        meta_long = ((hit_pt_long & ~hit_sl_long) | ((exp_ret >= min_gain_hurdle) & (fav_long >= (adv_long * 1.5)))).astype(np.float32)
+        exc_long = (fav_long + 1e-10) / (adv_long + 1e-10)
+
+        # Short scenario
+        fav_short = np.maximum(0.0, close - window_low)
+        adv_short = np.maximum(0.0, window_high - close)
+        hit_pt_short = window_low <= pt_short
+        hit_sl_short = window_high >= sl_short
+        meta_short = ((hit_pt_short & ~hit_sl_short) | ((exp_ret <= -min_gain_hurdle) & (fav_short >= (adv_short * 1.5)))).astype(np.float32)
+        exc_short = (fav_short + 1e-10) / (adv_short + 1e-10)
+
+        # Combine based on primary_signal
+        is_long = (primary_direction == 1)
+        meta_label = np.where(is_long, meta_long, meta_short).astype(np.float32)
+        excursion_score = np.where(is_long, exc_long, exc_short).astype(np.float32)
+
+        data['Target_Primary'] = primary_direction
+        data['Target_Meta'] = meta_label
+        data['Target_Return'] = exp_ret.astype(np.float32)
+        data['Excursion_Score'] = excursion_score
+
         invalid_len = horizon_bars + 1
         data.iloc[-invalid_len:, data.columns.get_loc('Target_Primary')] = np.nan
         data.iloc[-invalid_len:, data.columns.get_loc('Target_Meta')] = np.nan
         data.iloc[-invalid_len:, data.columns.get_loc('Target_Return')] = np.nan
         data.iloc[-invalid_len:, data.columns.get_loc('Excursion_Score')] = np.nan
-        
+
         return data
 
 # ------------------------------------------------------------------------------
@@ -3139,9 +3192,11 @@ class HybridQuantEngine:
                     f_data = json.load(f)
                     for item in f_data.get("scanner_leaderboard", []):
                         if isinstance(item, dict) and "symbol" in item:
-                            self.master_matrix_universe[item["symbol"]] = item
+                            sym = item["symbol"]
+                            if is_valid_crypto_pair(sym):
+                                self.master_matrix_universe[sym] = item
                 if self.master_matrix_universe:
-                    print(f"[PREDICTION MATRIX 🌐] Preloaded {len(self.master_matrix_universe)} existing asset predictions into memory.")
+                    print(f"[PREDICTION MATRIX 🌐] Preloaded {len(self.master_matrix_universe)} valid asset predictions into memory.")
             except Exception:
                 pass
         os.makedirs(self.config['models_export_dir'], exist_ok=True)
@@ -3413,27 +3468,11 @@ class HybridQuantEngine:
             self.btc_shield_reason = "BALANCED MARKET"
             print(f"[SHIELD Note evaluating BTC regime: {e}")
 
-    def evaluate_single_horizon(self, symbol: str, horizon_key: str, h_cfg: dict, raw_dfs: dict, tf_features: dict, d1_macro_bull: bool, funding_info: dict = None, live_price: float = None) -> dict:
+    def evaluate_single_horizon(self, symbol: str, horizon_key: str, h_cfg: dict, fused_df: pd.DataFrame, d1_macro_bull: bool, funding_info: dict = None, live_price: float = None, model_inference_cache: dict = None, raw_dfs: dict = None) -> dict:
         anchor_tf = h_cfg['anchor_tf']
         bars = h_cfg['bars']
         tp_mult = h_cfg['tp_mult']
         sl_mult = h_cfg['sl_mult']
-
-        anchor_df = raw_dfs[anchor_tf].copy().sort_values('timestamp')
-        anchor_df['primary_raw_atr'] = self.fe.compute_atr(anchor_df, period=14)
-        anchor_df['primary_norm_atr'] = anchor_df['primary_raw_atr'] / (anchor_df['close'] + 1e-10)
-
-        fused_df = anchor_df.copy()
-        for tf_str, feat_df in tf_features.items():
-            fused_df = pd.merge_asof(
-                fused_df.sort_values('timestamp'),
-                feat_df.sort_values('timestamp'),
-                on='timestamp',
-                direction='backward'
-            )
-
-        if symbol != "BTC/USDT" and self.btc_cache:
-            fused_df = self.fe.inject_cross_asset_btc_beta(fused_df, self.btc_cache)
 
         labeled_df = self.labeler.apply_barriers(fused_df, horizon_bars=bars, base_pt=tp_mult, base_sl=sl_mult)
 
@@ -3457,24 +3496,27 @@ class HybridQuantEngine:
         non_feature_cols = ['timestamp', 'datetime', 'open', 'high', 'low', 'close', 'volume', 'taker_buy_vol', 'primary_raw_atr', 'primary_norm_atr', 'Target_Primary', 'Target_Meta', 'Target_Return', 'Excursion_Score']
         feature_cols = [c for c in clean_df.columns if c not in non_feature_cols]
 
-        X = clean_df[feature_cols].values
-        y_p = clean_df['Target_Primary'].values
-        y_m = clean_df['Target_Meta'].values
-        y_r = clean_df['Target_Return'].values
-
-        n = len(X)
-        if n < 10 or len(feature_cols) == 0:
-            # Low historical data fallback (e.g. newly listed or illiquid pair)
-            p_cat_live = 0.55 if d1_macro_bull else 0.45
-            p_xgb_live = 0.55 if d1_macro_bull else 0.45
-            p_lgb_live = 0.55 if d1_macro_bull else 0.45
-            p_et_live = 0.55 if d1_macro_bull else 0.45
-            w_cat, w_xgb, w_lgb, w_et = (0.25, 0.25, 0.25, 0.25)
-            elite_acc = 0.60
+        if model_inference_cache is not None and anchor_tf in model_inference_cache:
+            p_cat_live, p_xgb_live, p_lgb_live, p_et_live, w_cat, w_xgb, w_lgb, w_et, elite_acc = model_inference_cache[anchor_tf]
         else:
-            n_train = max(5, int(n * self.config['train_split']))
-            X_train, y_p_train, y_r_train = X[:n_train], y_p[:n_train].copy(), y_r[:n_train]
-            X_test, y_p_test = X[n_train:], y_p[n_train:]
+            X = clean_df[feature_cols].values
+            y_p = clean_df['Target_Primary'].values
+            y_m = clean_df['Target_Meta'].values
+            y_r = clean_df['Target_Return'].values
+
+            n = len(X)
+            if n < 10 or len(feature_cols) == 0:
+                # Low historical data fallback (e.g. newly listed or illiquid pair)
+                p_cat_live = 0.55 if d1_macro_bull else 0.45
+                p_xgb_live = 0.55 if d1_macro_bull else 0.45
+                p_lgb_live = 0.55 if d1_macro_bull else 0.45
+                p_et_live = 0.55 if d1_macro_bull else 0.45
+                w_cat, w_xgb, w_lgb, w_et = (0.25, 0.25, 0.25, 0.25)
+                elite_acc = 0.60
+            else:
+                n_train = max(5, int(n * self.config['train_split']))
+                X_train, y_p_train, y_r_train = X[:n_train], y_p[:n_train].copy(), y_r[:n_train]
+                X_test, y_p_test = X[n_train:], y_p[n_train:]
 
             # Prevent CatBoost / XGBoost "Target contains only one unique value" crash
             unique_classes = np.unique(y_p_train)
@@ -3595,6 +3637,9 @@ class HybridQuantEngine:
                     }
                     if len(self.model_cache) > 3000:
                         self._prune_model_cache(max_size=2500, max_age_seconds=86400 * 14)
+
+            if model_inference_cache is not None:
+                model_inference_cache[anchor_tf] = (p_cat_live, p_xgb_live, p_lgb_live, p_et_live, w_cat, w_xgb, w_lgb, w_et, elite_acc)
 
         # 1. Base ML Direction & Calibrated Probability with Hysteresis Smoothing
         h_prob = (p_cat_live * w_cat) + (p_xgb_live * w_xgb) + (p_lgb_live * w_lgb) + (p_et_live * w_et)
@@ -3985,11 +4030,36 @@ class HybridQuantEngine:
         d1_ema200 = pd.Series(d1_c).ewm(span=200).mean().values[-1]
         d1_macro_bull = (d1_c[-1] > d1_ema50) or (d1_ema50 > d1_ema200)
 
+        # Pre-build fused_dfs for the 4 anchor timeframes once
+        fused_dfs = {}
+        for a_tf in ['15m', '1h', '4h', '1d']:
+            if a_tf not in raw_dfs:
+                continue
+            anchor_df = raw_dfs[a_tf].copy().sort_values('timestamp')
+            anchor_df['primary_raw_atr'] = self.fe.compute_atr(anchor_df, period=14)
+            anchor_df['primary_norm_atr'] = anchor_df['primary_raw_atr'] / (anchor_df['close'] + 1e-10)
+            fused = anchor_df.copy()
+            for tf_str, feat_df in tf_features.items():
+                fused = pd.merge_asof(
+                    fused.sort_values('timestamp'),
+                    feat_df.sort_values('timestamp'),
+                    on='timestamp',
+                    direction='backward'
+                )
+            if symbol != "BTC/USDT" and self.btc_cache:
+                fused = self.fe.inject_cross_asset_btc_beta(fused, self.btc_cache)
+            fused_dfs[a_tf] = fused
+
+        model_inference_cache = {}
         # Evaluate all horizons simultaneously: Scalp (15M), Swing (1H), Macro (24H), etc.
         horizon_results = {}
         for h_key, h_cfg in self.config['horizons'].items():
+            a_tf = h_cfg['anchor_tf']
+            fused_df = fused_dfs.get(a_tf, raw_dfs.get(a_tf))
+            if fused_df is None:
+                continue
             horizon_results[h_key] = self.evaluate_single_horizon(
-                symbol, h_key, h_cfg, raw_dfs, tf_features, d1_macro_bull, funding_info, live_price=live_price
+                symbol, h_key, h_cfg, fused_df, d1_macro_bull, funding_info, live_price=live_price, model_inference_cache=model_inference_cache, raw_dfs=raw_dfs
             )
 
         # Multi-Horizon Alignment & Confluence Diagnostics
@@ -4240,6 +4310,12 @@ class HybridQuantEngine:
             print(f" 🛰️ RUNNING CONCURRENT MULTI-HORIZON SCANNER ({len(symbols_to_scan)} {self.loader.active_exchange_id.upper()} Assets in Parallel)...")
             print("=" * 95)
 
+            # Clean and prune master_matrix_universe to active valid symbols_to_scan only
+            valid_set = set(symbols_to_scan)
+            stale_keys = [k for k in list(self.master_matrix_universe.keys()) if k not in valid_set or not is_valid_crypto_pair(k)]
+            for k in stale_keys:
+                self.master_matrix_universe.pop(k, None)
+
             # Ensure all discovered pairs are present in the master matrix universe from second 1
             all_tickers = self.loader.fetch_all_tickers(max_age_seconds=5.0)
             for sym in symbols_to_scan:
@@ -4268,7 +4344,7 @@ class HybridQuantEngine:
             scan_deadline_seconds = max(2700.0, len(symbols_to_scan) * 20.0)
             last_partial_sync_ts = time.time()
             last_synced_count = 0
-            max_threads = min(int(self.config.get('max_scan_workers', 12)), len(symbols_to_scan))
+            max_threads = min(int(self.config.get('max_scan_workers', 16)), len(symbols_to_scan))
             executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
                 future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in symbols_to_scan}
@@ -5041,11 +5117,11 @@ class HybridQuantEngine:
         # Update master matrix universe with fresh results
         if getattr(self, 'master_matrix_universe', None) is not None:
             for r in scanner_results:
-                if isinstance(r, dict) and 'symbol' in r:
+                if isinstance(r, dict) and 'symbol' in r and is_valid_crypto_pair(r['symbol']):
                     self.master_matrix_universe[r['symbol']] = r
-            leaderboard_list = list(self.master_matrix_universe.values())
+            leaderboard_list = [item for item in self.master_matrix_universe.values() if isinstance(item, dict) and is_valid_crypto_pair(item.get('symbol'))]
         else:
-            leaderboard_list = list(scanner_results)
+            leaderboard_list = [item for item in scanner_results if isinstance(item, dict) and is_valid_crypto_pair(item.get('symbol'))]
 
         leaderboard_sorted = sorted(leaderboard_list, key=_safe_sort_key)
 
