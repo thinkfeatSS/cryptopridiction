@@ -107,9 +107,9 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
       </div>
 
       {/* Filter Ribbon */}
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-7">
+      <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-2.5 sm:gap-3">
         {/* Search Input */}
-        <div className="relative md:col-span-2">
+        <div className="relative sm:col-span-2 md:col-span-2">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
           <input
             type="text"
@@ -208,7 +208,7 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
       </div>
 
       {/* Interactive Data Table */}
-      <div className="mt-4 overflow-x-auto rounded-xl border border-slate-800/80">
+      <div className="mt-4 overflow-x-auto touch-scroll rounded-xl border border-slate-800/80 shadow-inner">
         <table className="w-full text-left text-xs text-slate-300">
           <thead className="bg-dark-900/90 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
             <tr>
@@ -359,8 +359,8 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
       </div>
 
       {/* Pagination Footer */}
-      <div className="mt-4 flex items-center justify-between text-xs text-slate-400 border-t border-slate-800/80 pt-3">
-        <span>
+      <div className="mt-4 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-400 border-t border-slate-800/80 pt-3 gap-3">
+        <span className="text-center sm:text-left text-[11px] sm:text-xs">
           Showing {signals.length > 0 ? page * pageSize + 1 : 0} to{" "}
           {Math.min((page + 1) * pageSize, total)} of {total} signals
         </span>
@@ -373,7 +373,7 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
           >
             <ChevronLeft className="h-3.5 w-3.5" /> Previous
           </button>
-          <span className="font-mono text-slate-300 font-bold">
+          <span className="font-mono text-slate-300 font-bold px-1 text-xs">
             Page {page + 1} of {Math.max(1, totalPages)}
           </span>
           <button

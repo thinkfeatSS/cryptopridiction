@@ -11,6 +11,9 @@ import {
   TrendingUp,
   TrendingDown,
   Compass,
+  Sparkles,
+  Gauge,
+  Layers,
 } from "lucide-react";
 import { getShieldTheme } from "@/lib/marketShield";
 
@@ -37,6 +40,17 @@ export default function MarketShieldBanner() {
   const isSqueeze = shield.is_squeeze;
   const bbw15m = shield.bbw_15m_pct;
 
+  // Predictive Trend & Price Projection Properties
+  const predictedTrend = shield.predicted_trend || "CONSOLIDATION";
+  const trendProb = shield.trend_probability ?? 60.0;
+  const bullProb = shield.bull_trend_prob ?? 30.0;
+  const bearProb = shield.bear_trend_prob ?? 20.0;
+  const consProb = shield.consolidation_prob ?? 50.0;
+  const predTarget = shield.predicted_btc_target;
+  const predChangePct = shield.predicted_btc_change_pct ?? 0.0;
+  const breakoutPred = shield.breakout_prediction || "⚖️ RANGE BOUND";
+  const altcoinPosture = shield.altcoin_posture || "STANDARD_EXECUTION";
+
   // Visual container styling based on market regime
   const containerStyle = shield.active
     ? "border-rose-500/70 bg-gradient-to-r from-rose-950/50 via-dark-900/90 to-red-950/40 shadow-lg shadow-rose-500/15"
@@ -57,7 +71,8 @@ export default function MarketShieldBanner() {
       {/* Background ambient glow */}
       <div className={`absolute -top-10 -right-10 h-36 w-36 rounded-full blur-3xl pointer-events-none ${theme.glowBg}`} />
 
-      <div className="flex flex-col gap-3.5 sm:flex-row sm:items-center sm:justify-between relative z-10">
+      {/* Row 1: Header, Main Stance, Predictive Probability Radar & Target Projection */}
+      <div className="flex flex-col gap-3.5 xl:flex-row xl:items-center xl:justify-between relative z-10">
         {/* Left Section: Icon & Main Status */}
         <div className="flex items-start sm:items-center gap-3.5">
           <div
@@ -112,17 +127,66 @@ export default function MarketShieldBanner() {
           </div>
         </div>
 
-        {/* Right Section: Quant Safeguard Tags & Live Metric Chips */}
-        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto shrink-0">
-          {compositeScore !== undefined && (
-            <div className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-dark-950/80 px-2.5 py-1 text-[11px] text-slate-300 font-mono">
-              <span className="text-slate-400">Score:</span>
-              <span className={`font-black ${compositeScore >= 20 ? "text-emerald-400" : compositeScore <= -20 ? "text-rose-400" : "text-cyan-300"}`}>
-                {compositeScore > 0 ? `+${compositeScore}` : compositeScore}
+        {/* Predictive Trend Radar & Forecast Probabilities */}
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 bg-dark-950/80 p-2.5 rounded-xl border border-slate-800/90">
+          <div className="flex flex-col gap-1 min-w-[200px]">
+            <div className="flex items-center justify-between text-[11px] font-mono">
+              <span className="text-slate-400 font-bold flex items-center gap-1">
+                <Gauge className="h-3.5 w-3.5 text-cyan-400" />
+                Forecast Radar:
+              </span>
+              <span className={`font-black ${predictedTrend === "BULLISH" ? "text-emerald-400" : predictedTrend === "BEARISH" ? "text-rose-400" : "text-indigo-300"}`}>
+                {predictedTrend} ({trendProb}%)
+              </span>
+            </div>
+            
+            {/* 3-Way Probability Bar */}
+            <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden flex">
+              <div
+                style={{ width: `${bullProb}%` }}
+                className="bg-emerald-500 h-full transition-all duration-500"
+                title={`Bullish Trend Probability: ${bullProb}%`}
+              />
+              <div
+                style={{ width: `${consProb}%` }}
+                className="bg-indigo-500 h-full transition-all duration-500"
+                title={`Consolidation Probability: ${consProb}%`}
+              />
+              <div
+                style={{ width: `${bearProb}%` }}
+                className="bg-rose-500 h-full transition-all duration-500"
+                title={`Bearish Breakdown Probability: ${bearProb}%`}
+              />
+            </div>
+
+            <div className="flex items-center justify-between text-[9.5px] font-mono text-slate-400">
+              <span className="text-emerald-400">🟢 Bull: {bullProb}%</span>
+              <span className="text-indigo-300">⚪ Cons: {consProb}%</span>
+              <span className="text-rose-400">🔴 Bear: {bearProb}%</span>
+            </div>
+          </div>
+
+          {/* Predicted BTC Price Target */}
+          {predTarget !== undefined && predTarget > 0 && (
+            <div className="flex flex-col border-l sm:border-slate-800/80 sm:pl-3">
+              <span className="text-[10px] text-purple-300 font-bold uppercase tracking-wider flex items-center gap-1">
+                <Sparkles className="h-3 w-3 text-purple-400" />
+                Predicted BTC Target
+              </span>
+              <span className="text-sm font-mono font-black text-white mt-0.5">
+                ${predTarget.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}{" "}
+                <span className={`text-[11px] font-bold ${predChangePct >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                  ({predChangePct >= 0 ? "+" : ""}{predChangePct}%)
+                </span>
               </span>
             </div>
           )}
+        </div>
+      </div>
 
+      {/* Row 2: Live Metric Chips & Quantitative Safeguard Flags */}
+      <div className="mt-3.5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/60 pt-3 relative z-10 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
           {btcPrice !== undefined && btcPrice > 0 && (
             <div className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-dark-950/80 px-2.5 py-1 text-[11px] text-slate-300 font-mono">
               <span className="text-slate-400">BTC:</span>
@@ -162,10 +226,12 @@ export default function MarketShieldBanner() {
             </div>
           )}
 
-          {isSqueeze && (
-            <div className="hidden lg:flex items-center gap-1.5 rounded-lg border border-indigo-500/50 bg-indigo-950/60 px-2.5 py-1 text-[11px] text-indigo-300 font-mono animate-pulse">
-              <Activity className="h-3 w-3 text-indigo-400 inline" />
-              <span>Squeeze {bbw15m ? `(${bbw15m}%)` : ""}</span>
+          {compositeScore !== undefined && (
+            <div className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-dark-950/80 px-2.5 py-1 text-[11px] text-slate-300 font-mono">
+              <span className="text-slate-400">Score:</span>
+              <span className={`font-black ${compositeScore >= 20 ? "text-emerald-400" : compositeScore <= -20 ? "text-rose-400" : "text-cyan-300"}`}>
+                {compositeScore > 0 ? `+${compositeScore}` : compositeScore}
+              </span>
             </div>
           )}
 
@@ -177,17 +243,26 @@ export default function MarketShieldBanner() {
               </span>
             </div>
           )}
+        </div>
 
-          {trendStructure && (
-            <div className="hidden xl:flex items-center gap-1.5 rounded-lg border border-slate-800 bg-dark-950/80 px-2.5 py-1 text-[11px] text-slate-300 font-mono">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Breakout Forecast Badge */}
+          {breakoutPred && (
+            <div className="flex items-center gap-1.5 rounded-lg border border-indigo-500/50 bg-indigo-950/60 px-2.5 py-1 text-[11px] text-indigo-300 font-mono">
               <Compass className="h-3.5 w-3.5 text-indigo-400" />
-              <span>{trendStructure}</span>
+              <span>{breakoutPred}</span>
             </div>
           )}
 
+          {/* Altcoin Posture Strategy Badge */}
           <div className="flex items-center gap-1.5 rounded-lg border border-slate-800 bg-dark-950/80 px-2.5 py-1 text-[11px] text-slate-300 font-mono">
             <Zap className="h-3.5 w-3.5 text-indigo-400" />
-            <span>Corr Guard: <strong className={shield.active ? "text-rose-400" : "text-emerald-400"}>{shield.active ? "Enforcing" : "Armed"}</strong></span>
+            <span>
+              Altcoins:{" "}
+              <strong className={shield.active ? "text-rose-400" : "text-emerald-400"}>
+                {shield.active ? "🛡️ Longs Paused" : "🟢 Longs Allowed"}
+              </strong>
+            </span>
           </div>
         </div>
       </div>

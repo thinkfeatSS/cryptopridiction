@@ -3,6 +3,7 @@
 import React, { useState, useMemo } from "react";
 import KpiMetrics from "@/components/KpiMetrics";
 import BtcSignalSection from "@/components/BtcSignalSection";
+import TraderRegimePlaybookComponent from "@/components/TraderRegimePlaybook";
 import SignalCard from "@/components/SignalCard";
 import AssetPredictionMatrix from "@/components/AssetPredictionMatrix";
 import DailySignalsView from "@/components/DailySignalsView";
@@ -213,15 +214,15 @@ export default function DashboardPage() {
           </div>
 
           {/* Controls Bar: Direction Filters + Return Filters + Horizon Category Tabs */}
-          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 mb-4 bg-dark-900/80 p-2.5 rounded-2xl border border-slate-800/90">
+          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3 mb-4 bg-dark-900/80 p-2.5 sm:p-3 rounded-2xl border border-slate-800/90 shadow-sm">
             <div className="flex flex-wrap items-center gap-2">
               {/* Direction Filter Buttons */}
-              <div className="flex items-center gap-1.5 bg-dark-950/90 p-1 rounded-xl border border-slate-800 shrink-0">
-                <span className="text-[10px] uppercase font-bold text-slate-500 px-2 font-mono">Side:</span>
+              <div className="flex items-center gap-1 sm:gap-1.5 bg-dark-950/90 p-1 rounded-xl border border-slate-800 shrink-0 flex-wrap">
+                <span className="text-[10px] uppercase font-bold text-slate-500 px-1.5 sm:px-2 font-mono">Side:</span>
                 <button
                   type="button"
                   onClick={() => setDirectionFilter("ALL")}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                  className={`px-2.5 sm:px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
                     directionFilter === "ALL"
                       ? "bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 shadow-sm"
                       : "text-slate-400 hover:text-white hover:bg-slate-800/50"
@@ -232,7 +233,7 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={() => setDirectionFilter("LONG")}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+                  className={`px-2.5 sm:px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1 sm:gap-1.5 ${
                     directionFilter === "LONG"
                       ? "bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 shadow-sm shadow-emerald-500/20"
                       : "text-slate-400 hover:text-emerald-300 hover:bg-slate-800/50"
@@ -246,7 +247,7 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={() => setDirectionFilter("SHORT")}
-                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 ${
+                  className={`px-2.5 sm:px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1 sm:gap-1.5 ${
                     directionFilter === "SHORT"
                       ? "bg-rose-500/25 text-rose-300 border border-rose-500/50 shadow-sm shadow-rose-500/20"
                       : "text-slate-400 hover:text-rose-300 hover:bg-slate-800/50"
@@ -260,12 +261,12 @@ export default function DashboardPage() {
               </div>
 
               {/* Minimum Return Filter Buttons */}
-              <div className="flex items-center gap-1 bg-dark-950/90 p-1 rounded-xl border border-slate-800 shrink-0">
-                <span className="text-[10px] uppercase font-bold text-slate-500 px-2 font-mono">Target Gain:</span>
+              <div className="flex items-center gap-1 bg-dark-950/90 p-1 rounded-xl border border-slate-800 shrink-0 flex-wrap">
+                <span className="text-[10px] uppercase font-bold text-slate-500 px-1.5 sm:px-2 font-mono">Gain:</span>
                 <button
                   type="button"
                   onClick={() => setMinReturnFilter(0)}
-                  className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all ${
+                  className={`px-2 sm:px-2.5 py-1 text-xs font-bold rounded-lg transition-all ${
                     minReturnFilter === 0
                       ? "bg-cyan-500/25 text-cyan-200 border border-cyan-500/40"
                       : "text-slate-400 hover:text-white hover:bg-slate-800/50"
@@ -276,18 +277,18 @@ export default function DashboardPage() {
                 <button
                   type="button"
                   onClick={() => setMinReturnFilter(3)}
-                  className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${
+                  className={`px-2 sm:px-2.5 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${
                     minReturnFilter === 3
                       ? "bg-emerald-500/25 text-emerald-300 border border-emerald-500/50 shadow-sm"
                       : "text-slate-400 hover:text-emerald-300 hover:bg-slate-800/50"
                   }`}
                 >
-                  🎯 ≥ 3% (High Yield)
+                  🎯 ≥ 3%
                 </button>
                 <button
                   type="button"
                   onClick={() => setMinReturnFilter(5)}
-                  className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${
+                  className={`px-2 sm:px-2.5 py-1 text-xs font-bold rounded-lg transition-all flex items-center gap-1 ${
                     minReturnFilter === 5
                       ? "bg-amber-500/25 text-amber-300 border border-amber-500/50 shadow-sm"
                       : "text-slate-400 hover:text-amber-300 hover:bg-slate-800/50"
@@ -299,7 +300,7 @@ export default function DashboardPage() {
             </div>
 
             {/* Horizon Category Tabs */}
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 max-w-full">
+            <div className="flex items-center gap-1.5 overflow-x-auto touch-scroll no-scrollbar pb-1 max-w-full">
               {horizonCategories.map((cat) => {
                 const count = getHorizonCount(cat.tag);
                 const isActive = activeHorizon === cat.tag;
@@ -308,7 +309,7 @@ export default function DashboardPage() {
                     key={cat.key}
                     type="button"
                     onClick={() => setActiveHorizon(cat.tag)}
-                    className={`flex items-center gap-1.5 whitespace-nowrap rounded-xl px-2.5 py-1.5 text-xs font-bold transition-all ${
+                    className={`flex items-center gap-1.5 whitespace-nowrap rounded-xl px-2.5 sm:px-3 py-1.5 text-xs font-bold transition-all shrink-0 ${
                       isActive
                         ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/50 shadow-sm shadow-cyan-500/20"
                         : "bg-dark-950 text-slate-400 hover:text-slate-200 border border-slate-800/80"
@@ -337,7 +338,7 @@ export default function DashboardPage() {
               Loading actionable institutional setup cards across horizons...
             </div>
           ) : filteredTopSignals.length === 0 ? (
-            <div className="glass-panel rounded-2xl p-8 text-center text-slate-400 border border-slate-800">
+            <div className="glass-panel rounded-2xl p-6 sm:p-8 text-center text-slate-400 border border-slate-800">
               <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-dark-900 border border-slate-800 text-slate-500 mb-2">
                 <Zap className="h-5 w-5" />
               </div>
@@ -353,7 +354,7 @@ export default function DashboardPage() {
               </p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {filteredTopSignals.map((sig: any, idx: number) => (
                 <SignalCard key={sig.signal_id || `${sig.symbol}-${idx}`} signal={sig} rankIndex={idx} />
               ))}
@@ -361,7 +362,10 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* 1.2 Dedicated Bitcoin (BTC) Intelligence & Command Station */}
+        {/* 1.2 Institutional Trader Regime Playbook & Tactical Best Practices */}
+        <TraderRegimePlaybookComponent />
+
+        {/* 1.3 Dedicated Bitcoin (BTC) Intelligence & Command Station */}
         <BtcSignalSection />
 
         {/* 1.3 Executive Performance KPI Summary Ribbon */}

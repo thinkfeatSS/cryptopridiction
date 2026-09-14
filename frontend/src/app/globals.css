@@ -30,6 +30,29 @@ body {
   background: #334155;
 }
 
+/* Touch friendly momentum scrolling & scrollbar utilities */
+.touch-scroll {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Sticky First Column for responsive data tables */
+.sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 10;
+  background-color: rgba(12, 16, 23, 0.95);
+  backdrop-filter: blur(8px);
+}
+
 /* Glassmorphism Classes */
 .glass-panel {
   background: rgba(17, 23, 34, 0.75);

@@ -33,7 +33,7 @@ export default function KpiMetrics() {
   const openTradesCount = portfolio?.open_positions?.length ?? 0;
 
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3 sm:gap-4">
       {/* 1. Decisive Win Rate */}
       <div className="glass-panel glass-panel-hover rounded-2xl p-4 relative overflow-hidden">
         <div className="absolute top-0 right-0 h-24 w-24 bg-cyan-500/10 rounded-full blur-2xl pointer-events-none" />

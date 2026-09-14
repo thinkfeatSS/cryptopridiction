@@ -223,8 +223,13 @@ function renderSignalCell(h?: any) {
     badgeStyle = "bg-rose-950/50 text-rose-400 border-rose-800/60";
   }
 
+  const predNextPrice = h.predicted_next_price;
+  const predReturnPct = h.predicted_return_pct;
+  const isHypeSurge = h.is_hype_surge;
+  const isBlowoffTop = h.is_blowoff_top;
+
   return (
-    <div className="flex flex-col gap-1 py-1 min-w-[170px] max-w-[240px]">
+    <div className="flex flex-col gap-1 py-1 min-w-[175px] max-w-[250px]">
       {/* Line 1: Direction & Conviction % & ML Win Prob */}
       <div className="flex items-center justify-between gap-1 font-mono text-[11px] leading-tight">
         <div className="flex items-center gap-1">
@@ -251,20 +256,43 @@ function renderSignalCell(h?: any) {
         </span>
       </div>
 
-      {/* Line 2: Take Profit & Stop Loss targets */}
+      {/* Line 2: Continuous ML Next Price Target Regression */}
+      {predNextPrice && (
+        <div className="text-[10.5px] font-mono text-purple-200 bg-purple-950/40 px-1.5 py-0.5 rounded border border-purple-500/20 flex items-center justify-between">
+          <span className="text-purple-300 font-bold">🔮 ML Target:</span>
+          <span>
+            {formatUsd(predNextPrice)}{" "}
+            <span className={predReturnPct >= 0 ? "text-emerald-400 font-semibold" : "text-rose-400 font-semibold"}>
+              ({predReturnPct >= 0 ? "+" : ""}{predReturnPct}%)
+            </span>
+          </span>
+        </div>
+      )}
+
+      {/* Line 3: Take Profit & Stop Loss targets */}
       <div className="text-[10px] font-mono text-slate-400 whitespace-nowrap leading-tight">
         <span>TP: <strong className="text-emerald-400">{formatUsd(h.tp_price)}</strong></span>
         <span className="mx-1 text-slate-600">|</span>
         <span>SL: <strong className="text-rose-400">{formatUsd(h.sl_price)}</strong></span>
       </div>
 
-      {/* Line 3: Signal Strength / Filter Badge */}
-      <div className="mt-0.5">
+      {/* Line 4: Signal Strength / Filter Badge & Hype Alerts */}
+      <div className="mt-0.5 flex flex-col gap-0.5">
         <span
           className={`inline-block rounded px-1.5 py-0.5 text-[9.5px] font-bold font-sans border tracking-tight leading-snug whitespace-normal ${badgeStyle}`}
         >
           {decision}
         </span>
+        {isBlowoffTop && (
+          <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-500 animate-pulse text-center">
+            🛑 BLOW-OFF TOP
+          </span>
+        )}
+        {isHypeSurge && !isBlowoffTop && (
+          <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-500 animate-pulse text-center">
+            🚀 HYPE PUMP
+          </span>
+        )}
       </div>
     </div>
   );
@@ -294,9 +322,14 @@ function AssetConfluenceCell({
   const relTime = useRelativeTime(itemTime);
   const formattedTime = formatServerPredictionTime(itemTime);
 
+  const btcTag = item.btc_alignment_tag;
+  const btcLabel = item.btc_alignment_label;
+  const isHype = item.is_hype_surge;
+  const isBlowoff = item.is_blowoff_top;
+
   return (
-    <td className="py-3 px-4 min-w-[215px]">
-      <div className="flex items-start gap-2">
+    <td className="py-3 px-3 sm:px-4 min-w-[210px] sm:min-w-[235px] sticky-col shadow-md border-r border-slate-800/80">
+      <div className="flex items-start gap-1.5 sm:gap-2">
         <button
           type="button"
           onClick={(e) => {
@@ -342,6 +375,37 @@ function AssetConfluenceCell({
               ({formatUsd(livePrice)})
             </span>
           </div>
+
+          {/* BTC Alignment & Systematic Beta Badge */}
+          {btcLabel && (
+            <div className="flex items-center gap-1 mt-0.5">
+              <span
+                className={`text-[9.5px] font-bold px-1.5 py-0.2 rounded border ${
+                  btcTag === "BEAR_SENSITIVE_LEVERAGED"
+                    ? "bg-rose-950/80 text-rose-300 border-rose-500/50"
+                    : btcTag === "INVERSE_BTC_HEDGE"
+                    ? "bg-indigo-950/80 text-indigo-300 border-indigo-500/50"
+                    : btcTag === "DECOUPLED_INDEPENDENT"
+                    ? "bg-amber-950/80 text-amber-300 border-amber-500/50"
+                    : "bg-emerald-950/80 text-emerald-300 border-emerald-500/50"
+                }`}
+                title={`BTC Correlation & Systematic Beta: ${btcLabel}`}
+              >
+                {btcLabel}
+              </span>
+            </div>
+          )}
+
+          {/* Hype Surge / Blow-off Top Indicator */}
+          {isBlowoff ? (
+            <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-500 animate-pulse w-fit">
+              🛑 BLOW-OFF TOP
+            </span>
+          ) : isHype ? (
+            <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-500 animate-pulse w-fit">
+              🚀 PARABOLIC HYPE
+            </span>
+          ) : null}
 
           {/* Small Date & Time of Prediction at Server + Relative Updates */}
           <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
@@ -1084,11 +1148,11 @@ export default function AssetPredictionMatrix() {
       </div>
 
       {/* Top 100 Assets Full Prediction Table */}
-      <div className="mt-4 overflow-x-auto rounded-xl border border-slate-800/80">
+      <div className="mt-4 overflow-x-auto touch-scroll rounded-xl border border-slate-800/80 shadow-inner">
         <table className="w-full text-left text-xs text-slate-300 font-mono">
-          <thead className="bg-dark-900/90 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
+          <thead className="bg-dark-900/95 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
             <tr>
-              <th className="py-3 px-4 min-w-[215px]"># / Asset &amp; Confluence</th>
+              <th className="py-3 px-3 sm:px-4 min-w-[210px] sm:min-w-[235px] sticky-col shadow-md border-r border-slate-800/80 bg-dark-900/95"># / Asset &amp; Confluence</th>
               {selectedHorizon === "all" || selectedHorizon === "high_confluence" || selectedHorizon === "high_yield" || selectedHorizon === "reversals" || selectedHorizon === "trend_expansion" || selectedHorizon === "watchlist" ? (
                 <>
                   {renderSortableHeader("scalp", "⚡ 15M")}

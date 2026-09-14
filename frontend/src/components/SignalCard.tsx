@@ -184,16 +184,61 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
         {/* Asset & Horizon Bar */}
         <div className="mt-3.5 flex items-center justify-between">
           <div>
-            <h3
-              onClick={() => setShowHistoryModal(true)}
-              className="text-xl font-black tracking-tight text-white flex items-center gap-1.5 cursor-pointer hover:text-cyan-400 transition-colors group"
-              title="Click to view historical signals for this coin"
-            >
-              {signal.symbol}
-              <History className="h-3.5 w-3.5 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-            </h3>
-            <span className="text-xs text-slate-400 flex items-center gap-1 mt-0.5">
-              <Clock className="h-3 w-3 text-cyan-400" /> {horizon}
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3
+                onClick={() => setShowHistoryModal(true)}
+                className="text-xl font-black tracking-tight text-white flex items-center gap-1.5 cursor-pointer hover:text-cyan-400 transition-colors group"
+                title="Click to view historical signals for this coin"
+              >
+                {signal.symbol}
+                <History className="h-3.5 w-3.5 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+              </h3>
+
+              {/* BTC Alignment Badge */}
+              {signal.btc_alignment_label && (
+                <span
+                  className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                    signal.btc_alignment_tag === "BEAR_SENSITIVE_LEVERAGED"
+                      ? "bg-rose-950/80 text-rose-300 border-rose-500/60"
+                      : signal.btc_alignment_tag === "INVERSE_BTC_HEDGE"
+                      ? "bg-indigo-950/80 text-indigo-300 border-indigo-500/60"
+                      : signal.btc_alignment_tag === "DECOUPLED_INDEPENDENT"
+                      ? "bg-amber-950/80 text-amber-300 border-amber-500/60"
+                      : "bg-emerald-950/80 text-emerald-300 border-emerald-500/60"
+                  }`}
+                  title="Cross-Asset BTC Correlation and Systematic Beta Contagion Status"
+                >
+                  {signal.btc_alignment_label}
+                </span>
+              )}
+
+              {/* Hype Surge / Blow-Off Top Alert */}
+              {signal.is_blowoff_top ? (
+                <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-500 animate-pulse">
+                  🛑 BLOW-OFF TOP REVERSAL
+                </span>
+              ) : signal.is_hype_surge ? (
+                <span className="text-[10px] font-extrabold px-2 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-500 animate-pulse">
+                  🚀 PARABOLIC HYPE SURGE
+                </span>
+              ) : null}
+
+              {/* Playbook Regime Directive Badge */}
+              {signal.playbook_regime && (
+                <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                  signal.playbook_regime === "BULLISH"
+                    ? "bg-emerald-950/60 text-emerald-300 border-emerald-500/40"
+                    : signal.playbook_regime === "BEARISH"
+                    ? "bg-rose-950/60 text-rose-300 border-rose-500/40"
+                    : "bg-indigo-950/60 text-indigo-300 border-indigo-500/40"
+                }`}>
+                  📖 {signal.playbook_regime} ({signal.playbook_sizing_multiplier || 1.0}x)
+                </span>
+              )}
+            </div>
+
+            <span className="text-xs text-slate-400 flex items-center gap-1 mt-1">
+              <Clock className="h-3 w-3 text-cyan-400" /> {signal.predicted_window_str || horizon}
             </span>
           </div>
 
@@ -206,7 +251,7 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
               </span>
             </div>
             <div className="flex items-center justify-end gap-1.5 text-xs font-mono mt-0.5">
-              <span className="text-purple-300 font-bold flex items-center gap-0.5">
+              <span className="text-purple-300 font-bold flex items-center gap-0.5" title="Per-Coin ML Meta-Classifier Win Probability">
                 🧠 {metaWinProb ? `${metaWinProb.toFixed(1)}%` : "75.0%"}
               </span>
               <span className="text-slate-600">|</span>
@@ -221,7 +266,7 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
           </div>
         </div>
 
-        {/* Price Target Matrix Grid (1:2 R:R) */}
+        {/* Price Target Matrix Grid (1:2 R:R) + ML Predicted Next Price */}
         <div className="mt-4 grid grid-cols-2 gap-2 rounded-xl bg-dark-900/90 p-3 border border-slate-800/80">
           <div className="flex flex-col">
             <div className="flex items-center gap-1.5">
@@ -258,6 +303,22 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
               <span className="text-[10px] text-rose-500 font-normal">(-{slPct.toFixed(2)}%)</span>
             </span>
           </div>
+
+          {/* Continuous ML Next Price Regression Target */}
+          {signal.predicted_next_price && (
+            <div className="flex items-center justify-between bg-dark-950/90 rounded-lg px-2.5 py-1.5 border border-purple-500/30 col-span-2">
+              <span className="text-[11px] font-bold text-purple-300 flex items-center gap-1">
+                <Sparkles className="h-3 w-3 text-purple-400" />
+                ML Regression Target Price:
+              </span>
+              <span className="text-xs font-mono font-black text-purple-200">
+                {formatUsd(signal.predicted_next_price)}{" "}
+                <span className={signal.predicted_return_pct >= 0 ? "text-emerald-400 font-medium" : "text-rose-400 font-medium"}>
+                  ({signal.predicted_return_pct >= 0 ? "+" : ""}{signal.predicted_return_pct}%)
+                </span>
+              </span>
+            </div>
+          )}
 
           <div className="flex flex-col border-t border-slate-800/60 pt-2 col-span-2">
             <span className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider flex items-center gap-1">

@@ -60,6 +60,32 @@ export interface DailySummaryItem {
   average_return_pct: number;
 }
 
+export interface TraderPlaybookSetup {
+  name: string;
+  desc: string;
+  tag: string;
+}
+
+export interface TraderPlaybookChecklistItem {
+  rule: string;
+  status: "REQUIRED" | "RECOMMENDED" | string;
+}
+
+export interface TraderPlaybook {
+  regime_type: "BULLISH" | "BEARISH" | "CONSOLIDATION" | string;
+  headline: string;
+  tactical_stance: string;
+  core_directive: string;
+  sizing_multiplier: number;
+  recommended_leverage: string;
+  target_risk_reward: string;
+  stop_loss_policy: string;
+  preferred_setups: TraderPlaybookSetup[];
+  dos: string[];
+  donts: string[];
+  checklist: TraderPlaybookChecklistItem[];
+}
+
 export interface BtcMarketShield {
   active: boolean;
   status_code?: "NORMAL" | "BULL_MOMENTUM" | "BEAR_MOMENTUM" | "CONSOLIDATION" | "CAUTION" | "DEFENSIVE" | "ALERT_DUMP" | string;
@@ -80,6 +106,17 @@ export interface BtcMarketShield {
   bbw_15m_pct?: number;
   vol_ratio?: number;
   altcoin_longs_allowed?: boolean;
+  predicted_trend?: "BULLISH" | "BEARISH" | "CONSOLIDATION" | string;
+  trend_probability?: number;
+  bull_trend_prob?: number;
+  bear_trend_prob?: number;
+  consolidation_prob?: number;
+  predicted_btc_target?: number;
+  predicted_btc_change_pct?: number;
+  breakout_prediction?: string;
+  altcoin_posture?: string;
+  market_phase_description?: string;
+  trader_playbook?: TraderPlaybook;
 }
 
 export interface EngineStatus {
@@ -198,6 +235,7 @@ export interface ForecastData {
   server_prediction_ts?: number;
   strategy: string;
   btc_market_shield?: BtcMarketShield;
+  trader_playbook?: TraderPlaybook;
   top_round_signals: any[];
   signals_by_horizon?: Record<string, any[]>;
   scanner_leaderboard: any[];

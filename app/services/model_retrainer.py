@@ -327,6 +327,35 @@ def run_retraining_pipeline(force: bool = False, min_new_samples: int = 5) -> Di
         joblib.dump(bundle, tmp_model_path)
         os.replace(tmp_model_path, META_MODEL_PATH)
 
+        # Save Dedicated Per-Coin Meta-Classifiers where sufficient history exists
+        per_coin_trained = 0
+        if 'symbol' in full_raw.columns:
+            for sym, sym_df in full_raw.groupby('symbol'):
+                clean_sym = sym.replace('/', '_').replace(':', '_')
+                sym_feat = extract_features_from_records(sym_df)
+                if len(sym_feat) >= 8 and len(sym_feat['target'].unique()) > 1:
+                    try:
+                        s_X = sym_feat[feature_cols]
+                        s_y = sym_feat['target']
+                        s_base = HistGradientBoostingClassifier(max_iter=80, max_depth=2, random_state=42)
+                        s_cal = CalibratedClassifierCV(estimator=s_base, method='sigmoid', cv=2)
+                        s_cal.fit(s_X, s_y)
+                        
+                        coin_dir = os.path.join(MODELS_DIR, "per_coin", clean_sym)
+                        os.makedirs(coin_dir, exist_ok=True)
+                        coin_meta_path = os.path.join(coin_dir, "meta_classifier.joblib")
+                        
+                        joblib.dump({
+                            'model': s_cal,
+                            'feature_cols': feature_cols,
+                            'symbol': sym,
+                            'sample_size': len(sym_feat),
+                            'trained_at_utc': datetime.now(timezone.utc).isoformat()
+                        }, coin_meta_path)
+                        per_coin_trained += 1
+                    except Exception:
+                        pass
+
         # Save Model Status JSON
         status_payload = {
             "model_path": META_MODEL_PATH,
@@ -338,6 +367,7 @@ def run_retraining_pipeline(force: bool = False, min_new_samples: int = 5) -> Di
             "accuracy_pct": round(acc * 100.0, 1),
             "auc_score": round(auc, 4),
             "precision_pct": round(prec * 100.0, 1),
+            "per_coin_models_count": per_coin_trained,
             "feature_cols": feature_cols,
             "has_lightgbm": HAS_LIGHTGBM
         }
@@ -350,10 +380,10 @@ def run_retraining_pipeline(force: bool = False, min_new_samples: int = 5) -> Di
         _retrain_state["last_status"] = "SUCCESS"
         _retrain_state["retrain_count"] += 1
 
-        print(f"[MODEL RETRAIN] Retraining completed successfully! Samples: {total_resolved}, Acc: {acc*100:.1f}%, AUC: {auc:.3f}")
+        print(f"[MODEL RETRAIN] Retraining completed successfully! Samples: {total_resolved}, Acc: {acc*100:.1f}%, AUC: {auc:.3f}, Per-Coin: {per_coin_trained}")
         return {
             "success": True,
-            "message": "Model retrained and hot-reloaded successfully.",
+            "message": f"Model retrained successfully ({per_coin_trained} per-coin models created).",
             "metrics": status_payload,
             "status": "COMPLETED"
         }

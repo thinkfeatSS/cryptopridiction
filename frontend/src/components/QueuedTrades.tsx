@@ -62,7 +62,7 @@ export default function QueuedTrades() {
           </p>
         </div>
       ) : (
-        <div className="mt-4 overflow-x-auto rounded-xl border border-amber-900/40 bg-amber-950/10">
+        <div className="mt-4 overflow-x-auto touch-scroll rounded-xl border border-amber-900/40 bg-amber-950/10 shadow-inner">
           <table className="w-full text-left text-xs text-slate-300 font-mono">
             <thead className="bg-dark-900/95 uppercase text-[10px] font-bold tracking-wider text-amber-400/90 border-b border-amber-900/40">
               <tr>

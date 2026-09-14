@@ -39,8 +39,8 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
     };
   }
 
-  // 2. DEFENSIVE (BTC Dump / Circuit Breaker Active)
-  if (code === "DEFENSIVE" || regime === "DEFENSIVE" || isActive || reason.toUpperCase().includes("DEFENSIVE")) {
+  // 2. DEFENSIVE (BTC Dump / Circuit Breaker Active / High Bear Probability)
+  if (code === "DEFENSIVE" || regime === "DEFENSIVE" || isActive || reason.toUpperCase().includes("DEFENSIVE") || reason.toUpperCase().includes("CIRCUIT BREAKER")) {
     return {
       border: "border-rose-500/70 bg-rose-950/60 text-rose-300 shadow-rose-500/20 animate-pulse",
       iconColor: "text-rose-400",
@@ -93,8 +93,8 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
     };
   }
 
-  // 5. BULL_MOMENTUM / BULLISH EXPANSION
-  if (code === "BULL_MOMENTUM" || regime === "BULLISH" || reason.toUpperCase().includes("BULLISH")) {
+  // 5. BULL_MOMENTUM / PREDICTED BULLISH EXPANSION
+  if (code === "BULL_MOMENTUM" || regime === "BULLISH" || reason.toUpperCase().includes("BULLISH") || shield?.predicted_trend === "BULLISH") {
     return {
       border: "border-emerald-500/60 bg-emerald-950/40 text-emerald-300 shadow-emerald-500/25",
       iconColor: "text-emerald-400",
@@ -103,7 +103,7 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
       isAlert: false,
       badgeBg: "bg-emerald-500/20 text-emerald-300 border-emerald-500/50 shadow-sm shadow-emerald-500/15",
       glowBg: "bg-emerald-500/20",
-      headline: "🚀 Bullish Market Expansion Active",
+      headline: "🚀 Predicted Bullish Market Expansion",
       subline: "BTC momentum is accelerating upwards above key EMAs. Long continuation and breakout setups active.",
       label: "BULLISH EXPANSION",
       regimeBadge: "BULLISH REGIME",
@@ -111,8 +111,8 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
     };
   }
 
-  // 6. BEAR_MOMENTUM / BEARISH DRIFT / BREAKDOWN
-  if (code === "BEAR_MOMENTUM" || regime === "BEARISH" || reason.toUpperCase().includes("BEARISH")) {
+  // 6. BEAR_MOMENTUM / PREDICTED BEARISH BREAKDOWN
+  if (code === "BEAR_MOMENTUM" || regime === "BEARISH" || reason.toUpperCase().includes("BEARISH") || shield?.predicted_trend === "BEARISH") {
     return {
       border: "border-orange-500/60 bg-orange-950/40 text-orange-300 shadow-orange-500/20",
       iconColor: "text-orange-400",
@@ -121,7 +121,7 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
       isAlert: false,
       badgeBg: "bg-orange-500/20 text-orange-300 border-orange-500/50 shadow-sm shadow-orange-500/15",
       glowBg: "bg-orange-500/20",
-      headline: "🐻 Bearish Breakdown & Selling Pressure",
+      headline: "🐻 Predicted Bearish Breakdown & Selling Pressure",
       subline: "BTC trading below key EMAs with negative drift. Altcoin longs filtered; short setups prioritized.",
       label: "BEARISH DRIFT",
       regimeBadge: "BEARISH REGIME",
@@ -129,8 +129,8 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
     };
   }
 
-  // 7. CONSOLIDATION / RANGE-BOUND (Volatility Squeeze)
-  if (code === "CONSOLIDATION" || regime === "CONSOLIDATION" || reason.toUpperCase().includes("RANGE") || reason.toUpperCase().includes("CONSOLIDAT") || reason.toUpperCase().includes("SQUEEZE")) {
+  // 7. CONSOLIDATION / VOLATILITY COIL SQUEEZE
+  if (code === "CONSOLIDATION" || regime === "CONSOLIDATION" || reason.toUpperCase().includes("RANGE") || reason.toUpperCase().includes("CONSOLIDAT") || reason.toUpperCase().includes("SQUEEZE") || shield?.predicted_trend === "CONSOLIDATION") {
     return {
       border: "border-indigo-500/50 bg-indigo-950/40 text-indigo-300 shadow-indigo-500/20",
       iconColor: "text-indigo-400",
@@ -139,7 +139,7 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
       isAlert: false,
       badgeBg: "bg-indigo-500/20 text-indigo-300 border-indigo-500/50 shadow-sm shadow-indigo-500/15",
       glowBg: "bg-indigo-500/20",
-      headline: "💤 Range-Bound Market Consolidation",
+      headline: "💤 Predicted Range-Bound Market Consolidation",
       subline: "BTC coiling inside tight Bollinger Bands. Low-beta mean reversion and range scalp setups active.",
       label: "RANGE CONSOLIDATION",
       regimeBadge: "CONSOLIDATING",

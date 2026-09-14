@@ -39,7 +39,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import ccxt
 import xgboost as xgb
 from catboost import CatBoostClassifier
-from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier, HistGradientBoostingRegressor
 # Disable LightGBM in Linux container to eliminate OpenMP lib_lightgbm.so segfaults
 HAS_LIGHTGBM = False
 import threading
@@ -607,6 +607,61 @@ class CryptoDataLoader:
             '1M': timedelta(days=30 * bars)
         }
         return tf_delta_map.get(timeframe, timedelta(minutes=1 * bars))
+
+    @staticmethod
+    def get_candle_schedule(anchor_tf: str, bars: int = 1, now_utc: datetime = None) -> tuple:
+        """
+        Calculates standard candle boundary times (UTC) for trade opening and expiration:
+        - 15M: candle opens at :00, :15, :30, :45
+        - 30M: candle opens at :00, :30
+        - 1H: candle opens at :00
+        - 4H: candle opens at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+        - 12H: candle opens at 00:00, 12:00 UTC
+        - 1D/24H: candle opens at 00:00 UTC
+        - 7D (Weekly): candle opens at Monday 00:00 UTC
+        - 30D (Monthly): candle opens at 1st of Month 00:00 UTC
+        """
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+
+        if anchor_tf == '15m':
+            min_base = (now_utc.minute // 15) * 15
+            candle_open = now_utc.replace(minute=min_base, second=0, microsecond=0)
+            step = timedelta(minutes=15)
+        elif anchor_tf == '30m':
+            min_base = (now_utc.minute // 30) * 30
+            candle_open = now_utc.replace(minute=min_base, second=0, microsecond=0)
+            step = timedelta(minutes=30)
+        elif anchor_tf == '1h':
+            candle_open = now_utc.replace(minute=0, second=0, microsecond=0)
+            step = timedelta(hours=1)
+        elif anchor_tf == '4h':
+            hour_base = (now_utc.hour // 4) * 4
+            candle_open = now_utc.replace(hour=hour_base, minute=0, second=0, microsecond=0)
+            step = timedelta(hours=4)
+        elif anchor_tf == '12h':
+            hour_base = (now_utc.hour // 12) * 12
+            candle_open = now_utc.replace(hour=hour_base, minute=0, second=0, microsecond=0)
+            step = timedelta(hours=12)
+        elif anchor_tf == '1d':
+            candle_open = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            step = timedelta(days=1)
+        elif anchor_tf in ('1w', '7d', 'weekly'):
+            days_since_mon = now_utc.weekday()
+            candle_open = (now_utc - timedelta(days=days_since_mon)).replace(hour=0, minute=0, second=0, microsecond=0)
+            step = timedelta(days=7)
+        elif anchor_tf in ('1M', '30d', 'monthly'):
+            candle_open = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            step = timedelta(days=30)
+        else:
+            candle_open = now_utc.replace(minute=(now_utc.minute // 15) * 15, second=0, microsecond=0)
+            step = timedelta(minutes=15)
+
+        trade_open = candle_open + step
+        target_close = trade_open + (step * bars)
+        trade_open_str = trade_open.strftime('%Y-%m-%d %H:%M UTC')
+        trade_close_str = target_close.strftime('%Y-%m-%d %H:%M UTC')
+        return trade_open, target_close, trade_open_str, trade_close_str
 
     def fetch_ohlcv_extended(self, symbol: str, timeframe: str, total_candles: int = 2000) -> pd.DataFrame:
         cache_key = f"{symbol}_{timeframe}_{total_candles}"
@@ -1359,6 +1414,42 @@ class AdvancedFeatureEngineer:
             btc_1h['btc_swing_ret_1h'] = np.log(btc_1h['close'] / btc_1h['close'].shift(1).clip(lower=1e-10)).fillna(0.0)
             df = pd.merge_asof(df.sort_values('timestamp'), btc_1h[['timestamp', 'btc_swing_ret_1h']], on='timestamp', direction='backward')
 
+        if '15m' in btc_dfs and not btc_dfs['15m'].empty:
+            btc_15m = btc_dfs['15m'][['timestamp', 'close']].copy().sort_values('timestamp')
+            btc_15m['btc_scalp_ret_15m'] = np.log(btc_15m['close'] / btc_15m['close'].shift(1).clip(lower=1e-10)).fillna(0.0)
+            df = pd.merge_asof(df.sort_values('timestamp'), btc_15m[['timestamp', 'btc_scalp_ret_15m']], on='timestamp', direction='backward')
+
+        # Quantitative Multi-Timeframe BTC Beta & Rolling Correlation
+        asset_ret = np.log(df['close'] / df['close'].shift(1).clip(lower=1e-10)).fillna(0.0)
+        if 'btc_swing_ret_1h' in df.columns:
+            roll_cov = asset_ret.rolling(24, min_periods=4).cov(df['btc_swing_ret_1h'])
+            roll_var = df['btc_swing_ret_1h'].rolling(24, min_periods=4).var().clip(lower=1e-8)
+            roll_corr = asset_ret.rolling(24, min_periods=4).corr(df['btc_swing_ret_1h']).fillna(0.0).clip(-1.0, 1.0)
+            df['btc_corr_24h'] = roll_corr
+            df['btc_beta_24h'] = (roll_cov / roll_var).fillna(1.0).clip(-3.0, 5.0)
+            df['is_bear_when_btc_bear'] = ((df['btc_swing_ret_1h'] < 0) & (asset_ret < 0)).astype(np.float32)
+            df['is_bull_when_btc_bear'] = ((df['btc_swing_ret_1h'] < 0) & (asset_ret > 0)).astype(np.float32)
+        else:
+            df['btc_corr_24h'] = 0.50
+            df['btc_beta_24h'] = 1.0
+            df['is_bear_when_btc_bear'] = 0.0
+            df['is_bull_when_btc_bear'] = 0.0
+
+        # Parabolic Hype Surge & Blow-Off Top Feature Indicators
+        if 'volume' in df.columns:
+            vol_ma = df['volume'].rolling(20, min_periods=3).mean()
+            vol_ratio = df['volume'] / (vol_ma + 1e-10)
+            price_change = (df['close'] - df['open']) / (df['open'] + 1e-10)
+            raw_atr = self.compute_atr(df, period=14)
+            upper_wick = (df['high'] - np.maximum(df['close'], df['open'])) / (df['high'] - df['low'] + 1e-10)
+            rsi_s = self.compute_rsi(df['close'], period=14)
+
+            df['is_parabolic_hype_surge'] = ((vol_ratio >= 2.5) & (price_change >= 0.03)).astype(np.float32)
+            df['is_blowoff_top_exhaustion'] = ((upper_wick >= 0.38) & (rsi_s >= 0.75) & (vol_ratio >= 2.0)).astype(np.float32)
+        else:
+            df['is_parabolic_hype_surge'] = 0.0
+            df['is_blowoff_top_exhaustion'] = 0.0
+
         df = df.ffill().bfill()
         float_cols = df.select_dtypes(include=['float64']).columns
         if len(float_cols) > 0:
@@ -1442,17 +1533,17 @@ class TripleBarrierLabeler:
         return data
 
 # ------------------------------------------------------------------------------
-# 5. SUPER LEARNER MODEL FACTORY (CatBoost, XGBoost, ExtraTrees)
+# 5. SUPER LEARNER MODEL FACTORY (CatBoost, XGBoost, ExtraTrees, HistGBM, Regression)
 # ------------------------------------------------------------------------------
 class QuantModelFactory:
 
     @staticmethod
     def build_primary_catboost(cfg: dict) -> CatBoostClassifier:
         return CatBoostClassifier(
-            iterations=cfg['iterations'],
-            depth=cfg['depth'],
-            learning_rate=cfg['learning_rate'],
-            l2_leaf_reg=cfg['l2_leaf_reg'],
+            iterations=cfg.get('iterations', 15),
+            depth=cfg.get('depth', 3),
+            learning_rate=cfg.get('learning_rate', 0.05),
+            l2_leaf_reg=cfg.get('l2_leaf_reg', 4.0),
             auto_class_weights=cfg.get('auto_class_weights', None),
             verbose=False,
             random_seed=42,
@@ -1462,13 +1553,13 @@ class QuantModelFactory:
     @staticmethod
     def build_primary_xgboost(cfg: dict) -> xgb.XGBClassifier:
         return xgb.XGBClassifier(
-            n_estimators=cfg['n_estimators'],
-            max_depth=cfg['max_depth'],
-            learning_rate=cfg['learning_rate'],
-            subsample=cfg['subsample'],
-            colsample_bytree=cfg['colsample_bytree'],
-            gamma=cfg['gamma'],
-            random_state=cfg['random_state'],
+            n_estimators=cfg.get('n_estimators', 25),
+            max_depth=cfg.get('max_depth', 3),
+            learning_rate=cfg.get('learning_rate', 0.05),
+            subsample=cfg.get('subsample', 0.85),
+            colsample_bytree=cfg.get('colsample_bytree', 0.80),
+            gamma=cfg.get('gamma', 0.15),
+            random_state=cfg.get('random_state', 42),
             n_jobs=cfg.get('n_jobs', 1),
             tree_method='hist',
             eval_metric='logloss'
@@ -1478,40 +1569,61 @@ class QuantModelFactory:
     def build_primary_lightgbm(cfg: dict):
         if HAS_LIGHTGBM:
             return lgb.LGBMClassifier(
-                n_estimators=cfg['n_estimators'],
-                max_depth=cfg['max_depth'],
-                num_leaves=cfg['num_leaves'],
-                learning_rate=cfg['learning_rate'],
-                subsample=cfg['subsample'],
-                colsample_bytree=cfg['colsample_bytree'],
-                random_state=cfg['random_state'],
-                verbose=cfg['verbose'],
+                n_estimators=cfg.get('n_estimators', 25),
+                max_depth=cfg.get('max_depth', 3),
+                num_leaves=cfg.get('num_leaves', 12),
+                learning_rate=cfg.get('learning_rate', 0.05),
+                subsample=cfg.get('subsample', 0.85),
+                colsample_bytree=cfg.get('colsample_bytree', 0.80),
+                random_state=cfg.get('random_state', 42),
+                verbose=cfg.get('verbose', -1),
                 n_jobs=cfg.get('n_jobs', 1)
             )
         return None
 
     @staticmethod
+    def build_primary_hist_gbm_clf(cfg: dict = None) -> HistGradientBoostingClassifier:
+        return HistGradientBoostingClassifier(
+            max_iter=30,
+            max_depth=3,
+            learning_rate=0.05,
+            min_samples_leaf=5,
+            random_state=42
+        )
+
+    @staticmethod
     def build_primary_extra_trees(cfg: dict) -> ExtraTreesClassifier:
         return ExtraTreesClassifier(
-            n_estimators=cfg['n_estimators'],
-            max_depth=cfg['max_depth'],
-            min_samples_split=cfg['min_samples_split'],
-            random_state=cfg['random_state'],
+            n_estimators=cfg.get('n_estimators', 15),
+            max_depth=cfg.get('max_depth', 4),
+            min_samples_split=cfg.get('min_samples_split', 5),
+            random_state=cfg.get('random_state', 42),
             n_jobs=cfg.get('n_jobs', 1)
         )
 
     @staticmethod
-    def build_xgb_regressor(cfg: dict) -> xgb.XGBRegressor:
+    def build_xgb_regressor(cfg: dict = None) -> xgb.XGBRegressor:
+        cfg = cfg or {}
         return xgb.XGBRegressor(
-            n_estimators=cfg['n_estimators'],
-            max_depth=cfg['max_depth'],
-            learning_rate=cfg['learning_rate'],
-            subsample=cfg['subsample'],
-            colsample_bytree=cfg['colsample_bytree'],
-            objective=cfg['objective'],
-            random_state=cfg['random_state'],
+            n_estimators=cfg.get('n_estimators', 25),
+            max_depth=cfg.get('max_depth', 3),
+            learning_rate=cfg.get('learning_rate', 0.05),
+            subsample=cfg.get('subsample', 0.85),
+            colsample_bytree=cfg.get('colsample_bytree', 0.80),
+            objective=cfg.get('objective', 'reg:pseudohubererror'),
+            random_state=42,
             n_jobs=cfg.get('n_jobs', 1),
             tree_method='hist'
+        )
+
+    @staticmethod
+    def build_hist_gbm_regressor(cfg: dict = None) -> HistGradientBoostingRegressor:
+        return HistGradientBoostingRegressor(
+            max_iter=30,
+            max_depth=3,
+            learning_rate=0.05,
+            min_samples_leaf=5,
+            random_state=42
         )
 
 # ------------------------------------------------------------------------------
@@ -3084,13 +3196,17 @@ class SignalMetaClassifier:
     Two-Stage Meta-Labeling Classifier (Marcos López de Prado architecture).
     Predicts probability P(Trade hits TP before SL) using model agreement,
     timeframe confluence, R:R metrics, and market regime features.
+    Supports both Global and Dedicated Per-Coin Meta-Labeling.
     """
-    def __init__(self, model_path: str = "./models_export_v3/signal_meta_classifier.joblib"):
+    def __init__(self, model_path: str = "./models_export_v3/signal_meta_classifier.joblib", models_dir: str = "./models_export_v3"):
         self.model_path = model_path
+        self.models_dir = models_dir
+        self.per_coin_dir = os.path.join(models_dir, "per_coin")
         self.bundle = None
         self.model = None
         self.feature_cols = []
         self._last_mtime = 0
+        self._coin_models = {}  # {clean_sym: (model, feature_cols, mtime)}
         self.load_model()
 
     def load_model(self):
@@ -3099,7 +3215,7 @@ class SignalMetaClassifier:
                 from app.services.model_retrainer import run_retraining_pipeline
                 print(f"[META CLASSIFIER 🧠] Model not found at {self.model_path}. Auto-training initial model from dataset...")
                 run_retraining_pipeline(force=True)
-            except Exception as e:
+            except Exception:
                 pass
 
         if os.path.exists(self.model_path):
@@ -3115,15 +3231,48 @@ class SignalMetaClassifier:
                 print(f"[META CLASSIFIER ⚠️] Model load fallback note: {e}")
                 self.model = None
 
-    def predict_win_probability(self, sig: dict) -> float:
-        """Predicts calibrated win probability (0.0 to 1.0) for a candidate signal."""
-        # Auto-check if model was updated on disk
-        if os.path.exists(self.model_path):
+    def _get_per_coin_model(self, symbol: str):
+        if not symbol:
+            return None, []
+        clean_sym = symbol.replace('/', '_').replace(':USDT', '')
+        coin_path = os.path.join(self.per_coin_dir, clean_sym, "meta_classifier.joblib")
+        if not os.path.exists(coin_path):
+            return None, []
+        try:
+            mtime = os.path.getmtime(coin_path)
+            cached = self._coin_models.get(clean_sym)
+            if cached and cached.get('mtime') == mtime:
+                return cached['model'], cached['feature_cols']
+            bundle = joblib.load(coin_path)
+            m = bundle.get('model')
+            f_cols = bundle.get('feature_cols', [])
+            self._coin_models[clean_sym] = {'model': m, 'feature_cols': f_cols, 'mtime': mtime}
+            return m, f_cols
+        except Exception:
+            return None, []
+
+    def predict_win_probability(self, sig: dict, symbol: str = None) -> float:
+        """Predicts calibrated win probability (0.0 to 1.0) using per-coin or global meta-labeler."""
+        sym = symbol or sig.get('symbol', '')
+        active_model = self.model
+        active_features = self.feature_cols
+
+        # 1. Try dedicated per-coin meta-classifier first
+        coin_m, coin_f = self._get_per_coin_model(sym)
+        if coin_m is not None and coin_f:
+            active_model = coin_m
+            active_features = coin_f
+
+        # Auto-check if global model was updated on disk
+        if active_model is self.model and os.path.exists(self.model_path):
             try:
                 if os.path.getmtime(self.model_path) != self._last_mtime:
                     self.load_model()
+                    active_model = self.model
+                    active_features = self.feature_cols
             except Exception:
                 pass
+
         conv = float(sig.get('conviction', 70.0))
         is_a_plus = 1.0 if "A+" in str(sig.get('grade', '')) else 0.0
         exp_ret = float(sig.get('exp_return', 0.0)) * 100.0
@@ -3142,7 +3291,7 @@ class SignalMetaClassifier:
             tp_pct = abs(exp_ret)
             sl_pct = abs(exp_ret) / 2.0
 
-        if not self.model or not self.feature_cols:
+        if not active_model or not active_features:
             base_p = (conv / 100.0) * (0.88 if is_a_plus else 0.76)
             return round(min(0.95, max(0.40, base_p)), 3)
 
@@ -3173,15 +3322,185 @@ class SignalMetaClassifier:
                 'sl_pct': sl_pct,
                 'tp_sl_ratio': tp_pct / max(0.01, sl_pct)
             }
-            df_feat = pd.DataFrame([row])[self.feature_cols]
-            prob = float(self.model.predict_proba(df_feat)[0, 1])
+            # Fill any missing feature columns with 0.0
+            for col in active_features:
+                if col not in row:
+                    row[col] = 0.0
+            df_feat = pd.DataFrame([row])[active_features]
+            prob = float(active_model.predict_proba(df_feat)[0, 1])
             return round(prob, 3)
         except Exception:
             base_p = (conv / 100.0) * (0.88 if is_a_plus else 0.76)
             return round(min(0.95, max(0.40, base_p)), 3)
 
 # ------------------------------------------------------------------------------
-# 8. MULTI-HORIZON QUANT ENGINE CORE
+# 8. INSTITUTIONAL TRADER REGIME PLAYBOOK & BEST PRACTICES ENGINE
+# ------------------------------------------------------------------------------
+class TraderRegimePlaybook:
+    """
+    Quantitative & Institutional Playbook for Traders across Market Regimes:
+    - Bullish Expansion (Markup)
+    - Bearish Breakdown (Markdown / Distribution / Flash Crash)
+    - Consolidation / Range Squeeze (Chop / Volatility Compression)
+    """
+    @staticmethod
+    def generate(regime: str, predicted_trend: str, bull_prob: float, bear_prob: float, cons_prob: float, is_squeeze: bool = False, btc_price: float = 0.0, breakout_pred: str = "") -> dict:
+        if regime in ["ALERT_DUMP", "FLASH_DUMP", "BEARISH_BREAKDOWN"] or predicted_trend == "BEARISH" or bear_prob >= 55.0:
+            regime_type = "BEARISH"
+        elif regime in ["BULLISH_EXPANSION", "BULLISH_ACCUMULATION"] or predicted_trend == "BULLISH" or bull_prob >= 50.0:
+            regime_type = "BULLISH"
+        else:
+            regime_type = "CONSOLIDATION"
+
+        if regime_type == "BULLISH":
+            return {
+                "regime_type": "BULLISH",
+                "headline": "🟢 BULL MARKET REGIME: CONVEX UPSIDE CAPTURE & RUNNER ACCUMULATION",
+                "tactical_stance": "AGGRESSIVE_LONGS_AND_PULLBACK_BUYS",
+                "core_directive": "Ride the trend momentum, let winners run with trailing ratchet stops, and aggressively buy higher-low pullbacks to key dynamic moving averages.",
+                "sizing_multiplier": 1.15,
+                "recommended_leverage": "3x - 5x max (Avoid excessive leverage to survive liquidity wicks)",
+                "target_risk_reward": "1:2.5 to 1:4.0 (Expand TP targets for major runners)",
+                "stop_loss_policy": "Ratchet SL to Breakeven+ immediately once TP1 is hit. Never cut winners early.",
+                "preferred_setups": [
+                    {
+                        "name": "Higher-Low EMA Pullback",
+                        "desc": "Buy 15M/1H pullbacks testing 21 EMA or 50 EMA with oversold RSI bounce (35-45).",
+                        "tag": "DIP_BUY"
+                    },
+                    {
+                        "name": "Volatility Squeeze Breakout",
+                        "desc": "Enter long on clean candle close above multi-hour resistance with volume expansion.",
+                        "tag": "BREAKOUT"
+                    },
+                    {
+                        "name": "High-Beta Relative Strength Long",
+                        "desc": "Target altcoins outperforming BTC (RS_BTC > 0.3) that lead market upward surges.",
+                        "tag": "ALPHA_LEADER"
+                    }
+                ],
+                "dos": [
+                    "Buy dips at key dynamic moving average supports (21 EMA / 50 EMA / VWAP).",
+                    "Expand Take Profit targets and leave 25-40% runner positions for macro swing moves.",
+                    "Ratchet stop losses to breakeven once TP1 is reached to lock in a risk-free trade.",
+                    "Focus capital on top relative strength altcoins outperforming Bitcoin.",
+                    "Pyramid into winning trades on confirmed higher-low breakout retests."
+                ],
+                "donts": [
+                    "DO NOT short strong upward momentum solely because RSI is 'overbought' (RSI stays high in bull runs).",
+                    "DO NOT take micro-scalp 0.5% profits prematurely while leaving massive 10%+ trends on the table.",
+                    "DO NOT panic sell spot positions on standard 3-5% intraday bull-market pullbacks.",
+                    "DO NOT chase vertical parabolic green candles with 10x+ leverage at resistance."
+                ],
+                "checklist": [
+                    {"rule": "Is the higher timeframe (4H/1D) trend aligned bullishly?", "status": "REQUIRED"},
+                    {"rule": "Is the trade entering at or near a pullback support (not extended >3 ATRs)?", "status": "REQUIRED"},
+                    {"rule": "Is Stop Loss placed strictly below swing low invalidation level?", "status": "REQUIRED"},
+                    {"rule": "Is the position size within 1.0x-1.25x risk tolerance?", "status": "RECOMMENDED"},
+                    {"rule": "Is trailing ratchet stop enabled for TP1 reach?", "status": "REQUIRED"}
+                ]
+            }
+
+        elif regime_type == "BEARISH":
+            return {
+                "regime_type": "BEARISH",
+                "headline": "🔴 BEAR MARKET REGIME: CAPITAL PRESERVATION & RELIEF FADE SHORTS",
+                "tactical_stance": "DEFENSIVE_CAPITAL_PRESERVATION_AND_SHORTS",
+                "core_directive": "Capital preservation is the absolute priority. Cash (USDT) is an active winning position. Suppress altcoin longs and fade overbought relief bounces into resistance.",
+                "sizing_multiplier": 0.50,
+                "recommended_leverage": "1x - 2x max (Strictly low leverage or spot cash allocation)",
+                "target_risk_reward": "1:1.5 to 1:2.0 (Take quick profits; do not overstay short targets)",
+                "stop_loss_policy": "Ultra-tight stop losses above resistance. Exit immediately upon invalidation.",
+                "preferred_setups": [
+                    {
+                        "name": "Relief Rally Fade (Short)",
+                        "desc": "Short oversold counter-trend bounces that test overhead 4H 50 EMA / resistance with RSI 55-65.",
+                        "tag": "RALLY_FADE"
+                    },
+                    {
+                        "name": "Breakdown Retest Short",
+                        "desc": "Enter short when an established support level breaks down on volume and fails upon retest.",
+                        "tag": "BREAKDOWN"
+                    },
+                    {
+                        "name": "High-Negative Beta Hedge",
+                        "desc": "Hedge spot portfolios with inverse perpetual shorts or high-beta bear sensitive assets.",
+                        "tag": "INVERSE_HEDGE"
+                    }
+                ],
+                "dos": [
+                    "Keep 50-80% of portfolio in USDT / stablecoins to maintain dry powder for generational bottoms.",
+                    "Automatically suppress or prune altcoin longs (altcoins drop 2x-3x harder than BTC).",
+                    "Fade overbought counter-trend relief rallies that stall into descending moving averages.",
+                    "Take profits quickly at TP1/TP2 because bear market bounces are fast and violent.",
+                    "Use strict, tight stop-losses and accept small losses immediately without emotional attachment."
+                ],
+                "donts": [
+                    "DO NOT catch falling knives on plunging coins without multi-day volume absorption.",
+                    "DO NOT average down on losing long positions ('buying the dip' on a downtrend is fatal).",
+                    "DO NOT widen stop losses hoping for a rebound.",
+                    "DO NOT hold high-beta low-cap altcoins without stop-loss safeguards during systemic flushes."
+                ],
+                "checklist": [
+                    {"rule": "Are altcoin longs blocked or reduced to minimal exploratory size?", "status": "REQUIRED"},
+                    {"rule": "Is the short entry placed at overhead resistance / relief peak (not chasing the dump bottom)?", "status": "REQUIRED"},
+                    {"rule": "Is position sizing reduced to 0.4x-0.6x base capital?", "status": "REQUIRED"},
+                    {"rule": "Is TP target set conservatively with rapid partial take-profit enabled?", "status": "REQUIRED"},
+                    {"rule": "Is stop loss strictly anchored above the swing high?", "status": "REQUIRED"}
+                ]
+            }
+
+        else: # CONSOLIDATION
+            return {
+                "regime_type": "CONSOLIDATION",
+                "headline": "⚪ CONSOLIDATION REGIME: MEAN REVERSION & SQUEEZE BREAKOUT WATCH",
+                "tactical_stance": "RANGE_BOUND_MEAN_REVERSION_AND_SQUEEZE_COILING",
+                "core_directive": "Trade the range boundaries: buy support, sell resistance, take quick midline profits, and avoid breakout FOMO traps while monitoring impending squeeze expansion.",
+                "sizing_multiplier": 0.70,
+                "recommended_leverage": "2x - 3x max",
+                "target_risk_reward": "1:1.5 to 1:2.0 (Take 60-80% of profit at range midline / 20 SMA)",
+                "stop_loss_policy": "Strict stop loss just outside range boundary buffer (0.5 ATR beyond support/resistance).",
+                "preferred_setups": [
+                    {
+                        "name": "Bollinger Band Mean Reversion",
+                        "desc": "Buy lower BB touches with RSI < 35; sell/short upper BB touches with RSI > 65.",
+                        "tag": "RANGE_BOUNCE"
+                    },
+                    {
+                        "name": "Range Support Liquidity Sweep",
+                        "desc": "Enter long when price sweeps below support low, rejects lower prices, and re-enters range.",
+                        "tag": "LIQUIDITY_SWEEP"
+                    },
+                    {
+                        "name": "Volatility Squeeze Trigger",
+                        "desc": "Prepare orders for explosive expansion when Bollinger Band Width contracts below 1.5%.",
+                        "tag": "SQUEEZE_WATCH"
+                    }
+                ],
+                "dos": [
+                    "Buy at range support extremes and sell/short at range resistance extremes.",
+                    "Take 60-80% profits at the range midline (VWAP or 20 SMA) rather than hoping for massive runners.",
+                    "Monitor Choppiness Index (CHOP > 61.8) and Bollinger Band Width for squeeze contraction.",
+                    "Reduce trade frequency and wait patiently for prices to reach the perimeter of the range.",
+                    "Use time-based stops: close trades that stagnate at the midline to free up liquidity."
+                ],
+                "donts": [
+                    "DO NOT buy green breakout candles at range highs (70%+ failure rate in choppy consolidation).",
+                    "DO NOT short red breakdown candles at range lows without multi-timeframe volume confirmation.",
+                    "DO NOT use oversized positions in sideways chop; chop generates death by papercuts from whipsaws.",
+                    "DO NOT trade inside the middle 50% of the range (no-man's land with 50/50 odds)."
+                ],
+                "checklist": [
+                    {"rule": "Is the entry located at the outer 20% perimeter of the trading range?", "status": "REQUIRED"},
+                    {"rule": "Is the position size scaled down to 0.6x-0.75x to mitigate whipsaw risk?", "status": "REQUIRED"},
+                    {"rule": "Is Take Profit 1 placed at the range midline (VWAP / 20 EMA)?", "status": "REQUIRED"},
+                    {"rule": "Is Stop Loss placed strictly beyond the range outer boundary?", "status": "REQUIRED"},
+                    {"rule": "Has breakout confirmation (volume + 4H candle close) occurred if attempting breakout?", "status": "REQUIRED"}
+                ]
+            }
+
+# ------------------------------------------------------------------------------
+# 9. MULTI-HORIZON QUANT ENGINE CORE
 # ------------------------------------------------------------------------------
 class HybridQuantEngine:
     def __init__(self, config: dict):
@@ -3218,6 +3537,26 @@ class HybridQuantEngine:
         self.btc_is_squeeze = False
         self.btc_bbw_15m = 0.0
         self.btc_vol_ratio = 1.0
+        self.btc_predicted_trend = "CONSOLIDATION"
+        self.btc_trend_probability = 60.0
+        self.btc_bull_trend_prob = 30.0
+        self.btc_bear_trend_prob = 20.0
+        self.btc_consolidation_prob = 50.0
+        self.btc_predicted_target = 0.0
+        self.btc_predicted_change_pct = 0.0
+        self.btc_breakout_prediction = "⚖️ RANGE BOUND"
+        self.btc_altcoin_posture = "STANDARD_EXECUTION"
+        self.btc_market_phase_description = "Balanced equilibrium state across multi-horizon market structure."
+        self.trader_playbook = TraderRegimePlaybook.generate(
+            regime=self.btc_shield_regime,
+            predicted_trend=self.btc_predicted_trend,
+            bull_prob=self.btc_bull_trend_prob,
+            bear_prob=self.btc_bear_trend_prob,
+            cons_prob=self.btc_consolidation_prob,
+            is_squeeze=self.btc_is_squeeze,
+            btc_price=self.btc_price,
+            breakout_pred=self.btc_breakout_prediction
+        )
         self._last_btc_heartbeat_ts = 0.0
         self._last_shield_file_sync_ts = 0.0
         self.signal_cooldown_tracker = {}
@@ -3251,14 +3590,10 @@ class HybridQuantEngine:
         os.makedirs(self.config['app_export_dir'], exist_ok=True)
 
     def _refresh_asset_entry_timestamps(self, item: dict, live_price: float = None) -> dict:
-        """Refreshes an asset's prediction timestamp and 10-horizon trade windows to the current active 15-minute candle block."""
+        """Refreshes an asset's prediction timestamp and 10-horizon trade windows to standard candle open/close schedules."""
         now_utc = datetime.now(timezone.utc)
         now_iso = now_utc.isoformat()
         now_ts = int(now_utc.timestamp())
-        
-        # Determine active 15m candle boundary
-        min_15 = (now_utc.minute // 15) * 15
-        candle_open_utc = now_utc.replace(minute=min_15, second=0, microsecond=0)
         
         p = float(live_price) if (live_price and live_price > 0) else float(item.get('current_price', 1.0))
         p_fmt = lambda val: f"{val:,.4f}" if val >= 1.0 else f"{val:.6g}"
@@ -3270,11 +3605,9 @@ class HybridQuantEngine:
         horizons = item.get('horizons', {})
         for h_key, h_cfg in self.config.get('horizons', {}).items():
             h_data = horizons.get(h_key)
-            step_delta = CryptoDataLoader.get_timeframe_delta(h_cfg['anchor_tf'], bars=1)
-            trade_open = candle_open_utc + step_delta
-            target_close = trade_open + (step_delta * h_cfg['bars'])
-            trade_open_str = trade_open.strftime('%Y-%m-%d %H:%M UTC')
-            trade_close_str = target_close.strftime('%Y-%m-%d %H:%M UTC')
+            trade_open, target_close, trade_open_str, trade_close_str = CryptoDataLoader.get_candle_schedule(
+                h_cfg['anchor_tf'], bars=h_cfg.get('bars', 1), now_utc=now_utc
+            )
             window_str = f"{trade_open_str} ➔ {trade_close_str} ({h_cfg['duration_label']})"
             
             if isinstance(h_data, dict):
@@ -3284,19 +3617,28 @@ class HybridQuantEngine:
                 h_data['predicted_close_utc'] = trade_close_str
                 h_data['predicted_window_str'] = window_str
                 
+                exp_ret = float(h_data.get('exp_return', 0.008))
+                h_dir = h_data.get('direction', 'BULLISH')
+                if 'predicted_next_price' not in h_data or h_data['predicted_next_price'] <= 0:
+                    projected = p * (1.0 + (abs(exp_ret) if h_dir == 'BULLISH' else -abs(exp_ret)))
+                    h_data['predicted_next_price'] = round(projected, 6)
+                    h_data['predicted_return_pct'] = round((exp_ret if h_dir == 'BULLISH' else -abs(exp_ret)) * 100.0, 2)
+
                 tp1 = float(h_data.get('tp1_price', p * (1.0 + (h_cfg['tp_mult'] * 0.005))))
                 sl = float(h_data.get('sl_price', p * (1.0 - (h_cfg['sl_mult'] * 0.003))))
-                h_dir = h_data.get('direction', 'BULLISH')
                 type_str = "LONG 🟢" if h_dir == "BULLISH" else "SHORT 🔴"
                 market_str = "Spot & Futures" if h_dir == "BULLISH" else "Futures Only ⚡"
                 
                 coin_tag = item.get('symbol', 'CRYPTO').split('/')[0]
+                pred_price_val = h_data.get('predicted_next_price', tp1)
+                pred_ret_val = h_data.get('predicted_return_pct', (h_cfg['tp_mult'] * 0.5))
                 pro_sig = (
                     f"🚀 PAIR: #{coin_tag}/USDT\n"
                     f"📊 TYPE: {type_str}\n"
                     f"🌐 MARKET: {market_str}\n"
                     f"📅 PREDICTED CANDLE: {window_str}\n"
-                    f"🎯 ENTRY: {p_fmt(p)}\n\n"
+                    f"🎯 ENTRY: {p_fmt(p)}\n"
+                    f"🔮 ML NEXT PRICE: {p_fmt(pred_price_val)} ({pred_ret_val:+.2f}%)\n\n"
                     f"💎 TAKE PROFITS:\n"
                     f"➤ TP1: {p_fmt(tp1)}\n"
                     f"➤ TP2: {p_fmt(float(h_data.get('tp2_price', p * 1.015)))}\n"
@@ -3337,30 +3679,24 @@ class HybridQuantEngine:
         # 🛡️ GLOBAL BTC MARKET BETA SHIELD (MARKET REGIME & CIRCUIT BREAKER)
         self.evaluate_btc_market_regime()
 
-    def evaluate_btc_market_regime(self, live_btc_price: float = None):
+    def evaluate_btc_market_regime(self, df_15m_override: pd.DataFrame = None, live_btc_price: float = None) -> dict:
         """
-        🛡️ ADVANCED MULTI-FACTOR BTC QUANTITATIVE MARKET REGIME & SENTIMENT ENGINE
-        Accurately predicts real-time macro & intraday market states based on Bitcoin multi-scale dynamics:
-        - 🚀 BULL_MOMENTUM / BULLISH EXPANSION: Strong upward trend acceleration & momentum markup
-        - 💎 DIP ACCUMULATION: Oversold bounce off support within macro bull trend
-        - 🐻 BEAR_MOMENTUM / BEARISH BREAKDOWN: Strong downward distribution & negative momentum drift
-        - 💤 RANGE CONSOLIDATION: Volatility squeeze / tight Bollinger Band coiling / mean-reversion
-        - ⚡ HIGH VOLATILITY CHOP: Expanding volatility ratio with mixed multi-timeframe direction
-        - ⚠️ DEFENSIVE: Cascade drop circuit breaker (Altcoin longs paused)
-        - 🚨 ALERT_DUMP: Severe flash flush (Emergency risk-off pause)
-        - ⚖️ BALANCED EQUILIBRIUM: Neutral baseline market
+        🛡️ ADVANCED PREDICTIVE BTC QUANTITATIVE MARKET SHIELD & REGIME FORECASTER
+        Predicts future Bullish Trends, Bearish Breakdowns/Dumps, and Volatility Consolidation Squeezes
+        using multi-timeframe geometric structure, volatility ratios, Choppiness Index, ADX momentum,
+        and continuous price target projections.
         """
         try:
-            df_15m = self.btc_cache.get('15m')
+            df_15m = df_15m_override if df_15m_override is not None else self.btc_cache.get('15m')
             df_1h = self.btc_cache.get('1h')
             df_4h = self.btc_cache.get('4h')
             df_1d = self.btc_cache.get('1d')
 
-            if df_15m is None or len(df_15m) < 15:
-                return
+            if df_15m is None or len(df_15m) < 5:
+                return {}
 
             c_now = float(live_btc_price) if (live_btc_price is not None and live_btc_price > 0) else float(df_15m['close'].iloc[-1])
-            c_prev_15m = float(df_15m['close'].iloc[-2])
+            c_prev_15m = float(df_15m['close'].iloc[-2]) if len(df_15m) >= 2 else c_now
             c_prev3_15m = float(df_15m['close'].iloc[-4]) if len(df_15m) >= 4 else c_prev_15m
             ret_15m = (c_now - c_prev_15m) / (c_prev_15m + 1e-10)
             ret_45m = (c_now - c_prev3_15m) / (c_prev3_15m + 1e-10)
@@ -3371,6 +3707,8 @@ class HybridQuantEngine:
             ema50_1h = c_now
             ema200_1h = c_now
             rsi_1h = 50.0
+            adx_1h = 20.0
+            chop_1h = 50.0
             if df_1h is not None and len(df_1h) >= 15:
                 c_prev_1h = float(df_1h['close'].iloc[-2])
                 ret_1h = (c_now - c_prev_1h) / (c_prev_1h + 1e-10)
@@ -3378,6 +3716,14 @@ class HybridQuantEngine:
                 ema50_1h = float(df_1h['close'].ewm(span=50, adjust=False).mean().iloc[-1])
                 ema200_1h = float(df_1h['close'].ewm(span=200, adjust=False).mean().iloc[-1]) if len(df_1h) >= 200 else ema50_1h
                 rsi_1h_series = self.fe.compute_rsi(df_1h['close'], period=14)
+                rsi_1h = float(rsi_1h_series.iloc[-1]) * 100.0
+                adx_1h_series = self.fe.compute_adx(df_1h, period=14)
+                adx_1h = float(adx_1h_series.iloc[-1]) * 100.0
+                chop_1h_series = self.fe.compute_chop_index(df_1h, period=14)
+                chop_1h = float(chop_1h_series.iloc[-1]) * 100.0
+            elif len(df_15m) >= 20:
+                ret_1h = (c_now - float(df_15m['close'].iloc[-4])) / (float(df_15m['close'].iloc[-4]) + 1e-10)
+                rsi_1h_series = self.fe.compute_rsi(df_15m['close'], period=14)
                 rsi_1h = float(rsi_1h_series.iloc[-1]) * 100.0
 
             # 4H metrics
@@ -3409,14 +3755,13 @@ class HybridQuantEngine:
             rsi_15m_series = self.fe.compute_rsi(df_15m['close'], period=14)
             rsi_15m = float(rsi_15m_series.iloc[-1]) * 100.0
 
-            # Bollinger Bands 15M
+            # Bollinger Bands 15M & 1H
             std_15m = float(df_15m['close'].rolling(20).std().iloc[-1]) if len(df_15m) >= 20 else 0.0
             bb_mid_15m = float(df_15m['close'].rolling(20).mean().iloc[-1]) if len(df_15m) >= 20 else ema21_15m
             bb_upper_15m = bb_mid_15m + 2.0 * std_15m
             bb_lower_15m = bb_mid_15m - 2.0 * std_15m
             bbw_15m = (bb_upper_15m - bb_lower_15m) / (bb_mid_15m + 1e-10)
 
-            # Bollinger Bands 1H
             bbw_1h = 0.04
             if df_1h is not None and len(df_1h) >= 20:
                 std_1h = float(df_1h['close'].rolling(20).std().iloc[-1])
@@ -3433,24 +3778,114 @@ class HybridQuantEngine:
             is_1d_bull = (c_now >= ema50_1d) and (ema50_1d >= ema200_1d)
             is_1d_bear = (c_now <= ema50_1d) and (ema50_1d <= ema200_1d)
 
-            is_4h_bull = (c_now >= ema50_4h) and (ema50_4h >= ema200_4h)
-            is_4h_bear = (c_now <= ema50_4h) and (ema50_4h <= ema200_4h)
+            is_4h_bull = (c_now >= ema50_4h) and (rsi_4h >= 52.0)
+            is_4h_bear = (c_now <= ema50_4h) and (rsi_4h <= 48.0)
 
-            is_1h_bull = (c_now >= ema20_1h >= ema50_1h)
-            is_1h_bear = (c_now <= ema20_1h <= ema50_1h)
+            is_1h_bull = (c_now >= ema20_1h) and (ema20_1h >= ema50_1h)
+            is_1h_bear = (c_now <= ema20_1h) and (ema20_1h <= ema50_1h)
 
-            is_15m_bull = (c_now >= ema9_15m >= ema21_15m)
-            is_15m_bear = (c_now <= ema9_15m <= ema21_15m)
+            is_15m_bull = (ema9_15m >= ema21_15m) and (rsi_15m >= 52.0)
+            is_15m_bear = (ema9_15m <= ema21_15m) and (rsi_15m <= 48.0)
+
+            is_squeeze = (bbw_15m <= 0.015) or (chop_1h >= 61.8 and adx_1h <= 20.0)
+
+            # --- MULTI-FACTOR PREDICTIVE PROBABILITY ENGINE ---
+            bull_score = 0.0
+            bear_score = 0.0
+            cons_score = 0.0
+
+            # Factor 1: Multi-Timeframe Alignment (0-40 pts)
+            tf_bull_count = sum([is_1d_bull, is_4h_bull, is_1h_bull, is_15m_bull])
+            tf_bear_count = sum([is_1d_bear, is_4h_bear, is_1h_bear, is_15m_bear])
+            bull_score += tf_bull_count * 10.0
+            bear_score += tf_bear_count * 10.0
+            if tf_bull_count == 2 and tf_bear_count == 2:
+                cons_score += 25.0
+            elif tf_bull_count <= 1 and tf_bear_count <= 1:
+                cons_score += 20.0
+
+            # Factor 2: Momentum & RSI Dynamics (0-30 pts)
+            if rsi_1h >= 60.0 and rsi_15m >= 55.0:
+                bull_score += 25.0
+            elif rsi_1h <= 40.0 and rsi_15m <= 45.0:
+                bear_score += 25.0
+            elif 45.0 <= rsi_1h <= 55.0 and 45.0 <= rsi_15m <= 55.0:
+                cons_score += 30.0
+            else:
+                bull_score += 10.0 if rsi_1h > 50.0 else 0.0
+                bear_score += 10.0 if rsi_1h < 50.0 else 0.0
+                cons_score += 10.0
+
+            # Factor 3: Choppiness Index & ADX Trend Strength (0-20 pts)
+            if chop_1h >= 61.8 or adx_1h <= 18.0:
+                cons_score += 25.0
+            elif chop_1h <= 38.2 and adx_1h >= 28.0:
+                if ret_1h > 0 or is_1h_bull:
+                    bull_score += 20.0
+                else:
+                    bear_score += 20.0
+            else:
+                cons_score += 10.0
+
+            # Factor 4: Price Returns & Velocity (0-20 pts)
+            if ret_15m >= 0.008 or ret_1h >= 0.015:
+                bull_score += 20.0
+            elif ret_15m <= -0.008 or ret_1h <= -0.015:
+                bear_score += 20.0
+            elif abs(ret_15m) < 0.003 and abs(ret_1h) < 0.006:
+                cons_score += 15.0
+
+            # Factor 5: Volatility Contraction / Squeeze Bonus
+            if is_squeeze:
+                cons_score += 30.0
+
+            # Base baseline
+            bull_score = max(5.0, bull_score)
+            bear_score = max(5.0, bear_score)
+            cons_score = max(5.0, cons_score)
+
+            total_score = bull_score + bear_score + cons_score
+            bull_trend_prob = round((bull_score / total_score) * 100.0, 1)
+            bear_trend_prob = round((bear_score / total_score) * 100.0, 1)
+            cons_trend_prob = round(100.0 - bull_trend_prob - bear_trend_prob, 1)
+            if cons_trend_prob < 0.0:
+                cons_trend_prob = 0.0
+                total_adj = bull_trend_prob + bear_trend_prob
+                bull_trend_prob = round((bull_trend_prob / total_adj) * 100.0, 1)
+                bear_trend_prob = round(100.0 - bull_trend_prob, 1)
+
+            # Determine dominant predicted trend
+            if bull_trend_prob >= 50.0 and bull_trend_prob > bear_trend_prob:
+                predicted_trend = "BULLISH"
+                dominant_prob = bull_trend_prob
+            elif bear_trend_prob >= 50.0 and bear_trend_prob > bull_trend_prob:
+                predicted_trend = "BEARISH"
+                dominant_prob = bear_trend_prob
+            elif cons_trend_prob >= 40.0:
+                predicted_trend = "CONSOLIDATION"
+                dominant_prob = cons_trend_prob
+            elif bull_trend_prob >= bear_trend_prob:
+                predicted_trend = "BULLISH"
+                dominant_prob = bull_trend_prob
+            else:
+                predicted_trend = "BEARISH"
+                dominant_prob = bear_trend_prob
+
+            # Compute predicted price targets for BTC
+            expected_directional_shift = ((bull_trend_prob - bear_trend_prob) / 100.0) * (0.025 * max(1.0, vol_ratio))
+            pred_btc_target = round(c_now * (1.0 + expected_directional_shift), 2)
+            pred_change_pct = round(expected_directional_shift * 100.0, 2)
 
             # Institutional Composite Market Score Calculation (-100 to +100)
-            trend_pts = 0.0
-            trend_pts += 15.0 if is_1d_bull else (-15.0 if is_1d_bear else 0.0)
-            trend_pts += 15.0 if is_4h_bull else (-15.0 if is_4h_bear else 0.0)
-            trend_pts += 10.0 if is_1h_bull else (-10.0 if is_1h_bear else 0.0)
+            trend_pts = (
+                (20.0 if is_1d_bull else (-20.0 if is_1d_bear else 0.0)) +
+                (20.0 if is_4h_bull else (-20.0 if is_4h_bear else 0.0)) +
+                (15.0 if is_1h_bull else (-15.0 if is_1h_bear else 0.0)) +
+                (10.0 if is_15m_bull else (-10.0 if is_15m_bear else 0.0))
+            )
 
             mom_pts = 0.0
-            mom_pts += float(np.clip((rsi_1h - 50.0) * 0.5, -15.0, 15.0))
-            mom_pts += float(np.clip((rsi_15m - 50.0) * 0.3, -10.0, 10.0))
+            mom_pts += 15.0 if rsi_1h >= 58.0 else (-15.0 if rsi_1h <= 42.0 else 0.0)
             mom_pts += 10.0 if is_15m_bull else (-10.0 if is_15m_bear else 0.0)
 
             vel_pts = 0.0
@@ -3459,7 +3894,21 @@ class HybridQuantEngine:
 
             composite_score = round(float(np.clip(trend_pts + mom_pts + vel_pts, -100.0, 100.0)), 1)
 
-            # Structural narrative description
+            # Structural narrative description & Breakout Prediction
+            if is_squeeze:
+                if is_1d_bull or is_4h_bull or bull_trend_prob > bear_trend_prob:
+                    breakout_pred = "🚀 SQUEEZE COILING (BULL BREAKOUT FAVORED)"
+                elif is_1d_bear or is_4h_bear or bear_trend_prob > bull_trend_prob:
+                    breakout_pred = "🩸 SQUEEZE COILING (BEAR BREAKDOWN FAVORED)"
+                else:
+                    breakout_pred = "⚖️ SYMMETRICAL SQUEEZE COILING"
+            elif predicted_trend == "BULLISH":
+                breakout_pred = "🚀 BULLISH TREND EXPANSION ACTIVE"
+            elif predicted_trend == "BEARISH":
+                breakout_pred = "🩸 BEARISH BREAKDOWN EXPANSION ACTIVE"
+            else:
+                breakout_pred = "💤 BALANCED RANGE EQUILIBRIUM"
+
             if is_1h_bull and is_4h_bull:
                 trend_structure = "Bullish Alignment (1H & 4H Trend Up)"
             elif is_1h_bear and is_4h_bear:
@@ -3473,73 +3922,66 @@ class HybridQuantEngine:
             else:
                 trend_structure = "Multi-Timeframe Range Consolidation"
 
-            is_squeeze = (bbw_15m <= 0.018) or (bbw_1h <= 0.030)
-
-            # --- REGIME CLASSIFICATION ENGINE HIERARCHY ---
+            # --- REGIME CLASSIFICATION ENGINE HIERARCHY & SAFEGUARD POSTURE ---
             if ret_15m <= -0.018 or ret_1h <= -0.028 or (ret_15m <= -0.012 and ret_45m <= -0.022):
                 # 1. ALERT_DUMP: Emergency risk-off flush
                 active = True
                 code = "ALERT_DUMP"
-                regime = "DUMP"
-                regime_label = "🚨 SEVERE SYSTEMIC DUMP"
-                reason = f"ALERT DUMP (BTC: ${c_now:,.0f} | 15M: {ret_15m*100:+.2f}% | 1H: {ret_1h*100:+.2f}%)"
+                regime = "FLASH_DUMP"
+                regime_label = "🚨 CRASH DUMP ALERT"
+                reason = f"BTC RAPID SELLOFF ({ret_15m*100.0:+.2f}% in 15m, {ret_1h*100.0:+.2f}% in 1h)"
+                altcoin_posture = "DEFENSIVE_SHORTS_ONLY"
+                market_phase_desc = "High velocity cascade selloff. Altcoin long orders completely blocked; inverse and short models given elevated priority."
 
-            elif ret_15m <= -0.009 or ret_1h <= -0.016 or (ret_15m <= -0.006 and c_now < bb_lower_15m and rsi_15m < 28.0):
-                # 2. DEFENSIVE: Altcoin longs paused
+            elif bear_trend_prob >= 65.0 or (is_1d_bear and is_4h_bear and is_1h_bear and rsi_1h <= 40.0):
+                # 2. BEAR_TREND: Persistent multi-horizon downtrend
                 active = True
-                code = "DEFENSIVE"
-                regime = "DEFENSIVE"
-                regime_label = "⚠️ BTC DUMP CIRCUIT BREAKER"
-                reason = f"CIRCUIT BREAKER (BTC: ${c_now:,.0f} | 15M: {ret_15m*100:+.2f}% | 1H: {ret_1h*100:+.2f}%)"
+                code = "BEAR_TREND"
+                regime = "BEARISH_BREAKDOWN"
+                regime_label = "🩸 SYSTEMIC BEAR TREND"
+                reason = f"BEARISH BREAKDOWN CONFIRMED (Bear Prob: {bear_trend_prob}% | Score: {composite_score:+.0f})"
+                altcoin_posture = "SELECTIVE_SHORTS_ALLOWED"
+                market_phase_desc = "Macro downtrend dominating price action. Altcoin long exposure heavily pruned."
 
-            elif composite_score >= 25.0 or (is_1h_bull and ret_1h >= 0.003 and rsi_1h >= 52.0) or (ret_1h >= 0.007 and rsi_15m >= 54.0):
-                # 3. BULL_MOMENTUM: Bullish expansion & markup
+            elif (ret_15m >= 0.018 or ret_1h >= 0.030) and is_1h_bull:
+                # 3. PUMP_EXPANSION: Upward momentum breakout
                 active = False
-                code = "BULL_MOMENTUM"
-                regime = "BULLISH"
-                regime_label = "🚀 BULLISH EXPANSION"
-                reason = f"BULLISH EXPANSION (BTC: ${c_now:,.0f} | Score: +{composite_score:.0f} | 1H: {ret_1h*100:+.2f}% | RSI: {rsi_1h:.1f})"
+                code = "PUMP_EXPANSION"
+                regime = "BULLISH_EXPANSION"
+                regime_label = "🚀 BULLISH MOMENTUM SURGE"
+                reason = f"BTC EXPANSION SURGE ({ret_15m*100.0:+.2f}% in 15m | Bull Prob: {bull_trend_prob}%)"
+                altcoin_posture = "AGGRESSIVE_LONGS"
+                market_phase_desc = "Strong bullish expansion and market momentum. Full permission for altcoin breakout setups."
 
-            elif (rsi_15m <= 36.0 and ret_15m > 0 and (is_1d_bull or is_4h_bull) and c_now <= bb_lower_15m * 1.003):
-                # 4. BULL_ACCUMULATION: Dip-buy reversal off oversold
+            elif bull_trend_prob >= 60.0 or (is_1d_bull and is_4h_bull and is_1h_bull):
+                # 4. BULL_TREND: Structured bullish trend
                 active = False
-                code = "BULL_MOMENTUM"
-                regime = "BULLISH"
-                regime_label = "💎 DIP ACCUMULATION"
-                reason = f"DIP ACCUMULATION (BTC: ${c_now:,.0f} | Oversold Bounce | RSI: {rsi_15m:.1f})"
+                code = "BULL_TREND"
+                regime = "BULLISH_ACCUMULATION"
+                regime_label = "📈 STRUCTURED UPTREND"
+                reason = f"STRUCTURED BULL ACCUMULATION (Bull Prob: {bull_trend_prob}% | Score: {composite_score:+.0f})"
+                altcoin_posture = "AGGRESSIVE_LONGS"
+                market_phase_desc = "Clean higher highs & higher lows structure. Altcoin momentum swings favored."
 
-            elif composite_score <= -25.0 or (is_1h_bear and ret_1h <= -0.003 and rsi_1h <= 48.0) or (ret_1h <= -0.007 and rsi_15m <= 46.0):
-                # 5. BEAR_MOMENTUM: Bearish markdown & distribution
-                active = False
-                code = "BEAR_MOMENTUM"
-                regime = "BEARISH"
-                regime_label = "🐻 BEARISH BREAKDOWN"
-                reason = f"BEARISH BREAKDOWN (BTC: ${c_now:,.0f} | Score: {composite_score:.0f} | 1H: {ret_1h*100:+.2f}% | RSI: {rsi_1h:.1f})"
-
-            elif (vol_ratio >= 1.65 or abs(ret_15m) >= 0.010 or rsi_15m >= 82.0 or rsi_15m <= 18.0) and not is_squeeze:
-                # 6. CAUTION: Elevated volatility whipsaw
-                active = False
-                code = "CAUTION"
-                regime = "VOLATILE"
-                regime_label = "⚡ HIGH VOLATILITY CHOP"
-                reason = f"HIGH VOLATILITY (BTC: ${c_now:,.0f} | Vol Ratio: {vol_ratio:.1f}x | 15M: {ret_15m*100:+.2f}%)"
-
-            elif is_squeeze or abs(composite_score) < 22.0 or (38.0 <= rsi_1h <= 62.0 and abs(ret_1h) <= 0.008):
-                # 7. CONSOLIDATION: Range-bound squeeze / coiling inside bands
+            elif is_squeeze or cons_trend_prob >= 50.0 or (bbw_15m <= 0.020 and abs(ret_1h) < 0.008):
+                # 5. CONSOLIDATION / VOLATILITY SQUEEZE
                 active = False
                 code = "CONSOLIDATION"
-                regime = "CONSOLIDATION"
-                regime_label = "💤 RANGE CONSOLIDATION"
-                sq_note = f"Squeeze: {bbw_15m*100:.2f}%" if is_squeeze else f"RSI: {rsi_1h:.1f}"
-                reason = f"RANGE CONSOLIDATION (BTC: ${c_now:,.0f} | Score: {composite_score:+.0f} | {sq_note})"
+                regime = "RANGE_SQUEEZE"
+                regime_label = "💤 VOLATILITY COIL / SQUEEZE"
+                reason = f"VOLATILITY SQUEEZE COILING (BBW: {bbw_15m*100.0:.2f}% | Cons Prob: {cons_trend_prob}%)"
+                altcoin_posture = "MEAN_REVERSION_RANGE"
+                market_phase_desc = f"Volatility compression in progress. {breakout_pred}. Range-bound trading and mean reversion active."
 
             else:
-                # 8. NORMAL: Balanced Equilibrium
+                # 6. STABLE / BALANCED EQUILIBRIUM
                 active = False
                 code = "NORMAL"
                 regime = "STABLE"
                 regime_label = "⚖️ BALANCED EQUILIBRIUM"
                 reason = f"BALANCED MARKET (BTC: ${c_now:,.0f} | Score: {composite_score:+.0f})"
+                altcoin_posture = "STANDARD_EXECUTION"
+                market_phase_desc = "Balanced equilibrium state across timeframes. Normal multi-horizon quantitative trade selection."
 
             # Assign properties
             self.btc_shield_active = active
@@ -3561,10 +4003,65 @@ class HybridQuantEngine:
             self.btc_bbw_15m = round(bbw_15m * 100.0, 2)
             self.btc_vol_ratio = round(vol_ratio, 2)
 
+            # Predictive Properties
+            self.btc_predicted_trend = predicted_trend
+            self.btc_trend_probability = dominant_prob
+            self.btc_bull_trend_prob = bull_trend_prob
+            self.btc_bear_trend_prob = bear_trend_prob
+            self.btc_consolidation_prob = cons_trend_prob
+            self.btc_predicted_target = pred_btc_target
+            self.btc_predicted_change_pct = pred_change_pct
+            self.btc_breakout_prediction = breakout_pred
+            self.btc_altcoin_posture = altcoin_posture
+            # Generate Institutional Trader Regime Playbook
+            self.trader_playbook = TraderRegimePlaybook.generate(
+                regime=regime,
+                predicted_trend=predicted_trend,
+                bull_prob=bull_trend_prob,
+                bear_prob=bear_trend_prob,
+                cons_prob=cons_trend_prob,
+                is_squeeze=is_squeeze,
+                btc_price=c_now,
+                breakout_pred=breakout_pred
+            )
+
             if self.btc_shield_active:
                 print(f"\n[SHIELD 🛡️] ⚠️ BTC MARKET BETA SHIELD ACTIVATED: {self.btc_shield_reason} | Altcoin Longs Paused to Prevent Correlated Stop-Outs.\n")
             else:
-                print(f"[SHIELD 🛡️] Market Beta Status: {self.btc_shield_reason} | Regime: {self.btc_shield_regime_label}")
+                print(f"[SHIELD 🛡️] Forecast: {predicted_trend} ({dominant_prob}%) | Bull: {bull_trend_prob}% | Bear: {bear_trend_prob}% | Cons: {cons_trend_prob}% | Target: ${pred_btc_target:,.0f} ({pred_change_pct:+.2f}%)")
+
+            return {
+                "active": self.btc_shield_active,
+                "status_code": self.btc_shield_code,
+                "regime": self.btc_shield_regime,
+                "regime_label": self.btc_shield_regime_label,
+                "reason": self.btc_shield_reason,
+                "composite_score": self.btc_composite_score,
+                "btc_price": self.btc_price,
+                "btc_15m_change_pct": self.btc_15m_change,
+                "btc_1h_change_pct": self.btc_1h_change,
+                "btc_4h_change_pct": self.btc_4h_change,
+                "btc_24h_change_pct": self.btc_24h_change,
+                "rsi_15m": self.btc_rsi_15m,
+                "rsi_1h": self.btc_rsi_1h,
+                "rsi_4h": self.btc_rsi_4h,
+                "trend_structure": self.btc_trend_structure,
+                "is_squeeze": self.btc_is_squeeze,
+                "bbw_15m": self.btc_bbw_15m,
+                "vol_ratio": self.btc_vol_ratio,
+                "altcoin_longs_allowed": not self.btc_shield_active,
+                "predicted_trend": self.btc_predicted_trend,
+                "trend_probability": self.btc_trend_probability,
+                "bull_trend_prob": self.btc_bull_trend_prob,
+                "bear_trend_prob": self.btc_bear_trend_prob,
+                "consolidation_prob": self.btc_consolidation_prob,
+                "predicted_btc_target": self.btc_predicted_target,
+                "predicted_btc_change_pct": self.btc_predicted_change_pct,
+                "breakout_prediction": self.btc_breakout_prediction,
+                "altcoin_posture": self.btc_altcoin_posture,
+                "market_phase_description": self.btc_market_phase_description,
+                "trader_playbook": self.trader_playbook
+            }
 
         except Exception as e:
             self.btc_shield_active = False
@@ -3572,7 +4069,37 @@ class HybridQuantEngine:
             self.btc_shield_regime = "STABLE"
             self.btc_shield_regime_label = "⚖️ BALANCED EQUILIBRIUM"
             self.btc_shield_reason = "BALANCED MARKET"
+            self.btc_predicted_trend = "CONSOLIDATION"
+            self.btc_trend_probability = 50.0
+            self.btc_bull_trend_prob = 33.3
+            self.btc_bear_trend_prob = 33.3
+            self.btc_consolidation_prob = 33.4
+            self.btc_predicted_target = 0.0
+            self.btc_predicted_change_pct = 0.0
+            self.btc_breakout_prediction = "⚖️ RANGE BOUND"
+            self.btc_altcoin_posture = "STANDARD_EXECUTION"
+            self.btc_market_phase_description = "Balanced equilibrium state."
+            self.trader_playbook = TraderRegimePlaybook.generate('STABLE', 'CONSOLIDATION', 33.3, 33.3, 33.4)
             print(f"[SHIELD Note evaluating BTC regime: {e}")
+            return {
+                "active": False,
+                "status_code": "NORMAL",
+                "regime": "STABLE",
+                "regime_label": "⚖️ BALANCED EQUILIBRIUM",
+                "reason": "BALANCED MARKET",
+                "altcoin_longs_allowed": True,
+                "predicted_trend": "CONSOLIDATION",
+                "trend_probability": 50.0,
+                "bull_trend_prob": 33.3,
+                "bear_trend_prob": 33.3,
+                "consolidation_prob": 33.4,
+                "predicted_btc_target": 0.0,
+                "predicted_btc_change_pct": 0.0,
+                "breakout_prediction": "⚖️ RANGE BOUND",
+                "altcoin_posture": "STANDARD_EXECUTION",
+                "market_phase_description": "Balanced equilibrium state.",
+                "trader_playbook": self.trader_playbook
+            }
 
     def evaluate_single_horizon(self, symbol: str, horizon_key: str, h_cfg: dict, fused_df: pd.DataFrame, d1_macro_bull: bool, funding_info: dict = None, live_price: float = None, model_inference_cache: dict = None, raw_dfs: dict = None) -> dict:
         anchor_tf = h_cfg['anchor_tf']
@@ -3589,83 +4116,77 @@ class HybridQuantEngine:
         else:
             current_price = float(live_candle['close'].values[0])
         now_eval = datetime.now(timezone.utc)
-        min_15 = (now_eval.minute // 15) * 15
-        candle_open_utc = now_eval.replace(minute=min_15, second=0, microsecond=0)
 
         live_raw_atr = live_candle['primary_raw_atr'].values[0]
         live_norm_atr = live_candle['primary_norm_atr'].values[0]
 
-        step_delta = CryptoDataLoader.get_timeframe_delta(anchor_tf, bars=1)
-        trade_open_timestamp = candle_open_utc + step_delta
-        trade_open_str = trade_open_timestamp.strftime('%Y-%m-%d %H:%M UTC')
-        target_close_timestamp = trade_open_timestamp + (step_delta * bars)
-        trade_close_str = target_close_timestamp.strftime('%Y-%m-%d %H:%M UTC')
+        # Standard Candle Open and Close Boundaries
+        trade_open_timestamp, target_close_timestamp, trade_open_str, trade_close_str = CryptoDataLoader.get_candle_schedule(
+            anchor_tf, bars=bars, now_utc=now_eval
+        )
 
         clean_df = labeled_df.dropna(subset=['Target_Primary', 'Target_Meta', 'Target_Return', 'Excursion_Score']).reset_index(drop=True)
         non_feature_cols = ['timestamp', 'datetime', 'open', 'high', 'low', 'close', 'volume', 'taker_buy_vol', 'primary_raw_atr', 'primary_norm_atr', 'Target_Primary', 'Target_Meta', 'Target_Return', 'Excursion_Score']
         feature_cols = [c for c in clean_df.columns if c not in non_feature_cols]
 
-        if model_inference_cache is not None and anchor_tf in model_inference_cache:
-            p_cat_live, p_xgb_live, p_lgb_live, p_et_live, w_cat, w_xgb, w_lgb, w_et, elite_acc = model_inference_cache[anchor_tf]
+        clean_sym_key = symbol.replace('/', '_').replace(':USDT', '')
+        cache_key_clf = f"{clean_sym_key}_{horizon_key}_clf"
+        cache_key_reg = f"{clean_sym_key}_{horizon_key}_reg"
+        now_ts = time.time()
+
+        # ----------------------------------------------------------------------
+        # 1. PER-COIN ML CLASSIFIER & REGRESSOR EXECUTION
+        # ----------------------------------------------------------------------
+        X = clean_df[feature_cols].values if len(feature_cols) > 0 else np.array([])
+        y_p = clean_df['Target_Primary'].values if 'Target_Primary' in clean_df.columns else np.array([])
+        y_r = clean_df['Target_Return'].values if 'Target_Return' in clean_df.columns else np.array([])
+        n = len(X)
+
+        if n < 10 or len(feature_cols) == 0:
+            # Low data fallback for new or illiquid coins
+            p_cat_live, p_xgb_live, p_et_live, p_hgb_live = (0.55 if d1_macro_bull else 0.45,)*4
+            w_cat, w_xgb, w_et, w_hgb = (0.25, 0.25, 0.25, 0.25)
+            elite_acc = 0.60
+            pred_reg_ret = 0.008 if d1_macro_bull else -0.008
         else:
-            X = clean_df[feature_cols].values
-            y_p = clean_df['Target_Primary'].values
-            y_m = clean_df['Target_Meta'].values
-            y_r = clean_df['Target_Return'].values
+            n_train = max(5, int(n * self.config['train_split']))
+            X_train, y_p_train, y_r_train = X[:n_train], y_p[:n_train].copy(), y_r[:n_train]
+            X_test, y_p_test = X[n_train:], y_p[n_train:]
 
-            n = len(X)
-            if n < 10 or len(feature_cols) == 0:
-                # Low historical data fallback (e.g. newly listed or illiquid pair)
-                p_cat_live = 0.55 if d1_macro_bull else 0.45
-                p_xgb_live = 0.55 if d1_macro_bull else 0.45
-                p_lgb_live = 0.55 if d1_macro_bull else 0.45
-                p_et_live = 0.55 if d1_macro_bull else 0.45
-                w_cat, w_xgb, w_lgb, w_et = (0.25, 0.25, 0.25, 0.25)
-                elite_acc = 0.60
-            else:
-                n_train = max(5, int(n * self.config['train_split']))
-                X_train, y_p_train, y_r_train = X[:n_train], y_p[:n_train].copy(), y_r[:n_train]
-                X_test, y_p_test = X[n_train:], y_p[n_train:]
-
-            # Prevent CatBoost / XGBoost "Target contains only one unique value" crash
             unique_classes = np.unique(y_p_train)
             if len(unique_classes) < 2 and len(y_p_train) > 1:
                 y_p_train[0] = 1 - y_p_train[-1]
 
-            # Fast-Boot Model Checkpoint & Memory Cache (14 Day Lifetime, Keyed by Anchor Timeframe)
-            cache_key = f"{symbol.replace('/', '_')}_{anchor_tf}"
-            now_ts = time.time()
-
-            if cache_key in self.model_cache and (now_ts - self.model_cache[cache_key].get('ts', 0) < 86400 * 14):
-                cached = self.model_cache[cache_key]
-                cached['ts'] = now_ts  # Update LRU access timestamp
+            # Fast-Boot Cached Checkpoint or Fresh Per-Coin Fit
+            if cache_key_clf in self.model_cache and (now_ts - self.model_cache[cache_key_clf].get('ts', 0) < 86400 * 14):
+                cached = self.model_cache[cache_key_clf]
+                cached['ts'] = now_ts
                 scaler = cached['scaler']
                 cat = cached['cat']
                 xgb_m = cached['xgb_m']
-                lgb_m = cached.get('lgb_m') if HAS_LIGHTGBM else None
                 et = cached['et']
-                w_cat, w_xgb, w_lgb, w_et = cached.get('weights', (0.35, 0.35, 0.20, 0.10))
-                elite_acc = cached['elite_acc']
+                hgb_m = cached.get('hgb_m')
+                xgb_reg = cached.get('xgb_reg')
+                hgb_reg = cached.get('hgb_reg')
+                w_cat, w_xgb, w_et, w_hgb = cached.get('weights', (0.30, 0.30, 0.20, 0.20))
+                elite_acc = cached.get('elite_acc', 0.85)
+
                 X_live_scaled = np.nan_to_num(scaler.transform(live_candle[feature_cols].values), nan=0.0)
-                
                 p_cat_live = float(cat.predict_proba(X_live_scaled)[0, 1]) if cat else 0.50
                 p_xgb_live = float(xgb_m.predict_proba(X_live_scaled)[0, 1]) if xgb_m else 0.50
-                if lgb_m:
-                    try:
-                        with _LGBM_LOCK:
-                            p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1])
-                    except Exception:
-                        p_lgb_live = p_xgb_live
-                else:
-                    p_lgb_live = p_xgb_live
                 p_et_live = float(et.predict_proba(X_live_scaled)[0, 1]) if et else 0.50
+                p_hgb_live = float(hgb_m.predict_proba(X_live_scaled)[0, 1]) if hgb_m else 0.50
+
+                r_xgb = float(xgb_reg.predict(X_live_scaled)[0]) if xgb_reg else 0.005
+                r_hgb = float(hgb_reg.predict(X_live_scaled)[0]) if hgb_reg else 0.005
+                pred_reg_ret = float(0.50 * r_xgb + 0.50 * r_hgb)
             else:
                 scaler = RobustScaler()
                 X_train_scaled = np.nan_to_num(scaler.fit_transform(X_train), nan=0.0)
                 X_test_scaled = np.nan_to_num(scaler.transform(X_test), nan=0.0)
                 X_live_scaled = np.nan_to_num(scaler.transform(live_candle[feature_cols].values), nan=0.0)
 
-                # 1. CatBoost Classifier
+                # 1. Per-Coin CatBoost Classifier
                 try:
                     cat = QuantModelFactory.build_primary_catboost(self.config['catboost'])
                     cat.fit(X_train_scaled, y_p_train, verbose=False)
@@ -3676,7 +4197,7 @@ class HybridQuantEngine:
                     p_cat_live = 0.55 if d1_macro_bull else 0.45
                     p_test_cat = np.array([p_cat_live] * max(1, len(X_test_scaled)))
 
-                # 2. XGBoost Classifier
+                # 2. Per-Coin XGBoost Classifier
                 try:
                     xgb_m = QuantModelFactory.build_primary_xgboost(self.config['xgb_clf'])
                     xgb_m.fit(X_train_scaled, y_p_train, verbose=False)
@@ -3687,24 +4208,7 @@ class HybridQuantEngine:
                     p_xgb_live = 0.55 if d1_macro_bull else 0.45
                     p_test_xgb = np.array([p_xgb_live] * max(1, len(X_test_scaled)))
 
-                # 3. LightGBM Classifier (Protected with _LGBM_LOCK for thread safety)
-                try:
-                    lgb_m = QuantModelFactory.build_primary_lightgbm(self.config['lgb_clf'])
-                    if lgb_m:
-                        with _LGBM_LOCK:
-                            lgb_m.fit(X_train_scaled, y_p_train)
-                            p_lgb_live = float(lgb_m.predict_proba(X_live_scaled)[0, 1])
-                            p_test_lgb = lgb_m.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_lgb_live])
-                    else:
-                        lgb_m = None
-                        p_lgb_live = p_xgb_live
-                        p_test_lgb = p_test_xgb
-                except Exception:
-                    lgb_m = None
-                    p_lgb_live = p_xgb_live
-                    p_test_lgb = p_test_xgb
-
-                # 4. ExtraTrees Classifier
+                # 3. Per-Coin ExtraTrees Classifier
                 try:
                     et = QuantModelFactory.build_primary_extra_trees(self.config['extra_trees'])
                     et.fit(X_train_scaled, y_p_train)
@@ -3715,45 +4219,72 @@ class HybridQuantEngine:
                     p_et_live = 0.55 if d1_macro_bull else 0.45
                     p_test_et = np.array([p_et_live] * max(1, len(X_test_scaled)))
 
-                # Dynamic Validation-Loss Weighted Stacking
+                # 4. Per-Coin HistGradientBoosting Classifier
+                try:
+                    hgb_m = QuantModelFactory.build_primary_hist_gbm_clf()
+                    hgb_m.fit(X_train_scaled, y_p_train)
+                    p_hgb_live = float(hgb_m.predict_proba(X_live_scaled)[0, 1])
+                    p_test_hgb = hgb_m.predict_proba(X_test_scaled)[:, 1] if len(X_test_scaled) > 0 else np.array([p_hgb_live])
+                except Exception:
+                    hgb_m = None
+                    p_hgb_live = 0.55 if d1_macro_bull else 0.45
+                    p_test_hgb = np.array([p_hgb_live] * max(1, len(X_test_scaled)))
+
+                # 5. Per-Coin Continuous Price Regression Models
+                try:
+                    xgb_reg = QuantModelFactory.build_xgb_regressor(self.config.get('xgb_reg', {}))
+                    xgb_reg.fit(X_train_scaled, y_r_train)
+                    r_xgb = float(xgb_reg.predict(X_live_scaled)[0])
+                except Exception:
+                    xgb_reg = None
+                    r_xgb = 0.005 if d1_macro_bull else -0.005
+
+                try:
+                    hgb_reg = QuantModelFactory.build_hist_gbm_regressor()
+                    hgb_reg.fit(X_train_scaled, y_r_train)
+                    r_hgb = float(hgb_reg.predict(X_live_scaled)[0])
+                except Exception:
+                    hgb_reg = None
+                    r_hgb = 0.005 if d1_macro_bull else -0.005
+
+                pred_reg_ret = float(0.50 * r_xgb + 0.50 * r_hgb)
+
+                # Loss-Weighted Stacking
                 losses = []
-                for p_test in [p_test_cat, p_test_xgb, p_test_lgb, p_test_et]:
+                for p_test in [p_test_cat, p_test_xgb, p_test_et, p_test_hgb]:
                     if len(y_p_test) >= 4:
                         p_c = np.clip(p_test, 1e-5, 1.0 - 1e-5)
                         loss = -np.mean(y_p_test * np.log(p_c) + (1 - y_p_test) * np.log(1 - p_c))
                         losses.append(max(0.01, float(loss)))
                     else:
                         losses.append(0.5)
-
                 inv_losses = [1.0 / l for l in losses]
                 sum_inv = sum(inv_losses)
-                w_cat, w_xgb, w_lgb, w_et = [w / sum_inv for w in inv_losses]
+                w_cat, w_xgb, w_et, w_hgb = [w / sum_inv for w in inv_losses]
 
-                p_test_ens = (p_test_cat * w_cat) + (p_test_xgb * w_xgb) + (p_test_lgb * w_lgb) + (p_test_et * w_et)
+                p_test_ens = (p_test_cat * w_cat) + (p_test_xgb * w_xgb) + (p_test_et * w_et) + (p_test_hgb * w_hgb)
                 elite_mask = (p_test_ens >= self.config['elite_conviction_threshold']) | (p_test_ens <= (1.0 - self.config['elite_conviction_threshold']))
                 elite_acc = accuracy_score(y_p_test[elite_mask], (p_test_ens[elite_mask] >= 0.5).astype(int)) if (len(y_p_test) > 0 and np.sum(elite_mask) >= 5) else 0.88
 
-                if cat and xgb_m and et:
-                    self.model_cache[cache_key] = {
+                if cat and xgb_m:
+                    self.model_cache[cache_key_clf] = {
                         'scaler': scaler,
                         'cat': cat,
                         'xgb_m': xgb_m,
-                        'lgb_m': lgb_m,
                         'et': et,
-                        'weights': (w_cat, w_xgb, w_lgb, w_et),
+                        'hgb_m': hgb_m,
+                        'xgb_reg': xgb_reg,
+                        'hgb_reg': hgb_reg,
+                        'weights': (w_cat, w_xgb, w_et, w_hgb),
                         'elite_acc': elite_acc,
                         'ts': now_ts
                     }
                     if len(self.model_cache) > 3000:
                         self._prune_model_cache(max_size=2500, max_age_seconds=86400 * 14)
 
-            if model_inference_cache is not None:
-                model_inference_cache[anchor_tf] = (p_cat_live, p_xgb_live, p_lgb_live, p_et_live, w_cat, w_xgb, w_lgb, w_et, elite_acc)
+        # 1. Base ML Direction & Calibrated Probability
+        h_prob = (p_cat_live * w_cat) + (p_xgb_live * w_xgb) + (p_et_live * w_et) + (p_hgb_live * w_hgb)
 
-        # 1. Base ML Direction & Calibrated Probability with Hysteresis Smoothing
-        h_prob = (p_cat_live * w_cat) + (p_xgb_live * w_xgb) + (p_lgb_live * w_lgb) + (p_et_live * w_et)
-        
-        # Hysteresis Band: [0.47, 0.53] represents low-conviction neutral consolidation zone
         if h_prob >= 0.53:
             h_dir = "BULLISH"
             h_conf = h_prob * 100.0
@@ -3763,7 +4294,6 @@ class HybridQuantEngine:
             h_conf = (1.0 - h_prob) * 100.0
             is_neutral_zone = False
         else:
-            # Inside the neutral consolidation band
             h_dir = "BULLISH" if d1_macro_bull else "BEARISH"
             h_conf = 50.0 + abs(h_prob - 0.50) * 100.0
             is_neutral_zone = True
@@ -3779,11 +4309,11 @@ class HybridQuantEngine:
                 h_conf = min(96.0, h_conf + 6.0)
                 squeeze_boost_label = " ⚡ [LONG FLUSH CATALYST]"
 
-        # 3. Smart Money Concepts: Liquidity Sweep & Fakeout Reversal Detection
+        # 3. Smart Money Concepts: Liquidity Sweep
         is_bull_sweep = live_candle.get(f'{anchor_tf}_liquidity_sweep_bull', pd.Series([0])).values[0] == 1.0
         is_bear_sweep = live_candle.get(f'{anchor_tf}_liquidity_sweep_bear', pd.Series([0])).values[0] == 1.0
 
-        # 4. Relative Strength vs BTC Alpha Calculation (4H window)
+        # 4. Relative Strength vs BTC Alpha
         asset_4h_ret = 0.0
         btc_4h_ret = 0.0
         if '4h' in raw_dfs and len(raw_dfs['4h']) >= 2:
@@ -3792,7 +4322,7 @@ class HybridQuantEngine:
             btc_4h_ret = (self.btc_cache['4h']['close'].iloc[-1] - self.btc_cache['4h']['close'].iloc[-2]) / self.btc_cache['4h']['close'].iloc[-2]
         rs_btc = round((asset_4h_ret - btc_4h_ret) / max(0.005, live_norm_atr), 3)
 
-        # 5. Volatility Regime-Adaptive TP/SL Multipliers (ADX & Choppiness Index)
+        # 5. Volatility Regime-Adaptive TP/SL Multipliers
         adx_val = live_candle[f'{anchor_tf}_adx_14'].values[0] * 100.0 if f'{anchor_tf}_adx_14' in live_candle.columns else 25.0
         chop_val = live_candle[f'{anchor_tf}_chop_index'].values[0] * 100.0 if f'{anchor_tf}_chop_index' in live_candle.columns else 50.0
 
@@ -3806,7 +4336,7 @@ class HybridQuantEngine:
             tp_mult_eff = tp_mult
             sl_mult_eff = sl_mult
 
-        # 6. Determine Strategy Signal & Directional Overrides
+        # 6. Technical Reversals & Price Action Metrics
         rsi_anchor = live_candle[f'{anchor_tf}_rsi_14'].values[0] * 100.0 if f'{anchor_tf}_rsi_14' in live_candle.columns else 50.0
         bull_rev_score = float(live_candle.get(f'{anchor_tf}_bull_reversal_score', pd.Series([0.0])).values[0])
         bear_rev_score = float(live_candle.get(f'{anchor_tf}_bear_reversal_score', pd.Series([0.0])).values[0])
@@ -3819,25 +4349,52 @@ class HybridQuantEngine:
         bb_spring = live_candle.get(f'{anchor_tf}_bb_spring', pd.Series([0])).values[0] == 1.0
         bb_upthrust = live_candle.get(f'{anchor_tf}_bb_upthrust', pd.Series([0])).values[0] == 1.0
 
-        # Quantitative Reversal Detection: Bottom Bounces after Downtrends & Top Exhaustion after Uptrends
+        # 7. PARABOLIC HYPE SURGE & BLOW-OFF TOP EXHAUSTION DETECTOR
+        is_hype_surge = False
+        is_blowoff_top = False
+        if '15m' in raw_dfs and len(raw_dfs['15m']) >= 15:
+            df_15 = raw_dfs['15m']
+            c_now = float(df_15['close'].iloc[-1])
+            c_prev3 = float(df_15['close'].iloc[-4]) if len(df_15) >= 4 else c_now
+            gain_recent_pct = (c_now - c_prev3) / (c_prev3 + 1e-10)
+            vol_now = float(df_15['volume'].iloc[-1])
+            vol_ma20 = float(df_15['volume'].rolling(20, min_periods=3).mean().iloc[-1])
+            vol_ratio_now = vol_now / (vol_ma20 + 1e-10)
+            
+            high_now = float(df_15['high'].iloc[-1])
+            low_now = float(df_15['low'].iloc[-1])
+            bar_rng = max(1e-8, high_now - low_now)
+            upper_wick_ratio = (high_now - max(c_now, float(df_15['open'].iloc[-1]))) / bar_rng
+
+            # A. Blow-Off Top Exhaustion (Spikes high, forms huge upper rejection wick, RSI > 78)
+            if (gain_recent_pct >= 0.065 or rsi_anchor >= 78.0) and (upper_wick_ratio >= 0.38 or bear_rev_score >= 0.45):
+                is_blowoff_top = True
+            
+            # B. Parabolic Hype Surge (Explosive momentum breakout on massive volume)
+            elif vol_ratio_now >= 2.6 and gain_recent_pct >= 0.032 and upper_wick_ratio < 0.30:
+                is_hype_surge = True
+
+        # Reversal Conditions
         is_bottom_reversal = (
             (bull_rev_score >= 0.45 or rsi_bull_div or (td9_buy_ex and (candlestick_bull or rsi_anchor <= 38.0)) or (bb_spring and rsi_anchor <= 42.0))
             and (p_cat_live >= 0.43 or p_xgb_live >= 0.43 or h_prob >= 0.45)
         )
         is_top_reversal = (
-            (bear_rev_score >= 0.45 or rsi_bear_div or (td9_sell_ex and (candlestick_bear or rsi_anchor >= 62.0)) or (bb_upthrust and rsi_anchor >= 58.0))
-            and (p_cat_live <= 0.57 or p_xgb_live <= 0.57 or h_prob <= 0.55)
+            (bear_rev_score >= 0.45 or rsi_bear_div or (td9_sell_ex and (candlestick_bear or rsi_anchor >= 62.0)) or (bb_upthrust and rsi_anchor >= 58.0) or is_blowoff_top)
+            and (p_cat_live <= 0.57 or p_xgb_live <= 0.57 or h_prob <= 0.55 or is_blowoff_top)
         )
 
         is_dip_buy = d1_macro_bull and rsi_anchor <= 46.0 and (p_cat_live >= 0.48 or p_xgb_live >= 0.48)
         is_rally_sell = (not d1_macro_bull) and rsi_anchor >= 55.0 and (p_cat_live <= 0.52 or p_xgb_live <= 0.52)
 
-        # Quantitative Breakdown Short & Breakout Long Engines
-        btc_regime = getattr(self, 'btc_market_regime', 'RANGE_CONSOLIDATION')
-        is_bear_regime = btc_regime in ["BEAR_MOMENTUM", "CIRCUIT_BREAKER", "ALERT_DUMP", "DUMP", "DEFENSIVE"]
-        is_bull_regime = btc_regime in ["BULL_MOMENTUM", "BULLISH", "DIP_ACCUMULATION", "EXPANSION"] or d1_macro_bull
+        btc_shield_code = getattr(self, 'btc_shield_code', 'NORMAL')
+        btc_shield_regime = getattr(self, 'btc_shield_regime', 'STABLE')
+        btc_pred_trend = getattr(self, 'btc_predicted_trend', 'CONSOLIDATION')
+        is_shield_active = getattr(self, 'btc_shield_active', False)
 
-        # Quantitative Breakout Long Engine (activated on volume expansion, RS outperformance, or bullish price action)
+        is_bear_regime = is_shield_active or btc_pred_trend == "BEARISH" or btc_shield_code in ["ALERT_DUMP", "BEAR_TREND", "DUMP", "DEFENSIVE"] or btc_shield_regime in ["FLASH_DUMP", "BEARISH_BREAKDOWN"]
+        is_bull_regime = (not is_shield_active) and (btc_pred_trend == "BULLISH" or btc_shield_code in ["PUMP_EXPANSION", "BULL_TREND", "BULL_MOMENTUM"] or btc_shield_regime in ["BULLISH_EXPANSION", "BULLISH_ACCUMULATION"]) or d1_macro_bull
+
         is_breakout_long = (
             (rs_btc >= 0.2 or is_bull_regime or d1_macro_bull) and
             (rsi_anchor >= 50.0 and rsi_anchor <= 72.0) and
@@ -3849,7 +4406,6 @@ class HybridQuantEngine:
             (p_cat_live >= 0.48 or p_xgb_live >= 0.48 or h_prob >= 0.49) and
             rsi_anchor >= 46.0 and rsi_anchor <= 74.0
         )
-
         is_breakdown_short = (
             is_bear_regime and
             rs_btc < 0.0 and
@@ -3858,7 +4414,20 @@ class HybridQuantEngine:
         )
 
         is_reversal_setup = False
-        if is_bottom_reversal and (not is_top_reversal or bull_rev_score > bear_rev_score):
+        if is_blowoff_top:
+            h_dir = "BEARISH"
+            h_conf = max(76.0, min(98.0, 68.0 + (bear_rev_score * 30.0)))
+            decision = f"🛑 PARABOLIC BLOW-OFF TOP (REVERSAL / FADE){squeeze_boost_label}"
+            priority = 1
+            is_reversal_setup = True
+            is_neutral_zone = False
+        elif is_hype_surge:
+            h_dir = "BULLISH"
+            h_conf = max(75.0, min(97.0, 70.0 + abs(pred_reg_ret) * 100.0))
+            decision = f"🚀 PARABOLIC HYPE PUMP (MOMENTUM SCALP){squeeze_boost_label}"
+            priority = 1
+            is_neutral_zone = False
+        elif is_bottom_reversal and (not is_top_reversal or bull_rev_score > bear_rev_score):
             h_dir = "BULLISH"
             h_conf = max(72.0, min(97.0, 62.0 + (bull_rev_score * 35.0)))
             decision = f"🎯 ELITE BOTTOM-REVERSAL (LONG){squeeze_boost_label}"
@@ -3874,43 +4443,43 @@ class HybridQuantEngine:
             is_neutral_zone = False
         elif is_bull_sweep and (p_cat_live >= 0.44 or p_xgb_live >= 0.44):
             h_dir = "BULLISH"
-            h_conf = max(68.0, min(96.0, h_conf + 8.0))
+            h_conf = max(68.0, min(96.0, (h_prob * 100.0) + 8.0))
             decision = f"🎯 ELITE LIQUIDITY-SWEEP (LONG){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
         elif is_bear_sweep and (p_cat_live <= 0.56 or p_xgb_live <= 0.56):
             h_dir = "BEARISH"
-            h_conf = max(68.0, min(96.0, h_conf + 8.0))
+            h_conf = max(68.0, min(96.0, ((1.0 - h_prob) * 100.0) + 8.0))
             decision = f"🎯 ELITE LIQUIDITY-SWEEP (SHORT){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
         elif is_momentum_long and not is_neutral_zone:
             h_dir = "BULLISH"
-            h_conf = max(70.0, min(96.0, h_conf + 10.0))
+            h_conf = max(70.0, min(96.0, (h_prob * 100.0) + 10.0))
             decision = f"🎯 ELITE MOMENTUM BREAKOUT (LONG){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
         elif is_dip_buy:
             h_dir = "BULLISH"
-            h_conf = max(60.0, h_conf)
+            h_conf = max(64.0, min(94.0, (h_prob * 100.0) + 6.0))
             decision = f"🎯 ELITE DIP-BUY EXECUTE (LONG){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
         elif is_rally_sell:
             h_dir = "BEARISH"
-            h_conf = max(60.0, h_conf)
+            h_conf = max(64.0, min(94.0, ((1.0 - h_prob) * 100.0) + 6.0))
             decision = f"🎯 ELITE RALLY-SELL EXECUTE (SHORT){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
         elif is_breakout_long and not is_neutral_zone:
             h_dir = "BULLISH"
-            h_conf = max(66.0, min(95.0, h_conf + 7.0))
+            h_conf = max(66.0, min(95.0, (h_prob * 100.0) + 7.0))
             decision = f"🎯 ELITE BREAKOUT EXECUTE (LONG){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
         elif is_breakdown_short and not is_neutral_zone:
             h_dir = "BEARISH"
-            h_conf = max(66.0, min(95.0, h_conf + 7.0))
+            h_conf = max(66.0, min(95.0, ((1.0 - h_prob) * 100.0) + 7.0))
             decision = f"🎯 ELITE BREAKDOWN EXECUTE (SHORT){squeeze_boost_label}"
             priority = 1
             is_neutral_zone = False
@@ -3922,34 +4491,38 @@ class HybridQuantEngine:
             is_alpha_exception = (h_dir == "BULLISH" and (rs_btc >= 0.4 or h_conf >= 62.0))
             is_15m_scalp_exception = (horizon_key == "scalp" and h_conf >= 60.0)
 
-            if (is_macro_aligned or is_alpha_exception) and h_conf >= (self.config['elite_conviction_threshold'] * 100.0):
+            if (is_macro_aligned or is_alpha_exception or is_reversal_setup) and h_conf >= (self.config['elite_conviction_threshold'] * 100.0):
                 decision = f"🎯 ELITE EXECUTE {'LONG' if h_dir=='BULLISH' else 'SHORT'}{squeeze_boost_label}"
                 priority = 1
-            elif (is_macro_aligned or is_alpha_exception or is_15m_scalp_exception) and h_conf >= 54.0:
+            elif (is_macro_aligned or is_alpha_exception or is_15m_scalp_exception or is_reversal_setup) and h_conf >= 54.0:
                 decision = f"✅ STANDARD EXECUTE {'LONG' if h_dir=='BULLISH' else 'SHORT'}{squeeze_boost_label}"
                 priority = 2
-            elif not is_macro_aligned and not is_alpha_exception and not is_15m_scalp_exception:
+            elif not is_macro_aligned and not is_alpha_exception and not is_15m_scalp_exception and not is_reversal_setup:
                 decision = "⛔ FILTER (MACRO CONFLICT)"
                 priority = 3
             else:
                 decision = "⛔ FILTER (LOW CONVICTION)"
                 priority = 4
 
-        # 7. Calculate True Directional TP & SL Targets (Synchronized with Final h_dir & Adaptive Multipliers)
-        exp_ret_mag = max(0.002, (h_conf / 100.0) * live_norm_atr * (bars ** 0.5))
+        # 8. Continuous Price Regression Target & Asymmetric R:R Architecture
+        exp_ret_mag = max(0.004, abs(pred_reg_ret), (h_conf / 100.0) * live_norm_atr * (bars ** 0.5))
         exp_ret = exp_ret_mag if h_dir == "BULLISH" else -exp_ret_mag
         projected_target = current_price * (1.0 + exp_ret)
+        predicted_next_price = round(projected_target, 6)
+        predicted_return_pct = round(exp_ret * 100.0, 2)
 
         risk_dist = max(1e-8, sl_mult_eff * live_raw_atr)
         live_low_c = float(live_candle['low'].values[0]) if 'low' in live_candle.columns else current_price
         live_high_c = float(live_candle['high'].values[0]) if 'high' in live_candle.columns else current_price
 
-        # Asymmetric R:R Architecture: TP1 at 1.25x actual risk (Enforces min 0.85% gain on 15M), TP2 at 2.0x, TP3 at 3.0x
-        min_tp1_dist = (0.0085 * current_price) if horizon_key == "scalp" else (1.15 * risk_dist)
+        # Guarantee TP1 exceeds exchange roundtrip fee drag (min 0.45%)
+        min_tp1_dist = max(0.0045 * current_price, (0.0085 * current_price) if horizon_key == "scalp" else (1.15 * risk_dist))
         if h_dir == "BULLISH":
             sl_base = current_price - risk_dist
             if is_reversal_setup or is_bull_sweep:
                 sl_p = min(sl_base, live_low_c - (0.25 * live_raw_atr))
+            elif is_hype_surge:
+                sl_p = current_price - (0.85 * risk_dist)  # Tight ratchet stop on hype pumps
             else:
                 sl_p = sl_base
             actual_risk = max(1e-8, current_price - sl_p)
@@ -3960,7 +4533,7 @@ class HybridQuantEngine:
             tp_p = tp4_p
         else:
             sl_base = current_price + risk_dist
-            if is_reversal_setup or is_bear_sweep:
+            if is_reversal_setup or is_bear_sweep or is_blowoff_top:
                 sl_p = max(sl_base, live_high_c + (0.25 * live_raw_atr))
             else:
                 sl_p = sl_base
@@ -3972,37 +4545,38 @@ class HybridQuantEngine:
             tp4_p = max(min_floor, current_price - max(4.00 * actual_risk, min_tp1_dist * 3.8))
             tp_p = tp4_p
 
-        # 8. Minimum Profit Hurdle Check (Enforces >= 0.85% return on 15M to guarantee high net profit after exchange fees)
-        reward_pct = (abs(tp_p - current_price) / (current_price + 1e-10)) * 100.0
+        # Minimum Profit Hurdle Check against TP1
+        tp1_gain_pct = (abs(tp1_p - current_price) / (current_price + 1e-10)) * 100.0
         min_reward_map = {
-            'scalp': 0.85,       # Minimum 0.85% profit hurdle for 15M (clears buy & sell exchange fees + delivers clean profit)
+            'scalp': 0.70,
+            'horizon_30m': 0.75,
             'swing': 0.80,
-            'macro': 1.80,
-            'horizon_2d': 2.50,
-            'horizon_3d': 3.20,
-            'weekly': 5.00,
-            'biweekly': 8.00,
-            'monthly': 12.00
+            'horizon_4h': 1.10,
+            'horizon_12h': 1.40,
+            'macro': 1.70,
+            'horizon_4d': 2.20,
+            'weekly': 3.50,
+            'biweekly': 5.00,
+            'monthly': 7.00
         }
-        min_hurdle = min_reward_map.get(horizon_key, 0.50)
-        if reward_pct < min_hurdle or abs(exp_ret * 100.0) < (0.80 if horizon_key == 'scalp' else 0.40):
+        min_hurdle = min_reward_map.get(horizon_key, 0.45)
+        if (tp1_gain_pct < min_hurdle or abs(exp_ret * 100.0) < (0.60 if horizon_key == 'scalp' else 0.35)) and not is_hype_surge and h_conf < 78.0:
             decision = f"⛔ FILTER (SUB-{min_hurdle:.1f}% RETURN / FEE DRAG)"
             priority = 4
 
-        # Generate Professional 3-Tier Signal Card (1:2 Risk to Reward Architecture)
         coin_tag = symbol.split('/')[0]
         p_fmt = lambda p: f"{p:,.4f}" if p >= 1.0 else f"{p:.6g}"
         type_str = "LONG 🟢" if h_dir == "BULLISH" else "SHORT 🔴"
         market_str = "Spot & Futures" if h_dir == "BULLISH" else "Futures Only ⚡"
-        
         predicted_window_str = f"{trade_open_str} ➔ {trade_close_str} ({h_cfg['duration_label']})"
-        
+
         pro_signal_text = (
             f"🚀 PAIR: #{coin_tag}/USDT\n"
             f"📊 TYPE: {type_str}\n"
             f"🌐 MARKET: {market_str}\n"
             f"📅 PREDICTED CANDLE: {predicted_window_str}\n"
-            f"🎯 ENTRY: {p_fmt(current_price)}\n\n"
+            f"🎯 ENTRY: {p_fmt(current_price)}\n"
+            f"🔮 ML NEXT PRICE: {p_fmt(predicted_next_price)} ({predicted_return_pct:+.2f}%)\n\n"
             f"💎 TAKE PROFITS:\n"
             f"➤ TP1: {p_fmt(tp1_p)}\n"
             f"➤ TP2: {p_fmt(tp2_p)}\n"
@@ -4021,16 +4595,28 @@ class HybridQuantEngine:
             "entry_price": current_price,
             "tp1_price": tp1_p,
             "sl_price": sl_p
-        })
+        }, symbol=symbol)
+
+        active_playbook = getattr(self, 'trader_playbook', None) or TraderRegimePlaybook.generate('STABLE', 'CONSOLIDATION', 33.3, 33.3, 33.4)
+        playbook_regime = active_playbook.get('regime_type', 'CONSOLIDATION')
+        playbook_sizing_multiplier = active_playbook.get('sizing_multiplier', 1.0)
+        playbook_directive = active_playbook.get('tactical_stance', '')
 
         res = {
             "symbol": symbol,
             "horizon_name": h_cfg['name'],
             "duration_label": h_cfg['duration_label'],
             "current_price": current_price,
+            "predicted_next_price": predicted_next_price,
+            "predicted_return_pct": predicted_return_pct,
             "norm_atr": live_norm_atr,
             "raw_atr": live_raw_atr,
             "rs_btc": rs_btc,
+            "is_hype_surge": is_hype_surge,
+            "is_blowoff_top": is_blowoff_top,
+            "playbook_regime": playbook_regime,
+            "playbook_sizing_multiplier": playbook_sizing_multiplier,
+            "playbook_directive": playbook_directive,
             "trade_open_str": trade_open_str,
             "trade_close_str": trade_close_str,
             "predicted_close_utc": trade_close_str,
@@ -4267,6 +4853,45 @@ class HybridQuantEngine:
         live_high = max(float(raw_dfs['15m']['high'].iloc[-1]) if '15m' in raw_dfs else live_price, live_price)
         live_low = min(float(raw_dfs['15m']['low'].iloc[-1]) if '15m' in raw_dfs else live_price, live_price)
 
+        # Cross-Asset BTC Beta & Correlation Metrics
+        btc_corr = 0.50
+        btc_beta = 1.00
+        is_bear_when_btc_bear = False
+        is_bull_when_btc_bear = False
+        fused_1h = fused_dfs.get('1h', fused_dfs.get('15m'))
+        if fused_1h is not None and not fused_1h.empty:
+            if 'btc_corr_24h' in fused_1h.columns:
+                btc_corr = float(fused_1h['btc_corr_24h'].iloc[-1])
+            if 'btc_beta_24h' in fused_1h.columns:
+                btc_beta = float(fused_1h['btc_beta_24h'].iloc[-1])
+            if 'is_bear_when_btc_bear' in fused_1h.columns:
+                is_bear_when_btc_bear = bool(fused_1h['is_bear_when_btc_bear'].iloc[-1] > 0.5)
+            if 'is_bull_when_btc_bear' in fused_1h.columns:
+                is_bull_when_btc_bear = bool(fused_1h['is_bull_when_btc_bear'].iloc[-1] > 0.5)
+
+        # BTC Alignment Categorization
+        if btc_corr >= 0.45:
+            btc_alignment_tag = "BULL_BETA_ALIGNED"
+            btc_alignment_label = f"🟢 BTC Aligned (Corr: {btc_corr:+.2f}, Beta: {btc_beta:.2f}x)"
+        elif btc_corr <= -0.20:
+            btc_alignment_tag = "INVERSE_BTC_HEDGE"
+            btc_alignment_label = f"🛡️ Inverse Hedge (Corr: {btc_corr:+.2f})"
+        elif abs(btc_corr) < 0.25:
+            btc_alignment_tag = "DECOUPLED_INDEPENDENT"
+            btc_alignment_label = f"⚡ Decoupled/Solo (Corr: {btc_corr:+.2f})"
+        else:
+            btc_alignment_tag = "MODERATE_CORRELATED"
+            btc_alignment_label = f"⚪ Mod Correlated (Corr: {btc_corr:+.2f})"
+
+        if btc_beta >= 1.35 and is_bear_when_btc_bear:
+            btc_alignment_tag = "BEAR_SENSITIVE_LEVERAGED"
+            btc_alignment_label = f"🩸 High-Beta Bear Sensitive (Beta: {btc_beta:.2f}x)"
+
+        # Parabolic Hype & Blow-off top aggregate status across horizons
+        is_any_hype_surge = any(h.get('is_hype_surge', False) for h in horizon_results.values())
+        is_any_blowoff_top = any(h.get('is_blowoff_top', False) for h in horizon_results.values())
+        hype_status = "🛑 BLOW-OFF TOP EXHAUSTION" if is_any_blowoff_top else ("🚀 PARABOLIC HYPE SURGE" if is_any_hype_surge else "⚪ NORMAL")
+
         prediction_now = datetime.now(timezone.utc)
         out_dict = {
             "symbol": symbol,
@@ -4284,6 +4909,15 @@ class HybridQuantEngine:
             "consistency_index": consistency_index,
             "best_priority": best_priority,
             "overall_score": overall_score,
+            "btc_correlation": round(btc_corr, 3),
+            "btc_beta": round(btc_beta, 3),
+            "btc_alignment_tag": btc_alignment_tag,
+            "btc_alignment_label": btc_alignment_label,
+            "is_bear_when_btc_bear": is_bear_when_btc_bear,
+            "is_bull_when_btc_bear": is_bull_when_btc_bear,
+            "is_hype_surge": is_any_hype_surge,
+            "is_blowoff_top": is_any_blowoff_top,
+            "hype_status": hype_status,
             "tf_metrics_summary": tf_metrics_summary,
             "server_prediction_time": prediction_now.isoformat(),
             "server_prediction_ts": int(prediction_now.timestamp()),
@@ -4295,29 +4929,29 @@ class HybridQuantEngine:
     def _build_default_asset_entry(self, symbol: str, live_price: float = 0.0) -> dict:
         """Constructs an initial responsive prediction matrix row for newly discovered assets."""
         now_utc = datetime.now(timezone.utc)
-        min_15 = (now_utc.minute // 15) * 15
-        candle_open_utc = now_utc.replace(minute=min_15, second=0, microsecond=0)
         p = float(live_price) if live_price and live_price > 0 else 1.0
         p_fmt = lambda val: f"{val:,.4f}" if val >= 1.0 else f"{val:.6g}"
 
         horizons = {}
         for h_key, h_cfg in self.config.get('horizons', {}).items():
-            step_delta = CryptoDataLoader.get_timeframe_delta(h_cfg['anchor_tf'], bars=1)
-            trade_open = candle_open_utc + step_delta
-            target_close = trade_open + (step_delta * h_cfg['bars'])
-            trade_open_str = trade_open.strftime('%Y-%m-%d %H:%M UTC')
-            trade_close_str = target_close.strftime('%Y-%m-%d %H:%M UTC')
+            trade_open, target_close, trade_open_str, trade_close_str = CryptoDataLoader.get_candle_schedule(
+                h_cfg['anchor_tf'], bars=h_cfg.get('bars', 1), now_utc=now_utc
+            )
             window_str = f"{trade_open_str} ➔ {trade_close_str} ({h_cfg['duration_label']})"
             
-            tp1 = p * (1.0 + (h_cfg['tp_mult'] * 0.005))
+            exp_ret = float(h_cfg['tp_mult'] * 0.005)
+            tp1 = p * (1.0 + exp_ret)
             sl = p * (1.0 - (h_cfg['sl_mult'] * 0.003))
+            pred_next_p = round(tp1, 6)
+            pred_ret_pct = round(exp_ret * 100.0, 2)
 
             pro_sig = (
                 f"🚀 PAIR: #{symbol.split('/')[0]}/USDT\n"
                 f"📊 TYPE: LONG 🟢\n"
                 f"🌐 MARKET: Spot & Futures\n"
                 f"📅 PREDICTED CANDLE: {window_str}\n"
-                f"🎯 ENTRY: {p_fmt(p)}\n\n"
+                f"🎯 ENTRY: {p_fmt(p)}\n"
+                f"🔮 ML NEXT PRICE: {p_fmt(pred_next_p)} ({pred_ret_pct:+.2f}%)\n\n"
                 f"💎 TAKE PROFITS:\n"
                 f"➤ TP1: {p_fmt(tp1)}\n"
                 f"➤ TP2: {p_fmt(p * 1.015)}\n"
@@ -4331,9 +4965,13 @@ class HybridQuantEngine:
                 "horizon_name": h_cfg['name'],
                 "duration_label": h_cfg['duration_label'],
                 "current_price": p,
+                "predicted_next_price": pred_next_p,
+                "predicted_return_pct": pred_ret_pct,
                 "norm_atr": 0.01,
                 "raw_atr": p * 0.01,
                 "rs_btc": 0.0,
+                "is_hype_surge": False,
+                "is_blowoff_top": False,
                 "trade_open_str": trade_open_str,
                 "trade_close_str": trade_close_str,
                 "predicted_close_utc": trade_close_str,
@@ -4342,7 +4980,7 @@ class HybridQuantEngine:
                 "conviction": 55.0,
                 "meta_win_prob": 0.65,
                 "meta_win_prob_pct": 65.0,
-                "exp_return": 0.008,
+                "exp_return": exp_ret,
                 "projected_target": tp1,
                 "tp_price": tp1,
                 "tp1_price": tp1,
@@ -4373,6 +5011,15 @@ class HybridQuantEngine:
             "consistency_index": 60.0,
             "best_priority": 3,
             "overall_score": 0.44,
+            "btc_correlation": 0.50,
+            "btc_beta": 1.0,
+            "btc_alignment_tag": "MODERATE_CORRELATED",
+            "btc_alignment_label": "⚪ Mod Correlated (Corr: +0.50)",
+            "is_bear_when_btc_bear": False,
+            "is_bull_when_btc_bear": False,
+            "is_hype_surge": False,
+            "is_blowoff_top": False,
+            "hype_status": "⚪ NORMAL",
             "tf_metrics_summary": [
                 {"Chart": "15M", "Price": f"${p:,.2f}" if p >= 1.0 else f"${p:.4f}", "Bias": "🟢 BULLISH", "RSI": "50.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
                 {"Chart": "1H", "Price": f"${p:,.2f}" if p >= 1.0 else f"${p:.4f}", "Bias": "🟢 BULLISH", "RSI": "50.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
@@ -4777,8 +5424,20 @@ class HybridQuantEngine:
                     "bbw_15m_pct": getattr(self, "btc_bbw_15m", 0.0),
                     "vol_ratio": getattr(self, "btc_vol_ratio", 1.0),
                     "altcoin_longs_allowed": not self.btc_shield_active,
+                    "predicted_trend": getattr(self, "btc_predicted_trend", "CONSOLIDATION"),
+                    "trend_probability": getattr(self, "btc_trend_probability", 60.0),
+                    "bull_trend_prob": getattr(self, "btc_bull_trend_prob", 30.0),
+                    "bear_trend_prob": getattr(self, "btc_bear_trend_prob", 20.0),
+                    "consolidation_prob": getattr(self, "btc_consolidation_prob", 50.0),
+                    "predicted_btc_target": getattr(self, "btc_predicted_target", 0.0),
+                    "predicted_btc_change_pct": getattr(self, "btc_predicted_change_pct", 0.0),
+                    "breakout_prediction": getattr(self, "btc_breakout_prediction", "⚖️ RANGE BOUND"),
+                    "altcoin_posture": getattr(self, "btc_altcoin_posture", "STANDARD_EXECUTION"),
+                    "market_phase_description": getattr(self, "btc_market_phase_description", ""),
+                    "trader_playbook": getattr(self, "trader_playbook", {})
                 }
                 data["btc_market_shield"] = shield_payload
+                data["trader_playbook"] = getattr(self, "trader_playbook", {})
                 temp_path = json_path + ".tmp"
                 with open(temp_path, 'w', encoding='utf-8') as f:
                     json.dump(data, f, indent=4, default=str)
@@ -5300,7 +5959,19 @@ class HybridQuantEngine:
                 "bbw_15m_pct": getattr(self, "btc_bbw_15m", 0.0),
                 "vol_ratio": getattr(self, "btc_vol_ratio", 1.0),
                 "altcoin_longs_allowed": not self.btc_shield_active,
+                "predicted_trend": getattr(self, "btc_predicted_trend", "CONSOLIDATION"),
+                "trend_probability": getattr(self, "btc_trend_probability", 60.0),
+                "bull_trend_prob": getattr(self, "btc_bull_trend_prob", 30.0),
+                "bear_trend_prob": getattr(self, "btc_bear_trend_prob", 20.0),
+                "consolidation_prob": getattr(self, "btc_consolidation_prob", 50.0),
+                "predicted_btc_target": getattr(self, "btc_predicted_target", 0.0),
+                "predicted_btc_change_pct": getattr(self, "btc_predicted_change_pct", 0.0),
+                "breakout_prediction": getattr(self, "btc_breakout_prediction", "⚖️ RANGE BOUND"),
+                "altcoin_posture": getattr(self, "btc_altcoin_posture", "STANDARD_EXECUTION"),
+                "market_phase_description": getattr(self, "btc_market_phase_description", ""),
+                "trader_playbook": getattr(self, "trader_playbook", {})
             },
+            "trader_playbook": getattr(self, "trader_playbook", {}),
             "top_round_signals": self.institutional_signal_manager.get_display_signals() or top_signals or [],
             "signals_by_horizon": self.institutional_signal_manager.get_signals_by_horizon(),
             "scanner_leaderboard": leaderboard_sorted,

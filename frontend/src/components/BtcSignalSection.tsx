@@ -221,28 +221,80 @@ export default function BtcSignalSection() {
               })}
             </div>
 
-            {/* Market Beta Safeguard Info Bar */}
+            {/* Market Beta Safeguard & Predictive Trend Forecaster */}
             {(() => {
               const theme = getShieldTheme(shield);
+              const bullProb = shield.bull_trend_prob ?? (shield.trend_probability ? (shield.predicted_trend?.includes("BULL") ? shield.trend_probability : 30) : 55);
+              const consProb = shield.consolidation_prob ?? (shield.predicted_trend?.includes("CONSOLIDATION") ? (shield.trend_probability || 50) : 25);
+              const bearProb = shield.bear_trend_prob ?? (shield.trend_probability ? (shield.predicted_trend?.includes("BEAR") ? shield.trend_probability : 20) : 20);
+
               return (
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/60 pt-2 text-xs">
-                  <div className="flex items-center gap-1.5">
-                    {theme.isAlert ? (
-                      <ShieldAlert className="h-3.5 w-3.5 text-rose-400 animate-pulse" />
-                    ) : (
-                      <ShieldCheck className={`h-3.5 w-3.5 ${theme.iconColor}`} />
-                    )}
-                    <span className="text-slate-300 text-[11px]">
-                      Beta Shield: <strong className={theme.iconColor}>{theme.statusTitle}</strong>
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {shield.btc_15m_change_pct !== undefined && (
-                      <span className="text-[10px] text-slate-400 font-mono">
-                        15M: <strong className={shield.btc_15m_change_pct >= 0 ? "text-emerald-400" : "text-rose-400"}>{shield.btc_15m_change_pct > 0 ? `+${shield.btc_15m_change_pct}%` : `${shield.btc_15m_change_pct}%`}</strong>
+                <div className="mt-3 flex flex-col gap-2 border-t border-slate-800/60 pt-2 text-xs">
+                  {/* Predictive Regime Probability Bar */}
+                  <div className="flex flex-col gap-1 rounded-lg bg-dark-900/80 p-2 border border-slate-800/80">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold text-slate-300 flex items-center gap-1">
+                        <Activity className="h-3 w-3 text-cyan-400" />
+                        Predictive Trend: <strong className={theme.iconColor}>{theme.statusTitle}</strong>
                       </span>
-                    )}
-                    <span className="text-[10px] text-emerald-400 font-mono">100% Multi-Scale Aligned</span>
+                      {shield.predicted_btc_target && (
+                        <span className="font-mono text-cyan-300 font-bold">
+                          Target: {formatUsd(shield.predicted_btc_target)} (
+                          {shield.predicted_btc_change_pct !== undefined && shield.predicted_btc_change_pct >= 0 ? "+" : ""}
+                          {shield.predicted_btc_change_pct?.toFixed(2)}%)
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex h-2 w-full overflow-hidden rounded-full bg-slate-800">
+                      <div
+                        className="bg-emerald-500 transition-all duration-500"
+                        style={{ width: `${bullProb}%` }}
+                        title={`Bull Trend: ${bullProb.toFixed(1)}%`}
+                      />
+                      <div
+                        className="bg-amber-400 transition-all duration-500"
+                        style={{ width: `${consProb}%` }}
+                        title={`Consolidation: ${consProb.toFixed(1)}%`}
+                      />
+                      <div
+                        className="bg-rose-500 transition-all duration-500"
+                        style={{ width: `${bearProb}%` }}
+                        title={`Bear Trend: ${bearProb.toFixed(1)}%`}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                      <span className="text-emerald-400 font-bold">🟢 Bull: {bullProb.toFixed(0)}%</span>
+                      <span className="text-amber-400 font-bold">⚪ Range: {consProb.toFixed(0)}%</span>
+                      <span className="text-rose-400 font-bold">🔴 Bear: {bearProb.toFixed(0)}%</span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      {theme.isAlert ? (
+                        <ShieldAlert className="h-3.5 w-3.5 text-rose-400 animate-pulse" />
+                      ) : (
+                        <ShieldCheck className={`h-3.5 w-3.5 ${theme.iconColor}`} />
+                      )}
+                      <span className="text-slate-300 text-[11px]">
+                        Posture: <strong className={theme.iconColor}>{shield.altcoin_posture || "AGGRESSIVE_LONGS"}</strong>
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {shield.breakout_prediction && (
+                        <span className="rounded bg-slate-800/90 px-1.5 py-0.5 text-[10px] font-mono text-cyan-300 border border-slate-700">
+                          {shield.breakout_prediction}
+                        </span>
+                      )}
+                      {shield.btc_15m_change_pct !== undefined && (
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          15M: <strong className={shield.btc_15m_change_pct >= 0 ? "text-emerald-400" : "text-rose-400"}>{shield.btc_15m_change_pct > 0 ? `+${shield.btc_15m_change_pct}%` : `${shield.btc_15m_change_pct}%`}</strong>
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
               );

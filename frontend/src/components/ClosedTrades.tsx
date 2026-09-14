@@ -34,7 +34,7 @@ export default function ClosedTrades() {
           No completed trades recorded yet.
         </div>
       ) : (
-        <div className="mt-4 overflow-x-auto rounded-xl border border-slate-800/80">
+        <div className="mt-4 overflow-x-auto touch-scroll rounded-xl border border-slate-800/80 shadow-inner">
           <table className="w-full text-left text-xs text-slate-300 font-mono">
             <thead className="bg-dark-900/90 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
               <tr>

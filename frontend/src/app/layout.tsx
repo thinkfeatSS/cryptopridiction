@@ -19,12 +19,12 @@ export default function RootLayout({
       <body className="bg-dark-950 text-slate-100 min-h-screen flex flex-col antialiased selection:bg-cyan-500/30 selection:text-cyan-300" suppressHydrationWarning>
         <Providers>
           <Navbar />
-          <main className="flex-1 w-full max-w-7xl mx-auto px-4 py-6 sm:px-6">
+          <main className="flex-1 w-full max-w-7xl mx-auto px-2.5 py-4 sm:px-4 md:px-6 sm:py-6">
             <ErrorBoundary fallbackTitle="Dashboard is refreshing...">
               {children}
             </ErrorBoundary>
           </main>
-          <footer className="border-t border-slate-800/80 bg-dark-950 py-6 text-center text-xs text-slate-500">
+          <footer className="border-t border-slate-800/80 bg-dark-950 py-5 text-center text-xs text-slate-500 px-4">
             <p>
               QUANT EDGE AI V15.0 • Quantitative Multi-Horizon Trading Terminal • 24/7 Live Daemon
             </p>

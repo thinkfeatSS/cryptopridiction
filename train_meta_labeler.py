@@ -212,7 +212,7 @@ def train_and_save_meta_classifier():
     
     print(f"[METRICS] Meta-Model Accuracy: {acc*100:.1f}% | ROC-AUC: {auc:.3f} | Precision: {prec*100:.1f}%")
     
-    # Save Model Bundle with metadata and feature schema
+    # Save Global Model Bundle with metadata and feature schema
     bundle = {
         'model': calibrated_clf,
         'feature_cols': feature_cols,
@@ -223,7 +223,37 @@ def train_and_save_meta_classifier():
     }
     
     joblib.dump(bundle, META_MODEL_PATH)
-    print(f"[SAVED] Trained Meta-Labeler Successfully Saved to: {META_MODEL_PATH}\n")
+    print(f"[SAVED] Global Meta-Labeler Successfully Saved to: {META_MODEL_PATH}")
+
+    # Train Dedicated Per-Coin Meta-Classifiers where sufficient history exists
+    if 'symbol' in full_raw.columns:
+        for sym, sym_df in full_raw.groupby('symbol'):
+            clean_sym = sym.replace('/', '_').replace(':', '_')
+            sym_feat = extract_features(sym_df)
+            if len(sym_feat) >= 8 and len(sym_feat['target'].unique()) > 1:
+                try:
+                    s_X = sym_feat[feature_cols]
+                    s_y = sym_feat['target']
+                    s_base = HistGradientBoostingClassifier(max_iter=80, max_depth=2, random_state=42)
+                    s_cal = CalibratedClassifierCV(estimator=s_base, method='sigmoid', cv=2)
+                    s_cal.fit(s_X, s_y)
+                    
+                    coin_dir = os.path.join(MODELS_DIR, "per_coin", clean_sym)
+                    os.makedirs(coin_dir, exist_ok=True)
+                    coin_meta_path = os.path.join(coin_dir, "meta_classifier.joblib")
+                    
+                    joblib.dump({
+                        'model': s_cal,
+                        'feature_cols': feature_cols,
+                        'symbol': sym,
+                        'sample_size': len(sym_feat),
+                        'trained_at_utc': datetime.now(timezone.utc).isoformat()
+                    }, coin_meta_path)
+                    print(f"  └─ Trained dedicated per-coin meta-classifier for {sym} ({len(sym_feat)} samples)")
+                except Exception as e:
+                    pass
+
+    print()
     return True
 
 if __name__ == "__main__":
