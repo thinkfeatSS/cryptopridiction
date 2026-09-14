@@ -1118,6 +1118,19 @@ class AdvancedFeatureEngineer:
         return adx, plus_di, minus_di
 
     @staticmethod
+    def compute_chop_index(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        tr1 = df['high'] - df['low']
+        tr2 = (df['high'] - df['close'].shift(1)).abs()
+        tr3 = (df['low'] - df['close'].shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr_sum = tr.rolling(period).sum()
+        high_max = df['high'].rolling(period).max()
+        low_min = df['low'].rolling(period).min()
+        denom = (high_max - low_min).clip(lower=1e-10)
+        chop = 100.0 * np.log10((atr_sum / denom).clip(lower=1e-10)) / np.log10(period)
+        return chop.fillna(50.0).clip(lower=0.0, upper=100.0)
+
+    @staticmethod
     def compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
         ema_fast = series.ewm(span=fast, adjust=False).mean()
         ema_slow = series.ewm(span=slow, adjust=False).mean()
@@ -3716,11 +3729,12 @@ class HybridQuantEngine:
                 ema50_1h = float(df_1h['close'].ewm(span=50, adjust=False).mean().iloc[-1])
                 ema200_1h = float(df_1h['close'].ewm(span=200, adjust=False).mean().iloc[-1]) if len(df_1h) >= 200 else ema50_1h
                 rsi_1h_series = self.fe.compute_rsi(df_1h['close'], period=14)
-                rsi_1h = float(rsi_1h_series.iloc[-1]) * 100.0
-                adx_1h_series = self.fe.compute_adx(df_1h, period=14)
-                adx_1h = float(adx_1h_series.iloc[-1]) * 100.0
+                rsi_1h = float(rsi_1h_series.iloc[-1]) * 100.0 if not rsi_1h_series.empty else 50.0
+                adx_res = self.fe.compute_adx(df_1h, period=14)
+                adx_1h_series = adx_res[0] if isinstance(adx_res, tuple) else adx_res
+                adx_1h = float(adx_1h_series.iloc[-1]) if not adx_1h_series.empty else 20.0
                 chop_1h_series = self.fe.compute_chop_index(df_1h, period=14)
-                chop_1h = float(chop_1h_series.iloc[-1]) * 100.0
+                chop_1h = float(chop_1h_series.iloc[-1]) if not chop_1h_series.empty else 50.0
             elif len(df_15m) >= 20:
                 ret_1h = (c_now - float(df_15m['close'].iloc[-4])) / (float(df_15m['close'].iloc[-4]) + 1e-10)
                 rsi_1h_series = self.fe.compute_rsi(df_15m['close'], period=14)
