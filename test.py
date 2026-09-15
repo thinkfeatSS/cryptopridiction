@@ -2495,6 +2495,16 @@ class SignalAuditTracker:
         now_time = now_utc.strftime('%H:%M:%S UTC')
 
         for idx, sig in enumerate(displayed_signals):
+            # Quality Gate: ONLY log Grade A+ and Grade A signals, or signals with confirmed execution decisions.
+            # Never record Grade C / Watchlist / un-scanned fallback placeholders in the audit ledger!
+            g_tier = sig.get('grade_tier', 4)
+            c_grade = str(sig.get('grade', ''))
+            dec_str = str(sig.get('decision', ''))
+            is_valid_grade = (g_tier <= 2) or ('Grade A' in c_grade)
+            is_valid_exec = any(k in dec_str for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT", "MOMENTUM", "REVERSAL", "SWEEP"])
+            if not is_valid_grade and not is_valid_exec:
+                continue
+
             sym = sig['symbol']
             h_key = sig.get('horizon_key', 'scalp').lower()
             curr_p = float(sig['entry_price'])
@@ -5875,13 +5885,14 @@ class HybridQuantEngine:
                 and abs(s.get('exp_return', 0.0) * 100.0) >= min_ret
             ]
 
-            # Priority 1: High Conviction Grade A+ / Grade A setups
+            # Priority 1: High Conviction Grade A+ / Grade A setups only
             tier_high = [
                 s for s in h_candidates
-                if ((s['grade_tier'] == 1 and (s['meta_win_prob'] >= 0.60 or s['conviction'] >= 70.0)) or
-                    (s['grade_tier'] == 2 and s['conviction'] >= 65.0 and s['meta_win_prob'] >= 0.60))
+                if ((s['grade_tier'] == 1 and (s['meta_win_prob'] >= 0.58 or s['conviction'] >= 68.0)) or
+                    (s['grade_tier'] == 2 and s['conviction'] >= 62.0 and s['meta_win_prob'] >= 0.58) or
+                    (any(k in s.get('decision', '') for k in ['EXECUTE', 'DIP-BUY', 'RALLY-SELL', 'BREAKDOWN', 'BREAKOUT', 'MOMENTUM', 'REVERSAL', 'SWEEP'])))
             ]
-            pool = tier_high if tier_high else [s for s in h_candidates if s['conviction'] >= 52.0]
+            pool = tier_high
             pool.sort(key=lambda x: (
                 _safe_float(x.get('grade_tier'), 3),
                 -_safe_float(x.get('meta_win_prob'), 0.5),
