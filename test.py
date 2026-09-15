@@ -290,8 +290,8 @@ CONFIG = {
         "max_concurrent_positions": 10,     # Up to 10 active trades ($10.00 x 10 = $100.00 total capital)
         # Targeted Execution Horizons: Multi-horizon execution across all high-conviction timeframes
         "allowed_horizons": ["scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"],
-        "min_expected_return_pct": 0.40,    # Minimum expected return hurdle: >= 0.40% (clears round-trip Binance fees)
-        "min_net_profit_usd": 0.04,         # Minimum $0.04 net profit target on $10.00 trades (0.40% of $10.00)
+        "min_expected_return_pct": 0.20,    # Minimum expected return hurdle: >= 0.20% (clears round-trip Binance fees)
+        "min_net_profit_usd": 0.02,         # Minimum $0.02 net profit target on $10.00 trades (0.20% of $10.00)
         "require_positive_track_record": False, # Do not block untested coins; 2-strike quarantine blocks toxic assets
         # Realistic Binance Trading Fee Engine (0.10% Buy Fee + 0.10% Sell Fee Standard, or 0.075% BNB discount)
         "execution_engine": "binance_spot", # "binance_spot" (100% real Binance fees) or "binance_convert"
@@ -313,9 +313,9 @@ CONFIG = {
         "require_min_rr_ratio": 2.0,        # 1:2 Risk to Reward minimum
         "min_meta_probability": 0.65,       # Secondary ML meta-labeling win probability hurdle (>=65%)
         "ban_parabolic_shorts": True,       # Circuit breaker: Block SHORT if 24h pump > 12% or 1h RSI > 68
-        "min_expected_return_pct": 0.40,    # Minimum expected return hurdle: >= 0.40% (guarantees net return after buy & sell fees)
-        "min_scalp_gain_pct": 0.40,         # Minimum expected TP1 gain on 15M to clear taker fees (>= 0.40%)
-        "min_swing_gain_pct": 0.75,         # Minimum expected TP1 gain on 1H
+        "min_expected_return_pct": 0.20,    # Minimum expected return hurdle: >= 0.20% (guarantees net return after buy & sell fees)
+        "min_scalp_gain_pct": 0.20,         # Minimum expected TP1 gain on 15M to clear taker fees (>= 0.20%)
+        "min_swing_gain_pct": 0.50,         # Minimum expected TP1 gain on 1H
         "asset_cooldown_minutes": 60        # Deduping lockout window across horizons
     },
     "elite_conviction_threshold": 0.68,   # Top-Decile Pareto Conviction (90% tier)
@@ -1698,8 +1698,8 @@ class PaperTradingLedger:
         self.allowed_horizons = set(self.config.get('allowed_horizons', [
             "scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"
         ]))
-        self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 0.40))
-        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.04))
+        self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 0.20))
+        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.02))
 
         self.base_fee_rate = float(self.config.get('binance_fee_rate', 0.0010))
         self.use_bnb_discount = self.config.get('use_bnb_fee_discount', False)
@@ -5719,12 +5719,12 @@ class HybridQuantEngine:
                         decision = f"🛡️ SUPPRESSED (PARABOLIC MOMENTUM SQUEEZE RISK)"
                         prio = 5
 
-                # 2. Fee Hurdle: Filter out micro-targets where fees eat the profit (>= 0.40% minimum net profit hurdle)
+                # 2. Fee Hurdle: Filter out micro-targets where fees eat the profit (>= 0.20% minimum net profit hurdle)
                 is_fee_drag_rejected = False
-                min_return_hurdle = sig_cfg.get('min_expected_return_pct', 0.40)
+                min_return_hurdle = sig_cfg.get('min_expected_return_pct', 0.20)
                 if tp_pct < min_return_hurdle or abs(exp_ret * 100.0) < min_return_hurdle:
                     is_fee_drag_rejected = True
-                    decision = "⛔ FILTER (SUB-0.4% RETURN / FEE DRAG)"
+                    decision = "⛔ FILTER (SUB-0.2% RETURN / FEE DRAG)"
                 elif h_key == 'scalp' and tp_pct < min_scalp_gain:
                     is_fee_drag_rejected = True
                 elif h_key == 'swing' and tp_pct < min_swing_gain:

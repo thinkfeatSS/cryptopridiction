@@ -177,7 +177,7 @@ export default function DashboardPage() {
               </h1>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              Timeframe-separated confluence setups (15M, 30M, 1H, 4H, 12H, 24H, 4D, 7D, 15D, 30D) actively maintained until Win, Loss, or Expire with strict &ge;0.40% profit hurdles.
+              Timeframe-separated confluence setups (15M, 30M, 1H, 4H, 12H, 24H, 4D, 7D, 15D, 30D) actively maintained until Win, Loss, or Expire with strict &ge;0.20% profit hurdles.
             </p>
           </div>
 
@@ -208,7 +208,7 @@ export default function DashboardPage() {
                 </span>
               )}
               <span className="text-[11px] text-emerald-400 font-mono font-semibold flex items-center gap-1">
-                ✓ Min 0.40% Return Filter Active (Fees Protected)
+                ✓ Min 0.20% Return Filter Active (Fees Protected)
               </span>
             </div>
           </div>
@@ -350,7 +350,7 @@ export default function DashboardPage() {
               <p className="text-xs text-slate-400 mt-1">
                 {activeHorizon === "ALL"
                   ? "Market is in defensive mode. Next full scan will evaluate new entries on the 15-minute candle mark."
-                  : `This timeframe was skipped for safety because no asset met the strict ≥0.40% net gain and confluence criteria. Next evaluation in 15 minutes.`}
+                  : `This timeframe was skipped for safety because no asset met the strict ≥0.20% net gain and confluence criteria. Next evaluation in 15 minutes.`}
               </p>
             </div>
           ) : (
