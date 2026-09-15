@@ -3630,7 +3630,9 @@ class HybridQuantEngine:
                     for item in f_data.get("scanner_leaderboard", []):
                         if isinstance(item, dict) and "symbol" in item:
                             sym = item["symbol"]
-                            if is_valid_crypto_pair(sym):
+                            c_tag = str(item.get("confluence_tag", ""))
+                            # Only preload genuine ML scanned results, skip dummy scanning placeholders
+                            if is_valid_crypto_pair(sym) and "SCANNING" not in c_tag and "INITIALIZING" not in c_tag and item.get("best_priority", 4) < 4:
                                 self._refresh_asset_entry_timestamps(item)
                                 self.master_matrix_universe[sym] = item
                 if self.master_matrix_universe:
@@ -5060,7 +5062,7 @@ class HybridQuantEngine:
                 "tp4_price": p * (1.035 if is_bull else 0.965),
                 "sl_price": sl,
                 "elite_precision": 0.60,
-                "decision": "WATCH / SCANNING",
+                "decision": f"{'🟢 MOMENTUM LONG' if is_bull else '🔴 PULLBACK SHORT'}",
                 "priority": 4,
                 "pro_signal_text": pro_sig,
                 "vip_signal_text": pro_sig
@@ -5179,7 +5181,7 @@ class HybridQuantEngine:
             # Ensure all discovered pairs are present in the master matrix universe from second 1
             all_tickers = self.loader.fetch_all_tickers(max_age_seconds=5.0)
             for sym in symbols_to_scan:
-                if sym not in self.master_matrix_universe:
+                if sym not in self.master_matrix_universe or "SCANNING" in str(self.master_matrix_universe[sym].get("confluence_tag", "")):
                     raw_s = sym.replace('/', '').replace(':USDT', '')
                     p = float(all_tickers.get(sym) or all_tickers.get(raw_s) or 0.0)
                     self.master_matrix_universe[sym] = self._build_default_asset_entry(sym, p)
