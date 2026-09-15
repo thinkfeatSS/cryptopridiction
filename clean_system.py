@@ -128,11 +128,15 @@ def reset_export_files():
         json.dump({"is_scanning": False, "scan_status": "IDLE", "scan_started_at": datetime.now(timezone.utc).isoformat()}, f, indent=4)
     print("  [OK] Reset scanner_daemon_state.json to IDLE.")
 
-    # 4. Remove cached forecast
-    forecast_path = os.path.join(export_dir, "live_market_forecast.json")
-    if os.path.exists(forecast_path):
-        os.remove(forecast_path)
-        print("  [OK] Removed stale live_market_forecast.json.")
+    # 4. Remove cached forecast and active signals
+    for f_name in ["live_market_forecast.json", "active_institutional_signals.json", "multihorizon_matrix.json", "signals.json", "signals_tracker.json"]:
+        f_path = os.path.join(export_dir, f_name)
+        if os.path.exists(f_path):
+            try:
+                os.remove(f_path)
+                print(f"  [OK] Removed stale {f_name}.")
+            except Exception:
+                pass
 
 def clean_models(clean_all: bool = False):
     print("\n[3/4] Model Checkpoint Cache...")

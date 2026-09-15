@@ -852,6 +852,22 @@ class CryptoDataLoader:
             pass
         return 0.0
 
+    def get_24hr_stats(self, symbol: str) -> dict:
+        """Returns cached 24h ticker statistics (price, change_pct, high, low, volume) from preloaded bulk tickers."""
+        raw_sym = symbol.replace('/', '').replace(':USDT', '')
+        if hasattr(self, '_24hr_tickers_map') and self._24hr_tickers_map:
+            if raw_sym in self._24hr_tickers_map:
+                return self._24hr_tickers_map[raw_sym]
+            if symbol in self._24hr_tickers_map:
+                return self._24hr_tickers_map[symbol]
+        return {
+            'lastPrice': 0.0,
+            'priceChangePercent': 0.0,
+            'highPrice': 0.0,
+            'lowPrice': 0.0,
+            'quoteVolume': 0.0
+        }
+
     def fetch_ticker(self, symbol: str) -> dict:
         """Fetches the latest real-time ticker data."""
         if self.is_binance_vision_direct or self.active_exchange_id == 'binance':
@@ -946,6 +962,7 @@ class CryptoDataLoader:
                     resp = self.session.get("https://data-api.binance.vision/api/v3/ticker/24hr", timeout=12)
                     if resp.status_code == 200:
                         data = resp.json()
+                        self._24hr_tickers_map = {}
                         for item in data:
                             raw_sym = item.get('symbol', '')
                             if not raw_sym.endswith('USDT'):
@@ -958,11 +975,22 @@ class CryptoDataLoader:
                             last_p = float(item.get('lastPrice', 0.0) or 0.0)
                             high_p = float(item.get('highPrice', 0.0) or 0.0)
                             low_p = float(item.get('lowPrice', 0.0) or 0.0)
+                            chg_pct = float(item.get('priceChangePercent', 0.0) or 0.0)
+                            quote_vol = float(item.get('quoteVolume', 0.0) or 0.0)
                             
                             if not is_valid_crypto_pair(sym, price=last_p, high=high_p, low=low_p):
                                 continue
 
-                            quote_vol = float(item.get('quoteVolume', 0.0) or 0.0)
+                            stats_dict = {
+                                'lastPrice': last_p,
+                                'priceChangePercent': chg_pct,
+                                'highPrice': high_p,
+                                'lowPrice': low_p,
+                                'quoteVolume': quote_vol
+                            }
+                            self._24hr_tickers_map[raw_sym] = stats_dict
+                            self._24hr_tickers_map[sym] = stats_dict
+
                             if quote_vol > 500000.0:  # Minimum $500k 24h volume
                                 valid_pairs.append((sym, quote_vol))
                 except Exception as e:
@@ -971,15 +999,25 @@ class CryptoDataLoader:
             # 2. CCXT Fallback if not populated
             if not valid_pairs and self.exchange:
                 tickers = self.exchange.fetch_tickers()
+                self._24hr_tickers_map = {}
                 for sym, t in tickers.items():
                     if not sym.endswith('/USDT'):
                         continue
                     last_p = float(t.get('last', 0.0) or 0.0)
                     high_p = float(t.get('high', 0.0) or 0.0)
                     low_p = float(t.get('low', 0.0) or 0.0)
+                    chg_pct = float(t.get('percentage', 0.0) or 0.0)
+                    quote_vol = t.get('quoteVolume', 0.0) or t.get('baseVolume', 0.0) or 0.0
                     if not is_valid_crypto_pair(sym, price=last_p, high=high_p, low=low_p):
                         continue
-                    quote_vol = t.get('quoteVolume', 0.0) or t.get('baseVolume', 0.0) or 0.0
+                    stats_dict = {
+                        'lastPrice': last_p,
+                        'priceChangePercent': chg_pct,
+                        'highPrice': high_p,
+                        'lowPrice': low_p,
+                        'quoteVolume': quote_vol
+                    }
+                    self._24hr_tickers_map[sym] = stats_dict
                     if quote_vol > 0:
                         valid_pairs.append((sym, quote_vol))
 
@@ -4941,9 +4979,16 @@ class HybridQuantEngine:
         return out_dict
 
     def _build_default_asset_entry(self, symbol: str, live_price: float = 0.0) -> dict:
-        """Constructs an initial responsive prediction matrix row for newly discovered assets."""
+        """Constructs an initial responsive prediction matrix row for newly discovered assets using 24h market momentum."""
         now_utc = datetime.now(timezone.utc)
-        p = float(live_price) if live_price and live_price > 0 else 1.0
+        stats = self.loader.get_24hr_stats(symbol)
+        
+        p = float(live_price) if live_price and live_price > 0 else float(stats.get('lastPrice', 0.0) or 1.0)
+        chg_pct = float(stats.get('priceChangePercent', 0.0))
+        high_p = float(stats.get('highPrice', p) or p)
+        low_p = float(stats.get('lowPrice', p) or p)
+        is_bull = chg_pct >= 0.0
+        
         p_fmt = lambda val: f"{val:,.4f}" if val >= 1.0 else f"{val:.6g}"
 
         horizons = {}
@@ -4953,23 +4998,35 @@ class HybridQuantEngine:
             )
             window_str = f"{trade_open_str} ➔ {trade_close_str} ({h_cfg['duration_label']})"
             
-            exp_ret = float(h_cfg['tp_mult'] * 0.005)
-            tp1 = p * (1.0 + exp_ret)
-            sl = p * (1.0 - (h_cfg['sl_mult'] * 0.003))
-            pred_next_p = round(tp1, 6)
-            pred_ret_pct = round(exp_ret * 100.0, 2)
+            h_dir = "BULLISH" if is_bull else "BEARISH"
+            exp_ret = float(h_cfg['tp_mult'] * 0.005) if is_bull else float(-h_cfg['tp_mult'] * 0.005)
+            
+            if is_bull:
+                tp1 = p * (1.0 + abs(exp_ret))
+                sl = p * (1.0 - (h_cfg['sl_mult'] * 0.003))
+                pred_next_p = round(tp1, 6)
+                pred_ret_pct = round(abs(exp_ret) * 100.0, 2)
+                type_str = "LONG 🟢"
+                market_str = "Spot & Futures"
+            else:
+                tp1 = p * (1.0 - abs(exp_ret))
+                sl = p * (1.0 + (h_cfg['sl_mult'] * 0.003))
+                pred_next_p = round(tp1, 6)
+                pred_ret_pct = round(-abs(exp_ret) * 100.0, 2)
+                type_str = "SHORT 🔴"
+                market_str = "Futures Only ⚡"
 
             pro_sig = (
                 f"🚀 PAIR: #{symbol.split('/')[0]}/USDT\n"
-                f"📊 TYPE: LONG 🟢\n"
-                f"🌐 MARKET: Spot & Futures\n"
+                f"📊 TYPE: {type_str}\n"
+                f"🌐 MARKET: {market_str}\n"
                 f"📅 PREDICTED CANDLE: {window_str}\n"
                 f"🎯 ENTRY: {p_fmt(p)}\n"
                 f"🔮 ML NEXT PRICE: {p_fmt(pred_next_p)} ({pred_ret_pct:+.2f}%)\n\n"
                 f"💎 TAKE PROFITS:\n"
                 f"➤ TP1: {p_fmt(tp1)}\n"
-                f"➤ TP2: {p_fmt(p * 1.015)}\n"
-                f"➤ TP3: {p_fmt(p * 1.025)}\n\n"
+                f"➤ TP2: {p_fmt(p * (1.015 if is_bull else 0.985))}\n"
+                f"➤ TP3: {p_fmt(p * (1.025 if is_bull else 0.975))}\n\n"
                 f"🛑 STOP LOSS: {p_fmt(sl)}\n\n"
                 f"📈 RISK-TO-REWARD RATIO: 1:2"
             )
@@ -4990,41 +5047,44 @@ class HybridQuantEngine:
                 "trade_close_str": trade_close_str,
                 "predicted_close_utc": trade_close_str,
                 "predicted_window_str": window_str,
-                "direction": "BULLISH",
-                "conviction": 55.0,
-                "meta_win_prob": 0.65,
-                "meta_win_prob_pct": 65.0,
+                "direction": h_dir,
+                "conviction": 58.0 if abs(chg_pct) > 2.0 else 52.0,
+                "meta_win_prob": 0.60,
+                "meta_win_prob_pct": 60.0,
                 "exp_return": exp_ret,
                 "projected_target": tp1,
                 "tp_price": tp1,
                 "tp1_price": tp1,
-                "tp2_price": p * 1.015,
-                "tp3_price": p * 1.025,
-                "tp4_price": p * 1.035,
+                "tp2_price": p * (1.015 if is_bull else 0.985),
+                "tp3_price": p * (1.025 if is_bull else 0.975),
+                "tp4_price": p * (1.035 if is_bull else 0.965),
                 "sl_price": sl,
                 "elite_precision": 0.60,
                 "decision": "WATCH / SCANNING",
-                "priority": 3,
+                "priority": 4,
                 "pro_signal_text": pro_sig,
                 "vip_signal_text": pro_sig
             }
 
+        confluence_tag = f"🟢 +{chg_pct:.1f}% 24H MOMENTUM" if chg_pct >= 1.5 else (f"🔴 {chg_pct:.1f}% 24H PULLBACK" if chg_pct <= -1.5 else f"⚪ {chg_pct:+.1f}% 24H STABLE")
+        market_phase = "🚀 BULL_TREND_EXPANSION" if chg_pct >= 2.0 else ("🩸 BEAR_TREND_EXPANSION" if chg_pct <= -2.0 else "💤 RANGE_CONSOLIDATION")
+
         return {
             "symbol": symbol,
             "current_price": p,
-            "live_high": p,
-            "live_low": p,
+            "live_high": high_p,
+            "live_low": low_p,
             "horizons": horizons,
             "is_triple_confluence": False,
-            "confluence_bull_count": 5,
-            "confluence_bear_count": 0,
-            "confluence_neutral_count": 5,
-            "alignment_score": 50.0,
-            "confluence_tag": "⚪ SCANNING / INITIALIZING",
-            "market_phase": "💤 RANGE_CONSOLIDATION",
-            "consistency_index": 60.0,
-            "best_priority": 3,
-            "overall_score": 0.44,
+            "confluence_bull_count": 8 if is_bull else 2,
+            "confluence_bear_count": 2 if is_bull else 8,
+            "confluence_neutral_count": 0,
+            "alignment_score": 60.0 if is_bull else -60.0,
+            "confluence_tag": confluence_tag,
+            "market_phase": market_phase,
+            "consistency_index": 65.0,
+            "best_priority": 4,
+            "overall_score": 0.05,
             "btc_correlation": 0.50,
             "btc_beta": 1.0,
             "btc_alignment_tag": "MODERATE_CORRELATED",
@@ -5035,10 +5095,10 @@ class HybridQuantEngine:
             "is_blowoff_top": False,
             "hype_status": "⚪ NORMAL",
             "tf_metrics_summary": [
-                {"Chart": "15M", "Price": f"${p:,.2f}" if p >= 1.0 else f"${p:.4f}", "Bias": "🟢 BULLISH", "RSI": "50.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
-                {"Chart": "1H", "Price": f"${p:,.2f}" if p >= 1.0 else f"${p:.4f}", "Bias": "🟢 BULLISH", "RSI": "50.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
-                {"Chart": "4H", "Price": f"${p:,.2f}" if p >= 1.0 else f"${p:.4f}", "Bias": "🟢 BULLISH", "RSI": "50.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
-                {"Chart": "1D", "Price": f"${p:,.2f}" if p >= 1.0 else f"${p:.4f}", "Bias": "🟢 BULLISH", "RSI": "50.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
+                {"Chart": "15M", "Price": p_fmt(p), "Bias": "🟢 BULLISH" if is_bull else "🔴 BEARISH", "RSI": "52.0" if is_bull else "48.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
+                {"Chart": "1H", "Price": p_fmt(p), "Bias": "🟢 BULLISH" if is_bull else "🔴 BEARISH", "RSI": "52.0" if is_bull else "48.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
+                {"Chart": "4H", "Price": p_fmt(p), "Bias": "🟢 BULLISH" if is_bull else "🔴 BEARISH", "RSI": "52.0" if is_bull else "48.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
+                {"Chart": "1D", "Price": p_fmt(p), "Bias": "🟢 BULLISH" if is_bull else "🔴 BEARISH", "RSI": "52.0" if is_bull else "48.0", "MFI": "50.0", "ADX": "20.0", "Regime": "⚡ EXPANSION"},
             ],
             "server_prediction_time": now_utc.isoformat(),
             "server_prediction_ts": int(now_utc.timestamp()),
@@ -5141,13 +5201,17 @@ class HybridQuantEngine:
             except Exception as e:
                 print(f"[INITIAL UNIVERSE SYNC NOTE] {e}")
 
-            scan_deadline_seconds = max(2700.0, len(symbols_to_scan) * 20.0)
+            # Priority ordering: process top major liquid assets first for instant UI availability
+            priority_coins = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT", "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "SUI/USDT", "LINK/USDT", "PEPE/USDT", "NEAR/USDT"]
+            sorted_symbols_to_scan = [s for s in priority_coins if s in symbols_to_scan] + [s for s in symbols_to_scan if s not in priority_coins]
+
+            scan_deadline_seconds = max(2700.0, len(sorted_symbols_to_scan) * 20.0)
             last_partial_sync_ts = time.time()
             last_synced_count = 0
-            max_threads = min(int(self.config.get('max_scan_workers', 16)), len(symbols_to_scan))
+            max_threads = min(int(self.config.get('max_scan_workers', 6)), 6, len(sorted_symbols_to_scan))
             executor = ThreadPoolExecutor(max_workers=max_threads)
             try:
-                future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in symbols_to_scan}
+                future_to_sym = {executor.submit(self.process_single_asset, sym): sym for sym in sorted_symbols_to_scan}
                 for future in as_completed(future_to_sym):
                     if (time.time() - self.last_scan_started_ts) > scan_deadline_seconds:
                         print(f"[DEADLINE ⏳] Total scan time reached {scan_deadline_seconds}s limit. Safely completing cycle with {len(scanner_results)} assets.")
@@ -5164,15 +5228,15 @@ class HybridQuantEngine:
                             live_highs[sym] = res['live_high']
                             live_lows[sym] = res['live_low']
                             
-                            # High-frequency Concurrent Streaming to Web UI and Database
+                            # High-frequency Immediate Streaming: sync every asset for the first 10, then every 2 assets
                             should_sync = (
-                                (len(scanner_results) - last_synced_count >= 3 and (time.time() - last_partial_sync_ts) >= 1.5)
-                                or len(scanner_results) == 1
-                                or len(scanner_results) == len(symbols_to_scan)
+                                len(scanner_results) <= 10
+                                or (len(scanner_results) - last_synced_count >= 2 and (time.time() - last_partial_sync_ts) >= 1.0)
+                                or len(scanner_results) == len(sorted_symbols_to_scan)
                             )
                             if should_sync:
                                 elapsed_now = time.time() - self.last_scan_started_ts
-                                print(f"[SCANNER 🛰️ STREAM] Streamed {len(scanner_results)}/{len(symbols_to_scan)} assets to UI (Latest: {sym}) - Elapsed: {elapsed_now:.1f}s", flush=True)
+                                print(f"[SCANNER 🛰️ STREAM] Streamed {len(scanner_results)}/{len(sorted_symbols_to_scan)} assets to UI (Latest: {sym}) - Elapsed: {elapsed_now:.1f}s", flush=True)
                                 try:
                                     partial_sorted = sorted(list(self.master_matrix_universe.values()), key=_safe_sort_key)
                                     partial_signals = self.render_top_round_signals(partial_sorted, verbose=False)
@@ -5181,7 +5245,7 @@ class HybridQuantEngine:
                                         deep_dive_result=None,
                                         top_signals=partial_signals,
                                         is_partial=True,
-                                        total_count=len(symbols_to_scan)
+                                        total_count=len(sorted_symbols_to_scan)
                                     )
                                     if HAS_DB_SYNC:
                                         sync_files_to_db_live(force=True)
