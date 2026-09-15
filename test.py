@@ -284,14 +284,14 @@ CONFIG = {
         "enabled": True,
         "spot_only": False,                 # Allow both LONG and SHORT paper trades (Futures & Spot)
         "start_balance_usd": 100.0,         # $100.00 Virtual Wallet
-        "position_size_usd": 10.0,          # Fixed $10.00 position size per trade
-        "dynamic_sizing": False,            # Fixed $10.00 per trade (no over-leveraging)
-        "min_position_size_usd": 10.0,
-        "max_concurrent_positions": 10,     # Up to 10 active trades ($10.00 x 10 = $100.00 total capital)
+        "position_size_usd": 100.0,         # Fixed $100.00 margin per trade
+        "dynamic_sizing": False,            # Fixed $100.00 per trade (no over-leveraging)
+        "min_position_size_usd": 100.0,
+        "max_concurrent_positions": 10,     # Max concurrent positions
         # Targeted Execution Horizons: Multi-horizon execution across all high-conviction timeframes
         "allowed_horizons": ["scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"],
         "min_expected_return_pct": 0.20,    # Minimum expected return hurdle: >= 0.20% (clears round-trip Binance fees)
-        "min_net_profit_usd": 0.02,         # Minimum $0.02 net profit target on $10.00 trades (0.20% of $10.00)
+        "min_net_profit_usd": 20.0,         # Minimum $20.00 net profit target on $100.00 margin trades
         "require_positive_track_record": False, # Do not block untested coins; 2-strike quarantine blocks toxic assets
         # Realistic Binance Trading Fee Engine (0.10% Buy Fee + 0.10% Sell Fee Standard, or 0.075% BNB discount)
         "execution_engine": "binance_spot", # "binance_spot" (100% real Binance fees) or "binance_convert"
@@ -1699,7 +1699,7 @@ class PaperTradingLedger:
             "scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"
         ]))
         self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 0.20))
-        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.02))
+        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 20.0))
 
         self.base_fee_rate = float(self.config.get('binance_fee_rate', 0.0010))
         self.use_bnb_discount = self.config.get('use_bnb_fee_discount', False)
@@ -2146,8 +2146,8 @@ class PaperTradingLedger:
             if pos['symbol'] == sym:
                 return
 
-        # 4. Fixed Position Size: $10.00 per trade ($100 total capital / 10 trades)
-        pos_size = float(self.config.get('position_size_usd', 10.0))
+        # 4. Fixed Position Size: $100.00 margin per trade
+        pos_size = float(self.config.get('position_size_usd', 100.0))
 
         # 5. Net Profit Hurdle: Must beat round-trip Binance trading fees
         if self.execution_engine == 'binance_convert':
