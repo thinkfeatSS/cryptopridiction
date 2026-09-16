@@ -284,14 +284,24 @@ function renderSignalCell(h?: any) {
           {decision}
         </span>
         {isBlowoffTop && (
-          <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-500 animate-pulse text-center">
-            🛑 BLOW-OFF TOP
-          </span>
+          <div className="flex flex-col gap-0.5 mt-0.5">
+            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-500 animate-pulse text-center">
+              🛑 BLOW-OFF TOP (SELL / FADE ZONE)
+            </span>
+            <span className="text-[8.5px] font-mono text-rose-400 text-center">
+              Peak Exhaustion Level: {formatUsd(h.sl_price)}
+            </span>
+          </div>
         )}
         {isHypeSurge && !isBlowoffTop && (
-          <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-500 animate-pulse text-center">
-            🚀 HYPE PUMP
-          </span>
+          <div className="flex flex-col gap-0.5 mt-0.5">
+            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-amber-950/90 text-amber-300 border border-amber-500 animate-pulse text-center">
+              🚀 HYPE PUMP (MOMENTUM SCALP)
+            </span>
+            <span className="text-[8.5px] font-mono text-emerald-300 text-center bg-emerald-950/60 rounded px-1 py-0.2 border border-emerald-500/30">
+              🎯 Peak Target: {formatUsd(predNextPrice)} | 🛡️ Sell Trigger: SL @ {formatUsd(h.sl_price)}
+            </span>
+          </div>
         )}
       </div>
     </div>

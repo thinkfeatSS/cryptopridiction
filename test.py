@@ -4259,7 +4259,7 @@ class HybridQuantEngine:
         else:
             n_train = max(5, int(n * self.config['train_split']))
             X_train, y_p_train, y_r_train = X[:n_train], y_p[:n_train].copy(), y_r[:n_train]
-            X_test, y_p_test = X[n_train:], y_p[n_train:]
+            X_test, y_p_test, y_r_test = X[n_train:], y_p[n_train:], y_r[n_train:]
 
             unique_classes = np.unique(y_p_train)
             if len(unique_classes) < 2 and len(y_p_train) > 1:
@@ -4647,9 +4647,16 @@ class HybridQuantEngine:
                 priority = 4
 
         # 8. Continuous Price Regression Target & Asymmetric R:R Architecture
-        exp_ret_mag = max(0.004, abs(pred_reg_ret), (h_conf / 100.0) * live_norm_atr * (bars ** 0.5))
-        exp_ret = exp_ret_mag if h_dir == "BULLISH" else -exp_ret_mag
-        projected_target = current_price * (1.0 + exp_ret)
+        if is_hype_surge:
+            # During parabolic expansion, dynamically scale target return with volume & volatility expansion
+            surge_vol_factor = max(1.2, min(3.5, vol_ratio_now if 'vol_ratio_now' in locals() else 2.0))
+            exp_ret_mag = max(0.015, abs(pred_reg_ret) * surge_vol_factor, (h_conf / 100.0) * live_norm_atr * (bars ** 0.5) * 1.5)
+        else:
+            exp_ret_mag = max(0.004, abs(pred_reg_ret), (h_conf / 100.0) * live_norm_atr * (bars ** 0.5))
+
+        # Clamp max percentage changes to realistic physical boundaries (max +300% on long, min -75% on short)
+        exp_ret = min(3.00, exp_ret_mag) if h_dir == "BULLISH" else max(-0.75, -exp_ret_mag)
+        projected_target = max(current_price * 0.10, current_price * (1.0 + exp_ret))
         predicted_next_price = round(projected_target, 6)
         predicted_return_pct = round(exp_ret * 100.0, 2)
 
@@ -4680,7 +4687,7 @@ class HybridQuantEngine:
             else:
                 sl_p = sl_base
             actual_risk = max(1e-8, sl_p - current_price)
-            min_floor = max(1e-8, current_price * 0.05)
+            min_floor = max(1e-8, current_price * 0.15)  # Cap short TP floor to realistic max 85% drop
             tp1_p = max(min_floor, current_price - max(1.20 * actual_risk, min_tp1_dist))
             tp2_p = max(min_floor, current_price - max(2.00 * actual_risk, min_tp1_dist * 1.8))
             tp3_p = max(min_floor, current_price - max(3.00 * actual_risk, min_tp1_dist * 2.8))

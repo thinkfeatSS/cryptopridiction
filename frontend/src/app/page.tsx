@@ -12,7 +12,8 @@ import PortfolioView from "@/components/PortfolioView";
 import QueuedTrades from "@/components/QueuedTrades";
 import { useForecastQuery } from "@/hooks/useCryptoData";
 import { useWebSocketStream } from "@/hooks/useWebSocketStream";
-import { Sparkles, Zap, ShieldCheck, Activity, BarChart2 } from "lucide-react";
+import { Sparkles, Zap, ShieldCheck, Activity, BarChart2, Volume2, VolumeX } from "lucide-react";
+import { playSignalChime, playParabolicBreakoutAlert } from "@/lib/audioAlert";
 
 export default function DashboardPage() {
   const wsStatus = useWebSocketStream();
@@ -21,9 +22,25 @@ export default function DashboardPage() {
   const [activeHorizon, setActiveHorizon] = useState<string>("ALL");
   const [directionFilter, setDirectionFilter] = useState<"ALL" | "LONG" | "SHORT">("ALL");
   const [minReturnFilter, setMinReturnFilter] = useState<number>(0);
+  const [soundAlerts, setSoundAlerts] = useState<boolean>(true);
+  const lastSignalCountRef = React.useRef<number>(0);
 
   const topSignals = forecast?.top_round_signals || [];
   const signalsByHorizon = forecast?.signals_by_horizon || {};
+
+  // Audio alert trigger when new actionable signals or parabolic hype breakouts arrive
+  React.useEffect(() => {
+    if (!soundAlerts || topSignals.length === 0) return;
+    if (topSignals.length > lastSignalCountRef.current && lastSignalCountRef.current > 0) {
+      const hasHypePump = topSignals.some((s: any) => s.is_hype_surge || s.decision?.includes("HYPE") || s.decision?.includes("PARABOLIC"));
+      if (hasHypePump) {
+        playParabolicBreakoutAlert(0.4);
+      } else {
+        playSignalChime(0.3);
+      }
+    }
+    lastSignalCountRef.current = topSignals.length;
+  }, [topSignals, soundAlerts]);
 
   const horizonCategories = [
     { key: "ALL", label: "⚡ All Active", tag: "ALL" },
@@ -188,6 +205,22 @@ export default function DashboardPage() {
                 {wsStatus.isConnected ? "⚡ Live WebSocket Stream" : "REST Sync"}
               </span>
             </span>
+            <button
+              onClick={() => {
+                const nextVal = !soundAlerts;
+                setSoundAlerts(nextVal);
+                if (nextVal) playSignalChime(0.25);
+              }}
+              title={soundAlerts ? "Sound Alerts Active (Click to Mute)" : "Sound Alerts Muted (Click to Enable)"}
+              className={`rounded-lg px-3 py-1.5 border flex items-center gap-1.5 transition-colors ${
+                soundAlerts
+                  ? "bg-cyan-950/80 text-cyan-300 border-cyan-500/50 hover:bg-cyan-900/90"
+                  : "bg-dark-900/90 text-slate-500 border-slate-800 hover:text-slate-400"
+              }`}
+            >
+              {soundAlerts ? <Volume2 className="h-3.5 w-3.5 text-cyan-400 animate-pulse" /> : <VolumeX className="h-3.5 w-3.5" />}
+              <span className="text-[11px] font-semibold">{soundAlerts ? "🔔 Audio Beep ON" : "🔕 Audio Muted"}</span>
+            </button>
             <span className="rounded-lg bg-dark-900/90 px-3 py-1.5 text-slate-300 border border-slate-800 flex items-center gap-1.5">
               <Activity className="h-3.5 w-3.5 text-cyan-400" />
               <span>Active Signals: <strong className="text-cyan-300">{topSignals.length}</strong></span>
