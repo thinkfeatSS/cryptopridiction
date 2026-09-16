@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import ccxt
 import xgboost as xgb
-from catboost import CatBoostClassifier
+from catboost import CatBoostClassifier, CatBoostRegressor
 from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier, HistGradientBoostingRegressor
 # Disable LightGBM in Linux container to eliminate OpenMP lib_lightgbm.so segfaults
 HAS_LIGHTGBM = False
@@ -1447,6 +1447,33 @@ class AdvancedFeatureEngineer:
         feats[f'{prefix}_bull_reversal_score'] = bull_rev_score.fillna(0.0)
         feats[f'{prefix}_bear_reversal_score'] = bear_rev_score.fillna(0.0)
 
+        # 18. Kaufman Efficiency Ratio (ER: Trend Persistence vs Sideways Noise)
+        change = (c - c.shift(10)).abs()
+        volatility = c.diff().abs().rolling(10).sum()
+        feats[f'{prefix}_kaufman_er'] = (change / (volatility + 1e-10)).fillna(0.5).clip(0.0, 1.0)
+
+        # 19. Multi-Scale Volatility Compression & Expansion Ratio (ATR7 / ATR28)
+        raw_atr7 = self.compute_atr(data, period=7)
+        raw_atr28 = self.compute_atr(data, period=28)
+        feats[f'{prefix}_vol_expansion_ratio'] = (raw_atr7 / (raw_atr28 + 1e-10)).fillna(1.0).clip(0.2, 5.0)
+
+        # 20. Price Velocity & Acceleration (1st and 2nd price derivatives)
+        p_vel = (c - c.shift(2)) / (c.shift(2) + 1e-10)
+        p_acc = (c - 2.0 * c.shift(1) + c.shift(2)) / (c.shift(2) + 1e-10)
+        feats[f'{prefix}_price_velocity'] = p_vel.fillna(0.0).clip(-0.5, 0.5)
+        feats[f'{prefix}_price_acceleration'] = p_acc.fillna(0.0).clip(-0.5, 0.5)
+
+        # 21. Standardized VWAP Deviation (Z-score to Volume-Weighted Average Price)
+        if 'volume' in data.columns:
+            pv = c * v
+            cum_pv = pv.rolling(20, min_periods=3).sum()
+            cum_v = v.rolling(20, min_periods=3).sum()
+            vwap = cum_pv / (cum_v + 1e-10)
+            raw_atr14 = self.compute_atr(data, period=14)
+            feats[f'{prefix}_vwap_zscore'] = ((c - vwap) / (raw_atr14 + 1e-10)).fillna(0.0).clip(-4.0, 4.0)
+        else:
+            feats[f'{prefix}_vwap_zscore'] = 0.0
+
         feats = feats.ffill().bfill()
         float_cols = feats.select_dtypes(include=['float64']).columns
         if len(float_cols) > 0:
@@ -1653,14 +1680,30 @@ class QuantModelFactory:
         )
 
     @staticmethod
+    def build_catboost_regressor(cfg: dict = None) -> CatBoostRegressor:
+        cfg = cfg or {}
+        return CatBoostRegressor(
+            iterations=cfg.get('iterations', 35),
+            depth=cfg.get('depth', 3),
+            learning_rate=cfg.get('learning_rate', 0.045),
+            loss_function='Huber:delta=1.0',
+            l2_leaf_reg=cfg.get('l2_leaf_reg', 2.5),
+            random_seed=42,
+            verbose=False,
+            thread_count=1
+        )
+
+    @staticmethod
     def build_xgb_regressor(cfg: dict = None) -> xgb.XGBRegressor:
         cfg = cfg or {}
         return xgb.XGBRegressor(
-            n_estimators=cfg.get('n_estimators', 25),
+            n_estimators=cfg.get('n_estimators', 30),
             max_depth=cfg.get('max_depth', 3),
-            learning_rate=cfg.get('learning_rate', 0.05),
+            learning_rate=cfg.get('learning_rate', 0.045),
             subsample=cfg.get('subsample', 0.85),
             colsample_bytree=cfg.get('colsample_bytree', 0.80),
+            reg_alpha=0.05,
+            reg_lambda=0.5,
             objective=cfg.get('objective', 'reg:pseudohubererror'),
             random_state=42,
             n_jobs=cfg.get('n_jobs', 1),
@@ -1672,8 +1715,9 @@ class QuantModelFactory:
         return HistGradientBoostingRegressor(
             max_iter=30,
             max_depth=3,
-            learning_rate=0.05,
-            min_samples_leaf=5,
+            learning_rate=0.045,
+            min_samples_leaf=4,
+            l2_regularization=0.2,
             random_state=42
         )
 
@@ -4230,9 +4274,11 @@ class HybridQuantEngine:
                 xgb_m = cached['xgb_m']
                 et = cached['et']
                 hgb_m = cached.get('hgb_m')
+                cat_reg = cached.get('cat_reg')
                 xgb_reg = cached.get('xgb_reg')
                 hgb_reg = cached.get('hgb_reg')
                 w_cat, w_xgb, w_et, w_hgb = cached.get('weights', (0.30, 0.30, 0.20, 0.20))
+                w_cat_r, w_xgb_r, w_hgb_r = cached.get('reg_weights', (0.35, 0.35, 0.30))
                 elite_acc = cached.get('elite_acc', 0.85)
 
                 X_live_scaled = np.nan_to_num(scaler.transform(live_candle[feature_cols].values), nan=0.0)
@@ -4241,9 +4287,10 @@ class HybridQuantEngine:
                 p_et_live = float(et.predict_proba(X_live_scaled)[0, 1]) if et else 0.50
                 p_hgb_live = float(hgb_m.predict_proba(X_live_scaled)[0, 1]) if hgb_m else 0.50
 
-                r_xgb = float(xgb_reg.predict(X_live_scaled)[0]) if xgb_reg else 0.005
-                r_hgb = float(hgb_reg.predict(X_live_scaled)[0]) if hgb_reg else 0.005
-                pred_reg_ret = float(0.50 * r_xgb + 0.50 * r_hgb)
+                r_cat = float(cat_reg.predict(X_live_scaled)[0]) if cat_reg else (0.005 if d1_macro_bull else -0.005)
+                r_xgb = float(xgb_reg.predict(X_live_scaled)[0]) if xgb_reg else (0.005 if d1_macro_bull else -0.005)
+                r_hgb = float(hgb_reg.predict(X_live_scaled)[0]) if hgb_reg else (0.005 if d1_macro_bull else -0.005)
+                pred_reg_ret = float((w_cat_r * r_cat) + (w_xgb_r * r_xgb) + (w_hgb_r * r_hgb))
             else:
                 scaler = RobustScaler()
                 X_train_scaled = np.nan_to_num(scaler.fit_transform(X_train), nan=0.0)
@@ -4294,26 +4341,55 @@ class HybridQuantEngine:
                     p_hgb_live = 0.55 if d1_macro_bull else 0.45
                     p_test_hgb = np.array([p_hgb_live] * max(1, len(X_test_scaled)))
 
-                # 5. Per-Coin Continuous Price Regression Models
+                # 5. Per-Coin Continuous Price Regression 3-Way Ensemble (CatBoost + XGBoost + HistGBM)
+                try:
+                    cat_reg = QuantModelFactory.build_catboost_regressor()
+                    cat_reg.fit(X_train_scaled, y_r_train)
+                    r_cat = float(cat_reg.predict(X_live_scaled)[0])
+                    p_test_cat_r = cat_reg.predict(X_test_scaled) if len(X_test_scaled) > 0 else np.array([r_cat])
+                except Exception:
+                    cat_reg = None
+                    r_cat = 0.005 if d1_macro_bull else -0.005
+                    p_test_cat_r = np.array([r_cat] * max(1, len(X_test_scaled)))
+
                 try:
                     xgb_reg = QuantModelFactory.build_xgb_regressor(self.config.get('xgb_reg', {}))
                     xgb_reg.fit(X_train_scaled, y_r_train)
                     r_xgb = float(xgb_reg.predict(X_live_scaled)[0])
+                    p_test_xgb_r = xgb_reg.predict(X_test_scaled) if len(X_test_scaled) > 0 else np.array([r_xgb])
                 except Exception:
                     xgb_reg = None
                     r_xgb = 0.005 if d1_macro_bull else -0.005
+                    p_test_xgb_r = np.array([r_xgb] * max(1, len(X_test_scaled)))
 
                 try:
                     hgb_reg = QuantModelFactory.build_hist_gbm_regressor()
                     hgb_reg.fit(X_train_scaled, y_r_train)
                     r_hgb = float(hgb_reg.predict(X_live_scaled)[0])
+                    p_test_hgb_r = hgb_reg.predict(X_test_scaled) if len(X_test_scaled) > 0 else np.array([r_hgb])
                 except Exception:
                     hgb_reg = None
                     r_hgb = 0.005 if d1_macro_bull else -0.005
+                    p_test_hgb_r = np.array([r_hgb] * max(1, len(X_test_scaled)))
 
-                pred_reg_ret = float(0.50 * r_xgb + 0.50 * r_hgb)
+                # Out-of-Sample Huber Loss-Weighted Stacking for Regressors
+                def _huber_loss(y_true, y_pred, delta=0.01):
+                    err = np.abs(y_true - y_pred)
+                    return float(np.mean(np.where(err > delta, delta * (err - 0.5 * delta), 0.5 * (err ** 2))))
 
-                # Loss-Weighted Stacking
+                if len(y_r_test) >= 3:
+                    l_cat_r = max(1e-5, _huber_loss(y_r_test, p_test_cat_r))
+                    l_xgb_r = max(1e-5, _huber_loss(y_r_test, p_test_xgb_r))
+                    l_hgb_r = max(1e-5, _huber_loss(y_r_test, p_test_hgb_r))
+                    inv_r = [1.0 / l_cat_r, 1.0 / l_xgb_r, 1.0 / l_hgb_r]
+                    sum_inv_r = sum(inv_r)
+                    w_cat_r, w_xgb_r, w_hgb_r = [w / sum_inv_r for w in inv_r]
+                else:
+                    w_cat_r, w_xgb_r, w_hgb_r = (0.35, 0.35, 0.30)
+
+                pred_reg_ret = float((w_cat_r * r_cat) + (w_xgb_r * r_xgb) + (w_hgb_r * r_hgb))
+
+                # Loss-Weighted Stacking for Classifiers
                 losses = []
                 for p_test in [p_test_cat, p_test_xgb, p_test_et, p_test_hgb]:
                     if len(y_p_test) >= 4:
@@ -4337,9 +4413,11 @@ class HybridQuantEngine:
                         'xgb_m': xgb_m,
                         'et': et,
                         'hgb_m': hgb_m,
+                        'cat_reg': cat_reg,
                         'xgb_reg': xgb_reg,
                         'hgb_reg': hgb_reg,
                         'weights': (w_cat, w_xgb, w_et, w_hgb),
+                        'reg_weights': (w_cat_r, w_xgb_r, w_hgb_r),
                         'elite_acc': elite_acc,
                         'ts': now_ts
                     }
