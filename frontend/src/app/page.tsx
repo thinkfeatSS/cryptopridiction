@@ -13,7 +13,7 @@ import QueuedTrades from "@/components/QueuedTrades";
 import { useForecastQuery } from "@/hooks/useCryptoData";
 import { useWebSocketStream } from "@/hooks/useWebSocketStream";
 import { Sparkles, Zap, ShieldCheck, Activity, BarChart2, Volume2, VolumeX } from "lucide-react";
-import { playSignalChime, playParabolicBreakoutAlert } from "@/lib/audioAlert";
+import { playSignalChime, playParabolicBreakoutAlert, playExhaustionSellAlert } from "@/lib/audioAlert";
 
 export default function DashboardPage() {
   const wsStatus = useWebSocketStream();
@@ -28,15 +28,18 @@ export default function DashboardPage() {
   const topSignals = forecast?.top_round_signals || [];
   const signalsByHorizon = forecast?.signals_by_horizon || {};
 
-  // Audio alert trigger when new actionable signals or parabolic hype breakouts arrive
+  // Audio alert trigger when new actionable signals, blow-off tops, or parabolic hype breakouts arrive
   React.useEffect(() => {
     if (!soundAlerts || topSignals.length === 0) return;
     if (topSignals.length > lastSignalCountRef.current && lastSignalCountRef.current > 0) {
+      const hasBlowoffTop = topSignals.some((s: any) => s.is_blowoff_top || s.decision?.includes("BLOW-OFF") || s.decision?.includes("EXHAUSTION"));
       const hasHypePump = topSignals.some((s: any) => s.is_hype_surge || s.decision?.includes("HYPE") || s.decision?.includes("PARABOLIC"));
-      if (hasHypePump) {
-        playParabolicBreakoutAlert(0.4);
+      if (hasBlowoffTop) {
+        playExhaustionSellAlert(0.42);
+      } else if (hasHypePump) {
+        playParabolicBreakoutAlert(0.40);
       } else {
-        playSignalChime(0.3);
+        playSignalChime(0.30);
       }
     }
     lastSignalCountRef.current = topSignals.length;

@@ -4494,11 +4494,19 @@ class HybridQuantEngine:
         # 7. PARABOLIC HYPE SURGE & BLOW-OFF TOP EXHAUSTION DETECTOR
         is_hype_surge = False
         is_blowoff_top = False
+        base_pump_price = current_price * 0.85
+        peak_pump_price = current_price
+        pump_range = max(1e-8, current_price * 0.15)
+        pump_magnitude = 0.0
+
         if '15m' in raw_dfs and len(raw_dfs['15m']) >= 15:
             df_15 = raw_dfs['15m']
             c_now = float(df_15['close'].iloc[-1])
             c_prev3 = float(df_15['close'].iloc[-4]) if len(df_15) >= 4 else c_now
+            c_prev10 = float(df_15['close'].iloc[-10]) if len(df_15) >= 10 else c_now
             gain_recent_pct = (c_now - c_prev3) / (c_prev3 + 1e-10)
+            gain_10bar_pct = (c_now - c_prev10) / (c_prev10 + 1e-10)
+            
             vol_now = float(df_15['volume'].iloc[-1])
             vol_ma20 = float(df_15['volume'].rolling(20, min_periods=3).mean().iloc[-1])
             vol_ratio_now = vol_now / (vol_ma20 + 1e-10)
@@ -4507,13 +4515,36 @@ class HybridQuantEngine:
             low_now = float(df_15['low'].iloc[-1])
             bar_rng = max(1e-8, high_now - low_now)
             upper_wick_ratio = (high_now - max(c_now, float(df_15['open'].iloc[-1]))) / bar_rng
-
-            # A. Blow-Off Top Exhaustion (Spikes high, forms huge upper rejection wick, RSI > 78)
-            if (gain_recent_pct >= 0.065 or rsi_anchor >= 78.0) and (upper_wick_ratio >= 0.38 or bear_rev_score >= 0.45):
-                is_blowoff_top = True
             
-            # B. Parabolic Hype Surge (Explosive momentum breakout on massive volume)
-            elif vol_ratio_now >= 2.6 and gain_recent_pct >= 0.032 and upper_wick_ratio < 0.30:
+            # Base and peak calculation over recent 30 bars
+            base_pump_price = float(df_15['low'].rolling(30, min_periods=5).min().iloc[-1])
+            peak_pump_price = float(df_15['high'].rolling(30, min_periods=5).max().iloc[-1])
+            pump_range = max(1e-8, peak_pump_price - base_pump_price)
+            pump_magnitude = pump_range / max(1e-8, base_pump_price)
+
+            # EMA20 overextension calculation (Z-score to mean)
+            ema20_15m = float(df_15['close'].ewm(span=20).mean().iloc[-1])
+            overextension_z = (c_now - ema20_15m) / max(1e-8, live_raw_atr)
+
+            # Break of micro-trend (candle breakdown)
+            is_candle_broken = len(df_15) >= 2 and c_now < float(df_15['low'].iloc[-2])
+
+            # A. Blow-Off Top Exhaustion (Peak reached, overextension >= 2.5 ATRs or RSI >= 72 or Upper Wick or Candle Breakdown after heavy pump)
+            is_heavy_pump = (pump_magnitude >= 0.12) or (gain_recent_pct >= 0.055) or (gain_10bar_pct >= 0.10)
+            is_exhaustion_trigger = (
+                (upper_wick_ratio >= 0.25) or
+                (overextension_z >= 3.0) or
+                (rsi_anchor >= 72.0 and is_candle_broken) or
+                (bear_rev_score >= 0.35) or
+                (td9_sell_ex) or
+                (bb_upthrust) or
+                (rsi_bear_div) or
+                (vol_ratio_now >= 1.8 and c_now < float(df_15['open'].iloc[-1]))
+            )
+
+            if is_heavy_pump and is_exhaustion_trigger:
+                is_blowoff_top = True
+            elif vol_ratio_now >= 2.2 and gain_recent_pct >= 0.030 and upper_wick_ratio < 0.25 and overextension_z < 4.0:
                 is_hype_surge = True
 
         # Reversal Conditions
@@ -4558,8 +4589,8 @@ class HybridQuantEngine:
         is_reversal_setup = False
         if is_blowoff_top:
             h_dir = "BEARISH"
-            h_conf = max(76.0, min(98.0, 68.0 + (bear_rev_score * 30.0)))
-            decision = f"🛑 PARABOLIC BLOW-OFF TOP (REVERSAL / FADE){squeeze_boost_label}"
+            h_conf = max(78.0, min(98.0, 72.0 + (bear_rev_score * 30.0)))
+            decision = f"🛑 PARABOLIC BLOW-OFF TOP (REVERSAL SELL / SHORT){squeeze_boost_label}"
             priority = 1
             is_reversal_setup = True
             is_neutral_zone = False
@@ -4647,15 +4678,33 @@ class HybridQuantEngine:
                 priority = 4
 
         # 8. Continuous Price Regression Target & Asymmetric R:R Architecture
-        if is_hype_surge:
+        if is_blowoff_top:
+            # Predict mean-reversion sell down targets based on Fibonacci & VWAP retracement from peak
+            fib_retracement_map = {
+                'scalp': 0.382,
+                'horizon_30m': 0.450,
+                'swing': 0.500,
+                'horizon_4h': 0.618,
+                'horizon_12h': 0.786,
+                'macro': 1.000,
+                'horizon_4d': 1.000,
+                'weekly': 1.000,
+                'biweekly': 1.000,
+                'monthly': 1.000
+            }
+            fib_ratio = fib_retracement_map.get(horizon_key, 0.50)
+            downside_target = max(base_pump_price, peak_pump_price - (fib_ratio * pump_range))
+            fib_drop_ret = -abs((current_price - downside_target) / (current_price + 1e-10))
+            exp_ret = max(-0.75, min(-0.025, fib_drop_ret))
+        elif is_hype_surge:
             # During parabolic expansion, dynamically scale target return with volume & volatility expansion
             surge_vol_factor = max(1.2, min(3.5, vol_ratio_now if 'vol_ratio_now' in locals() else 2.0))
             exp_ret_mag = max(0.015, abs(pred_reg_ret) * surge_vol_factor, (h_conf / 100.0) * live_norm_atr * (bars ** 0.5) * 1.5)
+            exp_ret = min(3.00, exp_ret_mag)
         else:
             exp_ret_mag = max(0.004, abs(pred_reg_ret), (h_conf / 100.0) * live_norm_atr * (bars ** 0.5))
+            exp_ret = min(3.00, exp_ret_mag) if h_dir == "BULLISH" else max(-0.75, -exp_ret_mag)
 
-        # Clamp max percentage changes to realistic physical boundaries (max +300% on long, min -75% on short)
-        exp_ret = min(3.00, exp_ret_mag) if h_dir == "BULLISH" else max(-0.75, -exp_ret_mag)
         projected_target = max(current_price * 0.10, current_price * (1.0 + exp_ret))
         predicted_next_price = round(projected_target, 6)
         predicted_return_pct = round(exp_ret * 100.0, 2)
@@ -4681,18 +4730,35 @@ class HybridQuantEngine:
             tp4_p = current_price + max(4.00 * actual_risk, min_tp1_dist * 3.8)
             tp_p = tp4_p
         else:
-            sl_base = current_price + risk_dist
-            if is_reversal_setup or is_bear_sweep or is_blowoff_top:
-                sl_p = max(sl_base, live_high_c + (0.25 * live_raw_atr))
+            if is_blowoff_top:
+                sl_p = max(current_price + (1.20 * live_raw_atr), peak_pump_price * 1.015)
+                # Fibonacci downside take-profits
+                tp1_p = max(current_price * 0.15, peak_pump_price - (0.382 * pump_range))
+                tp2_p = max(current_price * 0.15, peak_pump_price - (0.500 * pump_range))
+                tp3_p = max(current_price * 0.15, peak_pump_price - (0.618 * pump_range))
+                tp4_p = max(current_price * 0.15, base_pump_price)
+                if tp1_p >= current_price:
+                    tp1_p = current_price * 0.965
+                if tp2_p >= tp1_p:
+                    tp2_p = tp1_p * 0.970
+                if tp3_p >= tp2_p:
+                    tp3_p = tp2_p * 0.960
+                if tp4_p >= tp3_p:
+                    tp4_p = tp3_p * 0.950
+                tp_p = tp3_p
             else:
-                sl_p = sl_base
-            actual_risk = max(1e-8, sl_p - current_price)
-            min_floor = max(1e-8, current_price * 0.15)  # Cap short TP floor to realistic max 85% drop
-            tp1_p = max(min_floor, current_price - max(1.20 * actual_risk, min_tp1_dist))
-            tp2_p = max(min_floor, current_price - max(2.00 * actual_risk, min_tp1_dist * 1.8))
-            tp3_p = max(min_floor, current_price - max(3.00 * actual_risk, min_tp1_dist * 2.8))
-            tp4_p = max(min_floor, current_price - max(4.00 * actual_risk, min_tp1_dist * 3.8))
-            tp_p = tp4_p
+                sl_base = current_price + risk_dist
+                if is_reversal_setup or is_bear_sweep:
+                    sl_p = max(sl_base, live_high_c + (0.25 * live_raw_atr))
+                else:
+                    sl_p = sl_base
+                actual_risk = max(1e-8, sl_p - current_price)
+                min_floor = max(1e-8, current_price * 0.15)  # Cap short TP floor to realistic max 85% drop
+                tp1_p = max(min_floor, current_price - max(1.20 * actual_risk, min_tp1_dist))
+                tp2_p = max(min_floor, current_price - max(2.00 * actual_risk, min_tp1_dist * 1.8))
+                tp3_p = max(min_floor, current_price - max(3.00 * actual_risk, min_tp1_dist * 2.8))
+                tp4_p = max(min_floor, current_price - max(4.00 * actual_risk, min_tp1_dist * 3.8))
+                tp_p = tp4_p
 
         # Minimum Profit Hurdle Check against TP1
         tp1_gain_pct = (abs(tp1_p - current_price) / (current_price + 1e-10)) * 100.0
@@ -4709,7 +4775,7 @@ class HybridQuantEngine:
             'monthly': 7.00
         }
         min_hurdle = min_reward_map.get(horizon_key, 0.45)
-        if (tp1_gain_pct < min_hurdle or abs(exp_ret * 100.0) < (0.60 if horizon_key == 'scalp' else 0.35)) and not is_hype_surge and h_conf < 78.0:
+        if (tp1_gain_pct < min_hurdle or abs(exp_ret * 100.0) < (0.60 if horizon_key == 'scalp' else 0.35)) and not is_hype_surge and not is_blowoff_top and h_conf < 78.0:
             decision = f"⛔ FILTER (SUB-{min_hurdle:.1f}% RETURN / FEE DRAG)"
             priority = 4
 
@@ -5796,9 +5862,16 @@ class HybridQuantEngine:
                 # --------------------------------------------------------------
                 # 🛑 STRUCTURAL HEURISTIC CIRCUIT BREAKERS
                 # --------------------------------------------------------------
-                # 1. Parabolic Short Ban (Prevents catastrophic squeeze traps)
+                # 1. Parabolic Short Filter (Protects early pumps, but PRIORITIZES confirmed Blow-Off Tops!)
                 is_parabolic_short = False
-                if ban_parabolic_shorts and direction in ["BEARISH", "SHORT"]:
+                is_confirmed_exhaustion = (
+                    bool(h.get('is_blowoff_top', False)) or
+                    bool(h.get('is_top_reversal', False)) or
+                    "BLOW-OFF TOP" in decision or
+                    "TOP-REVERSAL" in decision or
+                    "RALLY-SELL" in decision
+                )
+                if ban_parabolic_shorts and direction in ["BEARISH", "SHORT"] and not is_confirmed_exhaustion:
                     if rsi_1h_val >= 70.0 or rs_val >= 2.5:
                         is_parabolic_short = True
                         decision = f"🛡️ SUPPRESSED (PARABOLIC MOMENTUM SQUEEZE RISK)"
@@ -5807,12 +5880,12 @@ class HybridQuantEngine:
                 # 2. Fee Hurdle: Filter out micro-targets where fees eat the profit (>= 0.20% minimum net profit hurdle)
                 is_fee_drag_rejected = False
                 min_return_hurdle = sig_cfg.get('min_expected_return_pct', 0.20)
-                if tp_pct < min_return_hurdle or abs(exp_ret * 100.0) < min_return_hurdle:
+                if (tp_pct < min_return_hurdle or abs(exp_ret * 100.0) < min_return_hurdle) and not is_confirmed_exhaustion:
                     is_fee_drag_rejected = True
                     decision = "⛔ FILTER (SUB-0.2% RETURN / FEE DRAG)"
-                elif h_key == 'scalp' and tp_pct < min_scalp_gain:
+                elif h_key == 'scalp' and tp_pct < min_scalp_gain and not is_confirmed_exhaustion:
                     is_fee_drag_rejected = True
-                elif h_key == 'swing' and tp_pct < min_swing_gain:
+                elif h_key == 'swing' and tp_pct < min_swing_gain and not is_confirmed_exhaustion:
                     is_fee_drag_rejected = True
 
                 # 3. 2-Strike Asset Blacklist Quarantine Check & Deduplication
@@ -5839,16 +5912,16 @@ class HybridQuantEngine:
                 is_in_cooldown = (now_ts - last_sig_time) < cooldown_map.get(h_key, 1800)
 
                 # 💎 Grade Classification
-                is_exec_decision = any(k in decision for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT", "MOMENTUM", "REVERSAL", "SWEEP"])
+                is_exec_decision = any(k in decision for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT", "MOMENTUM", "REVERSAL", "SWEEP", "BLOW-OFF TOP", "HYPE PUMP"])
                 is_a_plus_candidate = (
-                    (conv >= a_plus_cutoff or (is_triple and conv >= 70.0)) and
+                    (conv >= a_plus_cutoff or (is_triple and conv >= 70.0) or is_confirmed_exhaustion) and
                     is_exec_decision and
                     not is_shield_blocked and
                     not is_parabolic_short and
                     not is_fee_drag_rejected and
                     not is_quarantined and
-                    (rs_val >= -0.2 if direction == "BULLISH" else rs_val <= 0.2) and
-                    elite_prec >= 0.55
+                    (rs_val >= -0.2 if direction == "BULLISH" else True) and
+                    (elite_prec >= 0.50 or is_confirmed_exhaustion)
                 )
 
                 if is_a_plus_candidate:

@@ -89,3 +89,33 @@ export function playParabolicBreakoutAlert(volume: number = 0.35) {
     console.warn("Breakout alert playback error:", e);
   }
 }
+
+/**
+ * Plays a distinct high-urgency descending exhaustion chime (E6 -> B5 -> G5 -> D5)
+ * Warning traders that momentum has topped and market is reversing downward.
+ */
+export function playExhaustionSellAlert(volume: number = 0.38) {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  try {
+    const now = ctx.currentTime;
+    const notes = [1318.5, 987.77, 783.99, 587.33]; // Descending E6 -> B5 -> G5 -> D5
+    notes.forEach((freq, idx) => {
+      const startTime = now + (idx * 0.08);
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sawtooth"; // Distinctive warning timbre
+      osc.frequency.setValueAtTime(freq, startTime);
+      gain.gain.setValueAtTime(volume, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.18);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + 0.18);
+    });
+  } catch (e) {
+    console.warn("Exhaustion sell alert playback error:", e);
+  }
+}
+
