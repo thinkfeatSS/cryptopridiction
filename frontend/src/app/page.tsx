@@ -10,6 +10,7 @@ import DailySignalsView from "@/components/DailySignalsView";
 import SignalsTable from "@/components/SignalsTable";
 import PortfolioView from "@/components/PortfolioView";
 import QueuedTrades from "@/components/QueuedTrades";
+import LiveFlashAlertPopup from "@/components/LiveFlashAlertPopup";
 import { useForecastQuery } from "@/hooks/useCryptoData";
 import { useWebSocketStream } from "@/hooks/useWebSocketStream";
 import { Sparkles, Zap, ShieldCheck, Activity, BarChart2, Volume2, VolumeX } from "lucide-react";
@@ -444,6 +445,13 @@ export default function DashboardPage() {
 
         <SignalsTable initialDate={selectedDate} key={selectedDate} />
       </section>
+
+      {/* Real-Time Flash Signals Closeable Popup & Alert History Drawer */}
+      <LiveFlashAlertPopup
+        topSignals={topSignals}
+        soundEnabled={soundAlerts}
+        onToggleSound={() => setSoundAlerts(!soundAlerts)}
+      />
     </div>
   );
 }
