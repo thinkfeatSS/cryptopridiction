@@ -16,15 +16,19 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     ws_manager.set_loop(loop)
     watcher_task = asyncio.create_task(ws_manager.start_background_watcher(settings.EXPORT_DIR))
-    try:
-        init_db()
-    except Exception as e:
-        print(f"[BACKEND ⚠️] init_db notice: {e}")
-    try:
-        import threading
-        threading.Thread(target=migrate_files_to_db, daemon=True).start()
-    except Exception as e:
-        print(f"[BACKEND ⚠️] migrate_files_to_db notice: {e}")
+    
+    import threading
+    def _bg_startup():
+        try:
+            init_db()
+        except Exception as e:
+            print(f"[BACKEND ⚠️] init_db notice: {e}")
+        try:
+            migrate_files_to_db()
+        except Exception as e:
+            print(f"[BACKEND ⚠️] migrate_files_to_db notice: {e}")
+
+    threading.Thread(target=_bg_startup, daemon=True, name="db_startup_thread").start()
     yield
     print("[BACKEND 🛑] Shutting down Quantitative Crypto Backend...")
     watcher_task.cancel()
