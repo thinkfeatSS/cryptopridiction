@@ -304,21 +304,31 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
             </span>
           </div>
 
-          {/* Continuous ML Next Price Regression Target */}
-          {signal.predicted_next_price && (
-            <div className="flex items-center justify-between bg-dark-950/90 rounded-lg px-2.5 py-1.5 border border-purple-500/30 col-span-2">
-              <span className="text-[11px] font-bold text-purple-300 flex items-center gap-1">
-                <Sparkles className="h-3 w-3 text-purple-400" />
-                ML Regression Target Price:
-              </span>
-              <span className="text-xs font-mono font-black text-purple-200">
-                {formatUsd(signal.predicted_next_price)}{" "}
-                <span className={signal.predicted_return_pct >= 0 ? "text-emerald-400 font-medium" : "text-rose-400 font-medium"}>
-                  ({signal.predicted_return_pct >= 0 ? "+" : ""}{signal.predicted_return_pct}%)
+          {/* Continuous ML Next Price Regression Target & Best Sell Zone */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 col-span-2">
+            {signal.predicted_next_price && (
+              <div className="flex items-center justify-between bg-dark-950/90 rounded-lg px-2.5 py-1.5 border border-purple-500/30">
+                <span className="text-[11px] font-bold text-purple-300 flex items-center gap-1">
+                  <Sparkles className="h-3 w-3 text-purple-400" />
+                  ML Target Price:
                 </span>
+                <span className="text-xs font-mono font-black text-purple-200">
+                  {formatUsd(signal.predicted_next_price)}{" "}
+                  <span className={signal.predicted_return_pct >= 0 ? "text-emerald-400 font-medium" : "text-rose-400 font-medium"}>
+                    ({signal.predicted_return_pct >= 0 ? "+" : ""}{signal.predicted_return_pct}%)
+                  </span>
+                </span>
+              </div>
+            )}
+            <div className="flex items-center justify-between bg-amber-950/40 rounded-lg px-2.5 py-1.5 border border-amber-500/30">
+              <span className="text-[11px] font-bold text-amber-300 flex items-center gap-1">
+                💎 Best Sell Zone:
+              </span>
+              <span className="text-xs font-mono font-black text-amber-200">
+                {formatUsd(signal.best_sell_price || signal.tp3_price || tp3)}
               </span>
             </div>
-          )}
+          </div>
 
           <div className="flex flex-col border-t border-slate-800/60 pt-2 col-span-2">
             <span className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider flex items-center gap-1">

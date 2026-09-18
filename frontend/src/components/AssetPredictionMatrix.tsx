@@ -132,7 +132,8 @@ export function getHorizonStance(h?: any): "bullish" | "consolidate" | "bearish"
 }
 
 // Helper to render rich 3-line signal strength, catalyst badges, and ML Win Prob matching institutional scanner
-function renderSignalCell(h?: any) {
+// Helper to render rich 3-line signal strength, catalyst badges, and ML Win Prob matching institutional scanner
+function renderSignalCell(h?: any, livePrice?: number) {
   if (!h || (!h.direction && !h.decision)) {
     return <span className="text-slate-600 font-sans text-xs">—</span>;
   }
@@ -223,10 +224,36 @@ function renderSignalCell(h?: any) {
     badgeStyle = "bg-rose-950/50 text-rose-400 border-rose-800/60";
   }
 
-  const predNextPrice = h.predicted_next_price;
-  const predReturnPct = h.predicted_return_pct;
+  const curr = (livePrice && livePrice > 0) ? livePrice : (Number(h.current_price) || 1.0);
+  let predNextPrice = Number(h.predicted_next_price || h.tp1_price || (isLong ? curr * 1.01 : curr * 0.99));
+  let predReturnPct = Number(h.predicted_return_pct ?? (((predNextPrice - curr) / curr) * 100).toFixed(2));
   const isHypeSurge = h.is_hype_surge;
   const isBlowoffTop = h.is_blowoff_top;
+
+  // Dynamic Target Advancement if Actual Price Crossed Predicted Target Price
+  let isTargetCrossed = false;
+  if (isLong && curr >= predNextPrice && predNextPrice > 0) {
+    isTargetCrossed = true;
+    const tp2 = Number(h.tp2_price || curr * 1.02);
+    const tp3 = Number(h.tp3_price || curr * 1.04);
+    const tp4 = Number(h.tp4_price || curr * 1.07);
+    predNextPrice = curr < tp2 ? tp2 : (curr < tp3 ? tp3 : tp4);
+    predReturnPct = Number((((predNextPrice - curr) / curr) * 100).toFixed(2));
+  } else if (!isLong && curr <= predNextPrice && predNextPrice > 0) {
+    isTargetCrossed = true;
+    const tp2 = Number(h.tp2_price || curr * 0.98);
+    const tp3 = Number(h.tp3_price || curr * 0.96);
+    const tp4 = Number(h.tp4_price || curr * 0.93);
+    predNextPrice = curr > tp2 ? tp2 : (curr > tp3 ? tp3 : tp4);
+    predReturnPct = Number((((predNextPrice - curr) / curr) * 100).toFixed(2));
+  }
+
+  // Best Selling Price / Peak Profit Zone
+  const bestSellPrice = Number(
+    h.best_sell_price ||
+    h.tp3_price ||
+    (isLong ? (isHypeSurge ? curr * 1.08 : curr * 1.04) : (isBlowoffTop ? curr * 0.92 : curr * 0.96))
+  );
 
   return (
     <div className="flex flex-col gap-1 py-1 min-w-[175px] max-w-[250px]">
@@ -257,26 +284,38 @@ function renderSignalCell(h?: any) {
       </div>
 
       {/* Line 2: Continuous ML Next Price Target Regression */}
-      {predNextPrice && (
-        <div className="text-[10.5px] font-mono text-purple-200 bg-purple-950/40 px-1.5 py-0.5 rounded border border-purple-500/20 flex items-center justify-between">
-          <span className="text-purple-300 font-bold">🔮 ML Target:</span>
-          <span>
-            {formatUsd(predNextPrice)}{" "}
-            <span className={predReturnPct >= 0 ? "text-emerald-400 font-semibold" : "text-rose-400 font-semibold"}>
-              ({predReturnPct >= 0 ? "+" : ""}{predReturnPct}%)
-            </span>
+      <div className={`text-[10.5px] font-mono px-1.5 py-0.5 rounded border flex items-center justify-between ${
+        isTargetCrossed 
+          ? "text-emerald-200 bg-emerald-950/60 border-emerald-500/40 shadow-sm shadow-emerald-500/20 animate-pulse" 
+          : "text-purple-200 bg-purple-950/40 border-purple-500/20"
+      }`}>
+        <span className={isTargetCrossed ? "text-emerald-300 font-bold flex items-center gap-0.5" : "text-purple-300 font-bold flex items-center gap-0.5"}>
+          {isTargetCrossed ? "🎯 T1 Hit ➔ Next:" : "🔮 ML Target:"}
+        </span>
+        <span>
+          {formatUsd(predNextPrice)}{" "}
+          <span className={predReturnPct >= 0 ? "text-emerald-400 font-semibold" : "text-rose-400 font-semibold"}>
+            ({predReturnPct >= 0 ? "+" : ""}{predReturnPct}%)
           </span>
-        </div>
-      )}
+        </span>
+      </div>
 
-      {/* Line 3: Take Profit & Stop Loss targets */}
+      {/* Line 3: Best Selling Price / Take Profit Zone */}
+      <div className="text-[10px] font-mono text-amber-200/90 bg-amber-950/30 px-1.5 py-0.5 rounded border border-amber-500/20 flex items-center justify-between">
+        <span className="text-amber-400 font-bold">💎 Best Sell:</span>
+        <span className="font-extrabold text-amber-300">
+          {formatUsd(bestSellPrice)}
+        </span>
+      </div>
+
+      {/* Line 4: Take Profit & Stop Loss targets */}
       <div className="text-[10px] font-mono text-slate-400 whitespace-nowrap leading-tight">
-        <span>TP: <strong className="text-emerald-400">{formatUsd(h.tp_price)}</strong></span>
+        <span>TP: <strong className="text-emerald-400">{formatUsd(h.tp_price || h.tp1_price)}</strong></span>
         <span className="mx-1 text-slate-600">|</span>
         <span>SL: <strong className="text-rose-400">{formatUsd(h.sl_price)}</strong></span>
       </div>
 
-      {/* Line 4: Signal Strength / Filter Badge & Hype Alerts */}
+      {/* Line 5: Signal Strength / Filter Badge & Hype Alerts */}
       <div className="mt-0.5 flex flex-col gap-0.5">
         <span
           className={`inline-block rounded px-1.5 py-0.5 text-[9.5px] font-bold font-sans border tracking-tight leading-snug whitespace-normal ${badgeStyle}`}
@@ -289,7 +328,7 @@ function renderSignalCell(h?: any) {
               🛑 BLOW-OFF TOP (SELL / FADE ZONE)
             </span>
             <span className="text-[8.5px] font-mono text-rose-400 text-center">
-              Peak Exhaustion Level: {formatUsd(h.sl_price)}
+              Peak Exhaustion Level: {formatUsd(bestSellPrice || h.sl_price)}
             </span>
           </div>
         )}
@@ -299,7 +338,7 @@ function renderSignalCell(h?: any) {
               🚀 HYPE PUMP (MOMENTUM SCALP)
             </span>
             <span className="text-[8.5px] font-mono text-emerald-300 text-center bg-emerald-950/60 rounded px-1 py-0.2 border border-emerald-500/30">
-              🎯 Peak Target: {formatUsd(predNextPrice)} | 🛡️ Sell Trigger: SL @ {formatUsd(h.sl_price)}
+              🎯 Next Target: {formatUsd(predNextPrice)} | 💎 Best Sell: {formatUsd(bestSellPrice)}
             </span>
           </div>
         )}
@@ -485,16 +524,16 @@ const AssetAllHorizonRow = React.memo(function AssetAllHorizonRow({
         serverPredictionTimeFallback={serverPredictionTimeFallback}
         isStale={isStale}
       />
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "scalp"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(s)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_30m" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h30m)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "swing"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(w)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4h"  && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h4h)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_12h" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h12h)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "macro"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(m)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4d"  && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h4d)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "weekly"      && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h7d)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "biweekly"    && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h15d)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "monthly"     && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h30d)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "scalp"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(s, livePrice)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_30m" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h30m, livePrice)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "swing"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(w, livePrice)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4h"  && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h4h, livePrice)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_12h" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h12h, livePrice)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "macro"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(m, livePrice)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4d"  && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h4d, livePrice)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "weekly"      && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h7d, livePrice)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "biweekly"    && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h15d, livePrice)}</td>
+      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "monthly"     && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h30d, livePrice)}</td>
       <td className="py-3 px-4 text-right font-sans">
         <div className="flex flex-col items-end gap-1">
           <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-black border ${
@@ -584,7 +623,7 @@ const AssetSingleHorizonRow = React.memo(function AssetSingleHorizonRow({
         <span className={`font-bold ${expRet >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatPercent(expRet)}</span>
       </td>
       <td className="py-3 px-4 text-right font-sans">
-        <div className="flex justify-end">{renderSignalCell(h)}</div>
+        <div className="flex justify-end">{renderSignalCell(h, livePrice)}</div>
       </td>
     </tr>
   );

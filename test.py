@@ -3697,7 +3697,7 @@ class HybridQuantEngine:
         os.makedirs(self.config['app_export_dir'], exist_ok=True)
 
     def _refresh_asset_entry_timestamps(self, item: dict, live_price: float = None) -> dict:
-        """Refreshes an asset's prediction timestamp and 10-horizon trade windows to standard candle open/close schedules."""
+        """Refreshes an asset's prediction timestamp and 10-horizon trade windows to standard candle open/close schedules, dynamically rolling forward targets upon price breakout."""
         now_utc = datetime.now(timezone.utc)
         now_iso = now_utc.isoformat()
         now_ts = int(now_utc.timestamp())
@@ -3712,49 +3712,93 @@ class HybridQuantEngine:
         horizons = item.get('horizons', {})
         for h_key, h_cfg in self.config.get('horizons', {}).items():
             h_data = horizons.get(h_key)
+            if not isinstance(h_data, dict):
+                continue
             trade_open, target_close, trade_open_str, trade_close_str = CryptoDataLoader.get_candle_schedule(
                 h_cfg['anchor_tf'], bars=h_cfg.get('bars', 1), now_utc=now_utc
             )
             window_str = f"{trade_open_str} ➔ {trade_close_str} ({h_cfg['duration_label']})"
             
-            if isinstance(h_data, dict):
-                h_data['current_price'] = p
-                h_data['trade_open_str'] = trade_open_str
-                h_data['trade_close_str'] = trade_close_str
-                h_data['predicted_close_utc'] = trade_close_str
-                h_data['predicted_window_str'] = window_str
+            h_data['current_price'] = p
+            h_data['trade_open_str'] = trade_open_str
+            h_data['trade_close_str'] = trade_close_str
+            h_data['predicted_close_utc'] = trade_close_str
+            h_data['predicted_window_str'] = window_str
+            
+            exp_ret = float(h_data.get('exp_return', 0.008))
+            h_dir = h_data.get('direction', 'BULLISH')
+            is_bull = (h_dir == 'BULLISH' or h_dir == 'LONG')
+            is_hype = bool(h_data.get('is_hype_surge', False))
+            is_blowoff = bool(h_data.get('is_blowoff_top', False))
+            
+            # Dynamic Multi-Tier Targets relative to live price p
+            tp_step = max(0.0075, abs(exp_ret))
+            sl_dist = max(p * 0.005, h_cfg.get('sl_mult', 1.0) * 0.0035 * p)
+            
+            if is_bull:
+                tp1 = p * (1.0 + tp_step)
+                tp2 = p * (1.0 + tp_step * 1.85)
+                tp3 = p * (1.0 + tp_step * 2.90)
+                tp4 = p * (1.0 + tp_step * 4.00)
+                sl = p - sl_dist
+                best_sell = tp4 if is_hype else tp3
                 
-                exp_ret = float(h_data.get('exp_return', 0.008))
-                h_dir = h_data.get('direction', 'BULLISH')
-                if 'predicted_next_price' not in h_data or h_data['predicted_next_price'] <= 0:
-                    projected = p * (1.0 + (abs(exp_ret) if h_dir == 'BULLISH' else -abs(exp_ret)))
-                    h_data['predicted_next_price'] = round(projected, 6)
-                    h_data['predicted_return_pct'] = round((exp_ret if h_dir == 'BULLISH' else -abs(exp_ret)) * 100.0, 2)
+                # Dynamic Target Advancement: if live price has reached or crossed previous prediction
+                prev_pred = float(h_data.get('predicted_next_price', 0))
+                if prev_pred > 0 and p >= prev_pred:
+                    projected = tp2 if p < tp2 else (tp3 if p < tp3 else tp4)
+                else:
+                    projected = tp1
+                
+                pred_ret = ((projected - p) / p) * 100.0
+                type_str = "LONG 🟢"
+                market_str = "Spot & Futures"
+            else:
+                tp1 = p * (1.0 - tp_step)
+                tp2 = p * (1.0 - tp_step * 1.85)
+                tp3 = p * (1.0 - tp_step * 2.90)
+                tp4 = p * (1.0 - tp_step * 4.00)
+                sl = p + sl_dist
+                best_sell = tp4 if is_blowoff else tp3
+                
+                prev_pred = float(h_data.get('predicted_next_price', 0))
+                if prev_pred > 0 and p <= prev_pred:
+                    projected = tp2 if p > tp2 else (tp3 if p > tp3 else tp4)
+                else:
+                    projected = tp1
+                
+                pred_ret = ((projected - p) / p) * 100.0
+                type_str = "SHORT 🔴"
+                market_str = "Futures Only ⚡"
 
-                tp1 = float(h_data.get('tp1_price', p * (1.0 + (h_cfg['tp_mult'] * 0.005))))
-                sl = float(h_data.get('sl_price', p * (1.0 - (h_cfg['sl_mult'] * 0.003))))
-                type_str = "LONG 🟢" if h_dir == "BULLISH" else "SHORT 🔴"
-                market_str = "Spot & Futures" if h_dir == "BULLISH" else "Futures Only ⚡"
-                
-                coin_tag = item.get('symbol', 'CRYPTO').split('/')[0]
-                pred_price_val = h_data.get('predicted_next_price', tp1)
-                pred_ret_val = h_data.get('predicted_return_pct', (h_cfg['tp_mult'] * 0.5))
-                pro_sig = (
-                    f"🚀 PAIR: #{coin_tag}/USDT\n"
-                    f"📊 TYPE: {type_str}\n"
-                    f"🌐 MARKET: {market_str}\n"
-                    f"📅 PREDICTED CANDLE: {window_str}\n"
-                    f"🎯 ENTRY: {p_fmt(p)}\n"
-                    f"🔮 ML NEXT PRICE: {p_fmt(pred_price_val)} ({pred_ret_val:+.2f}%)\n\n"
-                    f"💎 TAKE PROFITS:\n"
-                    f"➤ TP1: {p_fmt(tp1)}\n"
-                    f"➤ TP2: {p_fmt(float(h_data.get('tp2_price', p * 1.015)))}\n"
-                    f"➤ TP3: {p_fmt(float(h_data.get('tp3_price', p * 1.025)))}\n\n"
-                    f"🛑 STOP LOSS: {p_fmt(sl)}\n\n"
-                    f"📈 RISK-TO-REWARD RATIO: 1:2"
-                )
-                h_data['pro_signal_text'] = pro_sig
-                h_data['vip_signal_text'] = pro_sig
+            h_data['predicted_next_price'] = round(projected, 6)
+            h_data['predicted_return_pct'] = round(pred_ret, 2)
+            h_data['best_sell_price'] = round(best_sell, 6)
+            h_data['tp_price'] = round(tp1, 6)
+            h_data['tp1_price'] = round(tp1, 6)
+            h_data['tp2_price'] = round(tp2, 6)
+            h_data['tp3_price'] = round(tp3, 6)
+            h_data['tp4_price'] = round(tp4, 6)
+            h_data['sl_price'] = round(sl, 6)
+            
+            coin_tag = item.get('symbol', 'CRYPTO').split('/')[0]
+            pro_sig = (
+                f"🚀 PAIR: #{coin_tag}/USDT\n"
+                f"📊 TYPE: {type_str}\n"
+                f"🌐 MARKET: {market_str}\n"
+                f"📅 PREDICTED CANDLE: {window_str}\n"
+                f"🎯 ENTRY: {p_fmt(p)}\n"
+                f"🔮 ML NEXT PRICE: {p_fmt(projected)} ({pred_ret:+.2f}%)\n"
+                f"💎 BEST EXIT / SELL ZONE: {p_fmt(best_sell)}\n\n"
+                f"💎 TAKE PROFITS:\n"
+                f"➤ TP1: {p_fmt(tp1)}\n"
+                f"➤ TP2: {p_fmt(tp2)}\n"
+                f"➤ TP3: {p_fmt(tp3)}\n\n"
+                f"🛑 STOP LOSS: {p_fmt(sl)}\n\n"
+                f"📈 RISK-TO-REWARD RATIO: 1:2"
+            )
+            h_data['pro_signal_text'] = pro_sig
+            h_data['vip_signal_text'] = pro_sig
         return item
 
     def _prune_model_cache(self, max_size: int = 3000, max_age_seconds: float = 86400 * 14):
@@ -4779,6 +4823,12 @@ class HybridQuantEngine:
             decision = f"⛔ FILTER (SUB-{min_hurdle:.1f}% RETURN / FEE DRAG)"
             priority = 4
 
+        # Determine best selling / profit taking zone
+        if h_dir == "BULLISH":
+            best_sell_price = tp4_p if is_hype_surge else tp3_p
+        else:
+            best_sell_price = tp4_p if is_blowoff_top else tp3_p
+
         coin_tag = symbol.split('/')[0]
         p_fmt = lambda p: f"{p:,.4f}" if p >= 1.0 else f"{p:.6g}"
         type_str = "LONG 🟢" if h_dir == "BULLISH" else "SHORT 🔴"
@@ -4791,7 +4841,8 @@ class HybridQuantEngine:
             f"🌐 MARKET: {market_str}\n"
             f"📅 PREDICTED CANDLE: {predicted_window_str}\n"
             f"🎯 ENTRY: {p_fmt(current_price)}\n"
-            f"🔮 ML NEXT PRICE: {p_fmt(predicted_next_price)} ({predicted_return_pct:+.2f}%)\n\n"
+            f"🔮 ML NEXT PRICE: {p_fmt(predicted_next_price)} ({predicted_return_pct:+.2f}%)\n"
+            f"💎 BEST EXIT / SELL ZONE: {p_fmt(best_sell_price)}\n\n"
             f"💎 TAKE PROFITS:\n"
             f"➤ TP1: {p_fmt(tp1_p)}\n"
             f"➤ TP2: {p_fmt(tp2_p)}\n"
@@ -4824,6 +4875,7 @@ class HybridQuantEngine:
             "current_price": current_price,
             "predicted_next_price": predicted_next_price,
             "predicted_return_pct": predicted_return_pct,
+            "best_sell_price": round(best_sell_price, 6),
             "norm_atr": live_norm_atr,
             "raw_atr": live_raw_atr,
             "rs_btc": rs_btc,
@@ -5201,6 +5253,7 @@ class HybridQuantEngine:
                 "current_price": p,
                 "predicted_next_price": pred_next_p,
                 "predicted_return_pct": pred_ret_pct,
+                "best_sell_price": round(p * (1.025 if is_bull else 0.975), 6),
                 "norm_atr": 0.01,
                 "raw_atr": p * 0.01,
                 "rs_btc": 0.0,
@@ -5957,6 +6010,9 @@ class HybridQuantEngine:
                     "decision": decision,
                     "current_price": curr_p,
                     "entry_price": curr_p,
+                    "predicted_next_price": float(h.get('predicted_next_price', tp1_p)),
+                    "predicted_return_pct": float(h.get('predicted_return_pct', tp_pct)),
+                    "best_sell_price": float(h.get('best_sell_price', h.get('tp3_price', tp1_p))),
                     "tp1_price": tp1_p,
                     "tp2_price": float(h.get('tp2_price', h.get('tp_price', curr_p)) or curr_p),
                     "tp3_price": float(h.get('tp3_price', h.get('tp_price', curr_p)) or curr_p),
@@ -5970,6 +6026,8 @@ class HybridQuantEngine:
                     "predicted_close_utc": h.get('predicted_close_utc', h.get('trade_close_str', 'N/A')),
                     "trade_close_str": h.get('trade_close_str', 'N/A'),
                     "is_triple_confluence": is_triple,
+                    "is_hype_surge": bool(h.get('is_hype_surge', False)),
+                    "is_blowoff_top": bool(h.get('is_blowoff_top', False)),
                     "is_in_cooldown": is_in_cooldown,
                     "is_asset_locked": is_asset_locked,
                     "is_parabolic_short": is_parabolic_short,

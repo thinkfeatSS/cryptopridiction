@@ -30,6 +30,7 @@ export interface FlashAlertItem {
   entryPrice: number;
   targetPrice: number;
   targetGainPct: number;
+  bestSellPrice: number;
   stopLossPrice: number;
   conviction: number;
   metaWinProb: number;
@@ -77,15 +78,23 @@ export default function LiveFlashAlertPopup({
       s.decision?.includes("PARABOLIC");
 
     const entry = Number(s.entry_price || s.current_price || 0);
-    const target = Number(s.tp1_price || s.target_price || s.tp_price || (isShort ? entry * 0.92 : entry * 1.05));
+    const target = Number(s.predicted_next_price || s.tp1_price || s.target_price || s.tp_price || (isShort ? entry * 0.92 : entry * 1.05));
     const targetGain =
-      s.expected_return_pct !== undefined
+      s.predicted_return_pct !== undefined
+        ? Number(s.predicted_return_pct)
+        : s.expected_return_pct !== undefined
         ? Number(s.expected_return_pct)
         : entry > 0 && target > 0
         ? ((target - entry) / entry) * 100
         : isShort
         ? -8.0
         : 8.0;
+
+    const bestSell = Number(
+      s.best_sell_price ||
+      s.tp3_price ||
+      (isShort ? (isBlowoff ? entry * 0.90 : entry * 0.95) : (isHype ? entry * 1.10 : entry * 1.05))
+    );
 
     const stopLoss = Number(s.sl_price || (isShort ? entry * 1.03 : entry * 0.97));
     const conviction = Number(s.conviction_pct || s.conviction || 75.0);
@@ -106,6 +115,7 @@ export default function LiveFlashAlertPopup({
       entryPrice: entry,
       targetPrice: target,
       targetGainPct: targetGain,
+      bestSellPrice: bestSell,
       stopLossPrice: stopLoss,
       conviction,
       metaWinProb: metaWin,
@@ -317,14 +327,14 @@ export default function LiveFlashAlertPopup({
               </div>
 
               {/* Price Levels Grid */}
-              <div className="grid grid-cols-3 gap-2 mt-3.5 p-2.5 rounded-xl bg-black/40 border border-white/5 text-xs">
+              <div className="grid grid-cols-4 gap-1.5 mt-3.5 p-2 rounded-xl bg-black/40 border border-white/5 text-xs">
                 <div>
-                  <span className="text-[10px] uppercase tracking-wider text-zinc-400 block">Entry Price</span>
+                  <span className="text-[9px] uppercase tracking-wider text-zinc-400 block">Entry</span>
                   <span className="font-mono font-bold text-white text-xs">{formatUsd(currentAlert.entryPrice)}</span>
                 </div>
                 <div>
-                  <span className="text-[10px] uppercase tracking-wider text-zinc-400 block">
-                    {currentAlert.direction === "SHORT" ? "Down Target (TP)" : "Target (TP1)"}
+                  <span className="text-[9px] uppercase tracking-wider text-zinc-400 block">
+                    {currentAlert.direction === "SHORT" ? "Down TP" : "Target (TP1)"}
                   </span>
                   <span
                     className={`font-mono font-bold text-xs ${
@@ -335,7 +345,11 @@ export default function LiveFlashAlertPopup({
                   </span>
                 </div>
                 <div>
-                  <span className="text-[10px] uppercase tracking-wider text-zinc-400 block">Invalidation (SL)</span>
+                  <span className="text-[9px] uppercase tracking-wider text-amber-400 font-bold block">Best Sell</span>
+                  <span className="font-mono font-black text-amber-300 text-xs">{formatUsd(currentAlert.bestSellPrice)}</span>
+                </div>
+                <div>
+                  <span className="text-[9px] uppercase tracking-wider text-zinc-400 block">SL</span>
                   <span className="font-mono font-bold text-red-400 text-xs">{formatUsd(currentAlert.stopLossPrice)}</span>
                 </div>
               </div>
@@ -496,7 +510,7 @@ export default function LiveFlashAlertPopup({
                           </span>
                         </div>
 
-                        <div className="mt-2 flex items-center gap-4 text-xs font-mono">
+                        <div className="mt-2 flex items-center gap-3 text-xs font-mono flex-wrap">
                           <div>
                             <span className="text-[10px] text-zinc-500 block uppercase">Entry</span>
                             <span className="text-white font-bold">{formatUsd(item.entryPrice)}</span>
@@ -510,6 +524,10 @@ export default function LiveFlashAlertPopup({
                             >
                               {formatUsd(item.targetPrice)} ({item.targetGainPct >= 0 ? `+${item.targetGainPct.toFixed(1)}%` : `${item.targetGainPct.toFixed(1)}%`})
                             </span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-amber-400 block uppercase font-bold">Best Sell</span>
+                            <span className="text-amber-300 font-bold">{formatUsd(item.bestSellPrice)}</span>
                           </div>
                           <div>
                             <span className="text-[10px] text-zinc-500 block uppercase">Stop Loss</span>
