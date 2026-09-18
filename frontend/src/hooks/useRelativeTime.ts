@@ -2,11 +2,13 @@
 
 import { useState, useEffect } from "react";
 
-export function formatRelativeMinutes(timestampStrOrMs: string | number | undefined | null): string {
+export function formatRelativeMinutes(timestampStrOrMs: string | number | Date | undefined | null): string {
   if (!timestampStrOrMs) return "Just now";
   try {
     const predictionTime =
-      typeof timestampStrOrMs === "string"
+      timestampStrOrMs instanceof Date
+        ? timestampStrOrMs.getTime()
+        : typeof timestampStrOrMs === "string"
         ? new Date(timestampStrOrMs).getTime()
         : timestampStrOrMs < 1e11
         ? timestampStrOrMs * 1000
@@ -27,16 +29,21 @@ export function formatRelativeMinutes(timestampStrOrMs: string | number | undefi
   }
 }
 
-export function formatServerPredictionTime(timestampStrOrMs: string | number | undefined | null): string {
+export function formatServerPredictionTime(timestampStrOrMs: string | number | Date | undefined | null): string {
   if (!timestampStrOrMs) return "Server Sync: Active";
   try {
     const d =
-      typeof timestampStrOrMs === "string"
+      timestampStrOrMs instanceof Date
+        ? timestampStrOrMs
+        : typeof timestampStrOrMs === "string"
         ? new Date(timestampStrOrMs)
         : new Date(timestampStrOrMs < 1e11 ? timestampStrOrMs * 1000 : timestampStrOrMs);
 
     if (isNaN(d.getTime())) return "Live";
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) + " UTC";
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mm = String(d.getUTCMinutes()).padStart(2, "0");
+    const ss = String(d.getUTCSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss} UTC`;
   } catch {
     return "Live";
   }

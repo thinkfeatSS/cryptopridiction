@@ -19,6 +19,7 @@ import {
   Layers,
 } from "lucide-react";
 import { formatUsd } from "@/lib/utils";
+import { formatServerPredictionTime } from "@/hooks/useRelativeTime";
 import { playSignalChime, playParabolicBreakoutAlert, playExhaustionSellAlert } from "@/lib/audioAlert";
 
 export interface FlashAlertItem {
@@ -108,7 +109,7 @@ export default function LiveFlashAlertPopup({
 
     return {
       id,
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      timestamp: formatServerPredictionTime(new Date()),
       symbol: s.symbol || "UNKNOWN",
       direction: isShort ? "SHORT" : "LONG",
       horizon: s.horizon_tag || s.horizon || s.horizon_name || "15M Scalp",
