@@ -52,6 +52,9 @@ services:
     volumes:
       - app_exports:/app/export_app_data
       - app_models:/app/models_export_v3
+      - ./app:/app/app
+      - ./test.py:/app/test.py
+      - ./run_scanner_daemon.py:/app/run_scanner_daemon.py
     ports:
       - "127.0.0.1:8005:8000"
     depends_on:
@@ -91,6 +94,9 @@ services:
     volumes:
       - app_exports:/app/export_app_data
       - app_models:/app/models_export_v3
+      - ./app:/app/app
+      - ./test.py:/app/test.py
+      - ./run_scanner_daemon.py:/app/run_scanner_daemon.py
     depends_on:
       db:
         condition: service_healthy
