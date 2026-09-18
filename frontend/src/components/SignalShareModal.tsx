@@ -45,9 +45,9 @@ export default function SignalShareModal({ signal, onClose }: SignalShareModalPr
         : signal.meta_win_prob
       : 75.0);
   const entry = signal.entry_price ?? signal.current_price ?? 0.0;
-  const tp1 = signal.tp1_price ?? signal.tp_price ?? entry * 1.03;
-  const tp2 = signal.tp2_price ?? tp1 * 1.02;
-  const sl = signal.sl_price ?? entry * 0.98;
+  const tp1 = signal.tp1_price ?? signal.tp_price ?? (isLong ? entry * 1.03 : entry * 0.97);
+  const tp2 = signal.tp2_price ?? (isLong ? tp1 * 1.02 : tp1 * 0.98);
+  const sl = signal.sl_price ?? (isLong ? entry * 0.98 : entry * 1.02);
   const rr = signal.risk_reward_ratio || "1:2.0";
   const expReturn = signal.expected_return_pct ?? (signal.exp_return ? signal.exp_return * 100 : 3.5);
 

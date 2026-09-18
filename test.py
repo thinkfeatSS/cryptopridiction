@@ -2999,32 +2999,19 @@ class ActiveInstitutionalSignalManager:
             ]
 
             if is_active:
-                # 1. Update existing signal in-place
-                old_entry = float(existing.get('entry_price', 0.0))
-                new_entry = float(cand.get('entry_price', old_entry))
+                # 1. Update existing active signal in-place:
+                # IMPORTANT: entry_price, tp1_price, tp2_price, tp3_price represent the fixed trade setup and MUST NOT be mutated!
+                live_price = float(cand.get('current_price', cand.get('entry_price', existing.get('current_price', existing.get('entry_price', 0.0)))))
+                existing['current_price'] = round(live_price, 6)
+                existing['live_price'] = round(live_price, 6)
 
-                # Check if entry shifted significantly (>0.05%)
-                if old_entry > 0 and abs(new_entry - old_entry) / old_entry >= 0.0005:
-                    existing['was_price_updated'] = True
-                    existing['previous_entry_price'] = round(old_entry, 6)
+                entry_p = float(existing.get('entry_price', live_price))
+                direction = str(existing.get('direction', 'LONG')).upper()
+                is_long = direction in ["LONG", "BULLISH"]
+                if entry_p > 0:
+                    pnl = ((live_price - entry_p) / entry_p) * 100.0 if is_long else ((entry_p - live_price) / entry_p) * 100.0
+                    existing['live_pnl_pct'] = round(pnl, 2)
 
-                existing['entry_price'] = round(new_entry, 6)
-                existing['current_price'] = round(float(cand.get('current_price', new_entry)), 6)
-                existing['tp1_price'] = round(float(cand.get('tp1_price', existing.get('tp1_price'))), 6)
-                existing['tp2_price'] = round(float(cand.get('tp2_price', existing.get('tp2_price'))), 6)
-                existing['tp3_price'] = round(float(cand.get('tp3_price', existing.get('tp3_price'))), 6)
-
-                # Maintain locked breakeven if already locked
-                if not existing.get('is_tp1_locked') and not existing.get('is_tier0_locked'):
-                    existing['sl_price'] = round(float(cand.get('sl_price', existing.get('sl_price'))), 6)
-
-                existing['conviction'] = float(cand.get('conviction', existing.get('conviction', 50.0)))
-                existing['conviction_pct'] = existing['conviction']
-                existing['meta_win_prob'] = float(cand.get('meta_win_prob', existing.get('meta_win_prob', 0.70)))
-                existing['meta_win_prob_pct'] = round(existing['meta_win_prob'] * 100.0, 1)
-                existing['exp_return'] = float(cand.get('exp_return', existing.get('exp_return', 0.0)))
-                existing['expected_return_pct'] = round(existing['exp_return'] * 100.0, 2)
-                existing['decision'] = cand.get('decision', existing.get('decision'))
                 existing['updated_at_utc'] = now_str
                 existing['horizon_tag'] = h_tag
 
@@ -3032,16 +3019,8 @@ class ActiveInstitutionalSignalManager:
                 if self.audit_tracker:
                     for rec in self.audit_tracker.records:
                         if rec.get('signal_id') == existing.get('signal_id'):
-                            rec['entry_price'] = existing['entry_price']
-                            rec['tp1_price'] = existing['tp1_price']
-                            rec['tp2_price'] = existing['tp2_price']
-                            rec['tp3_price'] = existing['tp3_price']
-                            if not rec.get('is_tp1_locked') and not rec.get('is_tier0_locked'):
-                                rec['sl_price'] = existing['sl_price']
-                            rec['conviction_pct'] = existing['conviction_pct']
-                            rec['meta_win_prob_pct'] = existing['meta_win_prob_pct']
-                            rec['expected_return_pct'] = existing['expected_return_pct']
-                            rec['decision'] = existing['decision']
+                            rec['current_price'] = existing['current_price']
+                            rec['live_pnl_pct'] = existing.get('live_pnl_pct', 0.0)
                             break
             else:
                 # 2. Register as a fresh active signal

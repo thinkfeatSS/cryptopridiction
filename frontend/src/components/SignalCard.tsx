@@ -43,6 +43,7 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
       : null);
 
   const entryPrice = signal.entry_price ?? signal.current_price ?? 0.0;
+  const currentPrice = signal.current_price ?? signal.live_price ?? entryPrice;
   const tp1 = signal.tp1_price ?? signal.tp_price ?? entryPrice;
   const tp2 = signal.tp2_price ?? signal.tp_price ?? entryPrice;
   const tp3 = signal.tp3_price ?? signal.tp_price ?? entryPrice;
@@ -53,17 +54,23 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
   const isLost = status.startsWith("LOST");
   const isExpired = status.startsWith("EXPIRED");
   const isBreakeven = status === "TP1_LOCKED_BREAKEVEN" || status === "TIER0_PROTECTED_BREAKEVEN" || status.includes("BE") || status.includes("BREAKEVEN");
+  const isSlAtBreakeven = isBreakeven || (entryPrice > 0 && Math.abs(sl - entryPrice) / entryPrice < 0.0005);
   const wasPriceUpdated = Boolean(signal.was_price_updated);
   const prevEntry = signal.previous_entry_price;
-  const livePnl = signal.live_pnl_pct;
+
+  // Direction-aware TP gain percentage (profit yield relative to entry)
+  const tp1Pct = entryPrice > 0 ? (isLong ? (tp1 - entryPrice) / entryPrice : (entryPrice - tp1) / entryPrice) * 100 : 0;
+  const tp2Pct = entryPrice > 0 ? (isLong ? (tp2 - entryPrice) / entryPrice : (entryPrice - tp2) / entryPrice) * 100 : 0;
+  const tp3Pct = entryPrice > 0 ? (isLong ? (tp3 - entryPrice) / entryPrice : (entryPrice - tp3) / entryPrice) * 100 : 0;
+
+  // Direction-aware Stop loss risk percentage relative to entry
+  const slPct = entryPrice > 0 ? (isLong ? (entryPrice - sl) / entryPrice : (sl - entryPrice) / entryPrice) * 100 : 0;
+
+  // Live PnL
+  const livePnl = signal.live_pnl_pct ?? (entryPrice > 0 ? (isLong ? ((currentPrice - entryPrice) / entryPrice) * 100 : ((entryPrice - currentPrice) / entryPrice) * 100) : 0);
 
   const medals = ["🥇 TOP PICK (#1)", "🥈 RUNNER UP (#2)", "🥉 BRONZE (#3)", "🎯 PICK (#4)", "🎯 PICK (#5)"];
   const rankLabel = signal.rank || (rankIndex < medals.length ? medals[rankIndex] : `#${rankIndex + 1}`);
-
-  const tp1Pct = entryPrice > 0 ? (Math.abs(tp1 - entryPrice) / entryPrice) * 100 : 0;
-  const tp2Pct = entryPrice > 0 ? (Math.abs(tp2 - entryPrice) / entryPrice) * 100 : 0;
-  const tp3Pct = entryPrice > 0 ? (Math.abs(tp3 - entryPrice) / entryPrice) * 100 : 0;
-  const slPct = entryPrice > 0 ? (Math.abs(entryPrice - sl) / entryPrice) * 100 : 0;
 
   return (
     <>
@@ -269,10 +276,22 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
         {/* Price Target Matrix Grid (1:2 R:R) + ML Predicted Next Price */}
         <div className="mt-4 grid grid-cols-2 gap-2 rounded-xl bg-dark-900/90 p-3 border border-slate-800/80">
           <div className="flex flex-col">
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">
                 Entry Price
               </span>
+              {currentPrice > 0 && Math.abs(currentPrice - entryPrice) / entryPrice >= 0.0005 && (
+                <span
+                  className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${
+                    livePnl >= 0
+                      ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                      : "bg-rose-500/20 text-rose-300 border-rose-500/40"
+                  }`}
+                  title={`Live market price: ${formatUsd(currentPrice)} (${livePnl >= 0 ? "+" : ""}${livePnl.toFixed(2)}% PnL)`}
+                >
+                  Live: {formatUsd(currentPrice)} ({livePnl >= 0 ? "+" : ""}{livePnl.toFixed(2)}%)
+                </span>
+              )}
               {wasPriceUpdated && prevEntry && (
                 <span
                   className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
@@ -300,7 +319,9 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
             </span>
             <span className="text-sm font-black text-rose-400 font-mono mt-0.5">
               {formatUsd(sl)}{" "}
-              <span className="text-[10px] text-rose-500 font-normal">(-{slPct.toFixed(2)}%)</span>
+              <span className="text-[10px] text-rose-500 font-normal">
+                {isSlAtBreakeven ? "(0.00% BE)" : `(-${Math.abs(slPct).toFixed(2)}%)`}
+              </span>
             </span>
           </div>
 
@@ -337,15 +358,15 @@ export default function SignalCard({ signal, rankIndex = 0 }: SignalCardProps) {
             <div className="mt-1 flex items-center justify-between text-xs font-mono text-slate-200 flex-wrap gap-1">
               <span>
                 TP1: <strong className="text-emerald-400">{formatUsd(tp1)}</strong>{" "}
-                <span className="text-[10px] text-emerald-500 font-medium">(+{tp1Pct.toFixed(2)}%)</span>
+                <span className="text-[10px] text-emerald-500 font-medium">(+{Math.abs(tp1Pct).toFixed(2)}%)</span>
               </span>
               <span>
                 TP2: <strong className="text-emerald-300">{formatUsd(tp2)}</strong>{" "}
-                <span className="text-[10px] text-emerald-500 font-medium">(+{tp2Pct.toFixed(2)}%)</span>
+                <span className="text-[10px] text-emerald-500 font-medium">(+{Math.abs(tp2Pct).toFixed(2)}%)</span>
               </span>
               <span>
                 TP3: <strong className="text-emerald-200">{formatUsd(tp3)}</strong>{" "}
-                <span className="text-[10px] text-emerald-500 font-medium">(+{tp3Pct.toFixed(2)}%)</span>
+                <span className="text-[10px] text-emerald-500 font-medium">(+{Math.abs(tp3Pct).toFixed(2)}%)</span>
               </span>
             </div>
           </div>
