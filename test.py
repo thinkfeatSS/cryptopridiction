@@ -3679,6 +3679,7 @@ class HybridQuantEngine:
         forecast_path = os.path.join(self.config['app_export_dir'], "live_market_forecast.json")
         if os.path.exists(forecast_path):
             try:
+                all_tickers_preload = self.loader.fetch_all_tickers(max_age_seconds=15.0) if hasattr(self, 'loader') else {}
                 with open(forecast_path, "r", encoding="utf-8") as f:
                     f_data = json.load(f)
                     for item in f_data.get("scanner_leaderboard", []):
@@ -3687,10 +3688,12 @@ class HybridQuantEngine:
                             c_tag = str(item.get("confluence_tag", ""))
                             # Only preload genuine ML scanned results, skip dummy scanning placeholders
                             if is_valid_crypto_pair(sym) and "SCANNING" not in c_tag and "INITIALIZING" not in c_tag and item.get("best_priority", 4) < 4:
-                                self._refresh_asset_entry_timestamps(item)
+                                raw_s = sym.replace('/', '').replace(':USDT', '')
+                                live_p = float(all_tickers_preload.get(sym) or all_tickers_preload.get(raw_s) or 0.0)
+                                self._refresh_asset_entry_timestamps(item, live_price=live_p if live_p > 0 else None)
                                 self.master_matrix_universe[sym] = item
                 if self.master_matrix_universe:
-                    print(f"[PREDICTION MATRIX 🌐] Preloaded {len(self.master_matrix_universe)} valid asset predictions into memory (All timestamps refreshed to current 15m candle).")
+                    print(f"[PREDICTION MATRIX 🌐] Preloaded {len(self.master_matrix_universe)} valid asset predictions into memory (All timestamps & prices calibrated to live market).")
             except Exception:
                 pass
         os.makedirs(self.config['models_export_dir'], exist_ok=True)
@@ -3701,6 +3704,15 @@ class HybridQuantEngine:
         now_utc = datetime.now(timezone.utc)
         now_iso = now_utc.isoformat()
         now_ts = int(now_utc.timestamp())
+        
+        sym = item.get('symbol', '')
+        if (not live_price or live_price <= 0) and sym and hasattr(self, 'loader'):
+            try:
+                lp = self.loader.get_live_price(sym)
+                if lp > 0:
+                    live_price = float(lp)
+            except Exception:
+                pass
         
         p = float(live_price) if (live_price and live_price > 0) else float(item.get('current_price', 1.0))
         p_fmt = lambda val: f"{val:,.4f}" if val >= 1.0 else f"{val:.6g}"
@@ -5392,13 +5404,18 @@ class HybridQuantEngine:
             for k in stale_keys:
                 self.master_matrix_universe.pop(k, None)
 
-            # Ensure all discovered pairs are present in the master matrix universe from second 1
-            all_tickers = self.loader.fetch_all_tickers(max_age_seconds=5.0)
+            # Ensure all discovered pairs are present in the master matrix universe from second 1 and synced with live ticker prices
+            all_tickers = self.loader.fetch_all_tickers(max_age_seconds=5.0) if hasattr(self, 'loader') else {}
             for sym in symbols_to_scan:
+                raw_s = sym.replace('/', '').replace(':USDT', '')
+                p = float(all_tickers.get(sym) or all_tickers.get(raw_s) or 0.0)
                 if sym not in self.master_matrix_universe or "SCANNING" in str(self.master_matrix_universe[sym].get("confluence_tag", "")):
-                    raw_s = sym.replace('/', '').replace(':USDT', '')
-                    p = float(all_tickers.get(sym) or all_tickers.get(raw_s) or 0.0)
                     self.master_matrix_universe[sym] = self._build_default_asset_entry(sym, p)
+                elif p > 0:
+                    cached_p = float(self.master_matrix_universe[sym].get('current_price', 0.0))
+                    # If live market price drifted by >= 1.5% from cached price, recalibrate targets immediately
+                    if cached_p <= 0 or abs(p - cached_p) / cached_p >= 0.015:
+                        self._refresh_asset_entry_timestamps(self.master_matrix_universe[sym], live_price=p)
 
             # Export initial full universe immediately so UI matrix displays all 150+ assets from second 1
             try:
@@ -6219,25 +6236,38 @@ class HybridQuantEngine:
                 r["server_prediction_time"] = now_iso
                 r["server_prediction_ts"] = now_ts
 
-        # Update master matrix universe with fresh results
+        # Update master matrix universe with fresh results and live ticker calibration
+        all_tickers_export = self.loader.fetch_all_tickers(max_age_seconds=10.0) if hasattr(self, 'loader') else {}
         if getattr(self, 'master_matrix_universe', None) is not None:
             for r in scanner_results:
                 if isinstance(r, dict) and 'symbol' in r and is_valid_crypto_pair(r['symbol']):
                     self.master_matrix_universe[r['symbol']] = r
             
-            # Enforce 15-minute maximum age across all matrix assets
+            # Enforce 15-minute maximum age & continuous live price alignment across all matrix assets
             for sym, item in list(self.master_matrix_universe.items()):
+                raw_s = sym.replace('/', '').replace(':USDT', '')
+                live_p = float(all_tickers_export.get(sym) or all_tickers_export.get(raw_s) or 0.0)
+                cached_p = float(item.get('current_price', 0.0))
                 item_ts = item.get('server_prediction_ts', 0)
-                if (now_ts - item_ts) >= 900 or not item.get('server_prediction_time'):
-                    self._refresh_asset_entry_timestamps(item)
+                # If price drifted >= 1.5% or entry is older than 15 mins, recalibrate relative targets
+                if live_p > 0 and (cached_p <= 0 or abs(live_p - cached_p) / cached_p >= 0.015 or (now_ts - item_ts) >= 900 or not item.get('server_prediction_time')):
+                    self._refresh_asset_entry_timestamps(item, live_price=live_p)
+                elif (now_ts - item_ts) >= 900 or not item.get('server_prediction_time'):
+                    self._refresh_asset_entry_timestamps(item, live_price=live_p if live_p > 0 else None)
                     
             leaderboard_list = [item for item in self.master_matrix_universe.values() if isinstance(item, dict) and is_valid_crypto_pair(item.get('symbol'))]
         else:
             leaderboard_list = [item for item in scanner_results if isinstance(item, dict) and is_valid_crypto_pair(item.get('symbol'))]
             for item in leaderboard_list:
+                sym = item.get('symbol', '')
+                raw_s = sym.replace('/', '').replace(':USDT', '')
+                live_p = float(all_tickers_export.get(sym) or all_tickers_export.get(raw_s) or 0.0)
+                cached_p = float(item.get('current_price', 0.0))
                 item_ts = item.get('server_prediction_ts', 0)
-                if (now_ts - item_ts) >= 900 or not item.get('server_prediction_time'):
-                    self._refresh_asset_entry_timestamps(item)
+                if live_p > 0 and (cached_p <= 0 or abs(live_p - cached_p) / cached_p >= 0.015 or (now_ts - item_ts) >= 900 or not item.get('server_prediction_time')):
+                    self._refresh_asset_entry_timestamps(item, live_price=live_p)
+                elif (now_ts - item_ts) >= 900 or not item.get('server_prediction_time'):
+                    self._refresh_asset_entry_timestamps(item, live_price=live_p if live_p > 0 else None)
 
         leaderboard_sorted = sorted(leaderboard_list, key=_safe_sort_key)
 

@@ -225,8 +225,22 @@ function renderSignalCell(h?: any, livePrice?: number) {
   }
 
   const curr = (livePrice && livePrice > 0) ? livePrice : (Number(h.current_price) || 1.0);
-  let predNextPrice = Number(h.predicted_next_price || h.tp1_price || (isLong ? curr * 1.01 : curr * 0.99));
-  let predReturnPct = Number(h.predicted_return_pct ?? (((predNextPrice - curr) / curr) * 100).toFixed(2));
+  const cachedPrice = Number(h.current_price) || curr;
+  const isDiverged = Math.abs(curr - cachedPrice) / Math.max(1e-6, cachedPrice) > 0.035 || 
+                     (Number(h.tp1_price) > 0 && Math.abs(curr - Number(h.tp1_price)) / curr > 0.20);
+  
+  const expRet = Number(h.exp_return || 0.01);
+  const tpStep = Math.max(0.0075, Math.abs(expRet));
+  const slDist = Math.max(curr * 0.005, curr * 0.0035);
+
+  const tp1 = isDiverged ? (isLong ? curr * (1.0 + tpStep) : curr * (1.0 - tpStep)) : Number(h.tp1_price || h.tp_price || (isLong ? curr * 1.01 : curr * 0.99));
+  const tp2 = isDiverged ? (isLong ? curr * (1.0 + tpStep * 1.85) : curr * (1.0 - tpStep * 1.85)) : Number(h.tp2_price || (isLong ? curr * 1.02 : curr * 0.98));
+  const tp3 = isDiverged ? (isLong ? curr * (1.0 + tpStep * 2.90) : curr * (1.0 - tpStep * 2.90)) : Number(h.tp3_price || (isLong ? curr * 1.04 : curr * 0.96));
+  const tp4 = isDiverged ? (isLong ? curr * (1.0 + tpStep * 4.00) : curr * (1.0 - tpStep * 4.00)) : Number(h.tp4_price || (isLong ? curr * 1.07 : curr * 0.93));
+  const sl = isDiverged ? (isLong ? curr - slDist : curr + slDist) : Number(h.sl_price || (isLong ? curr * 0.995 : curr * 1.005));
+
+  let predNextPrice = isDiverged ? tp1 : Number(h.predicted_next_price || tp1);
+  let predReturnPct = Number((((predNextPrice - curr) / curr) * 100).toFixed(2));
   const isHypeSurge = h.is_hype_surge;
   const isBlowoffTop = h.is_blowoff_top;
 
@@ -234,26 +248,18 @@ function renderSignalCell(h?: any, livePrice?: number) {
   let isTargetCrossed = false;
   if (isLong && curr >= predNextPrice && predNextPrice > 0) {
     isTargetCrossed = true;
-    const tp2 = Number(h.tp2_price || curr * 1.02);
-    const tp3 = Number(h.tp3_price || curr * 1.04);
-    const tp4 = Number(h.tp4_price || curr * 1.07);
     predNextPrice = curr < tp2 ? tp2 : (curr < tp3 ? tp3 : tp4);
     predReturnPct = Number((((predNextPrice - curr) / curr) * 100).toFixed(2));
   } else if (!isLong && curr <= predNextPrice && predNextPrice > 0) {
     isTargetCrossed = true;
-    const tp2 = Number(h.tp2_price || curr * 0.98);
-    const tp3 = Number(h.tp3_price || curr * 0.96);
-    const tp4 = Number(h.tp4_price || curr * 0.93);
     predNextPrice = curr > tp2 ? tp2 : (curr > tp3 ? tp3 : tp4);
     predReturnPct = Number((((predNextPrice - curr) / curr) * 100).toFixed(2));
   }
 
   // Best Selling Price / Peak Profit Zone
-  const bestSellPrice = Number(
-    h.best_sell_price ||
-    h.tp3_price ||
-    (isLong ? (isHypeSurge ? curr * 1.08 : curr * 1.04) : (isBlowoffTop ? curr * 0.92 : curr * 0.96))
-  );
+  const bestSellPrice = isDiverged 
+    ? (isLong ? (isHypeSurge ? tp4 : tp3) : (isBlowoffTop ? tp4 : tp3))
+    : Number(h.best_sell_price || (isLong ? (isHypeSurge ? tp4 : tp3) : (isBlowoffTop ? tp4 : tp3)));
 
   return (
     <div className="flex flex-col gap-1 py-1 min-w-[175px] max-w-[250px]">
@@ -310,9 +316,9 @@ function renderSignalCell(h?: any, livePrice?: number) {
 
       {/* Line 4: Take Profit & Stop Loss targets */}
       <div className="text-[10px] font-mono text-slate-400 whitespace-nowrap leading-tight">
-        <span>TP: <strong className="text-emerald-400">{formatUsd(h.tp_price || h.tp1_price)}</strong></span>
+        <span>TP: <strong className="text-emerald-400">{formatUsd(tp1)}</strong></span>
         <span className="mx-1 text-slate-600">|</span>
-        <span>SL: <strong className="text-rose-400">{formatUsd(h.sl_price)}</strong></span>
+        <span>SL: <strong className="text-rose-400">{formatUsd(sl)}</strong></span>
       </div>
 
       {/* Line 5: Signal Strength / Filter Badge & Hype Alerts */}

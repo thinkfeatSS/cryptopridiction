@@ -595,9 +595,12 @@ class SignalService:
                     if "live_low" in coin_dict:
                         coin_dict["live_low"] = min(coin_dict["live_low"], p)
                 
-                # Enforce 15-minute freshness on coin timestamps & horizon windows
+                # Enforce 15-minute freshness & live price target alignment on coin timestamps & horizon windows
                 item_ts = coin_dict.get("server_prediction_ts", 0)
-                if (now_ts - item_ts) >= 900 or not coin_dict.get("server_prediction_time"):
+                cached_price = float(coin_dict.get("current_price", 0.0) or p)
+                needs_refresh = (now_ts - item_ts) >= 900 or not coin_dict.get("server_prediction_time") or abs(p - cached_price) / max(1e-6, cached_price) >= 0.015
+
+                if needs_refresh:
                     coin_dict["server_prediction_time"] = now_iso
                     coin_dict["server_prediction_ts"] = now_ts
                     horizons = coin_dict.get("horizons", {})
@@ -608,24 +611,25 @@ class SignalService:
                                 bars = 1
                                 dur_label = "15 Mins"
                                 delta_tf = timedelta(minutes=15)
+                                sl_mult = 1.0
                                 if "30m" in h_key:
-                                    bars, dur_label, delta_tf = 2, "30 Mins", timedelta(minutes=15)
+                                    bars, dur_label, delta_tf, sl_mult = 2, "30 Mins", timedelta(minutes=15), 1.1
                                 elif "swing" in h_key or "1h" in h_key:
-                                    bars, dur_label, delta_tf = 1, "1 Hour", timedelta(hours=1)
+                                    bars, dur_label, delta_tf, sl_mult = 1, "1 Hour", timedelta(hours=1), 1.2
                                 elif "4h" in h_key:
-                                    bars, dur_label, delta_tf = 1, "4 Hours", timedelta(hours=4)
+                                    bars, dur_label, delta_tf, sl_mult = 1, "4 Hours", timedelta(hours=4), 1.4
                                 elif "12h" in h_key:
-                                    bars, dur_label, delta_tf = 3, "12 Hours", timedelta(hours=4)
+                                    bars, dur_label, delta_tf, sl_mult = 3, "12 Hours", timedelta(hours=4), 1.45
                                 elif "macro" in h_key or "24h" in h_key:
-                                    bars, dur_label, delta_tf = 1, "24 Hours", timedelta(days=1)
+                                    bars, dur_label, delta_tf, sl_mult = 1, "24 Hours", timedelta(days=1), 1.5
                                 elif "4d" in h_key:
-                                    bars, dur_label, delta_tf = 4, "4 Days", timedelta(days=1)
+                                    bars, dur_label, delta_tf, sl_mult = 4, "4 Days", timedelta(days=1), 2.0
                                 elif "weekly" in h_key or "7d" in h_key:
-                                    bars, dur_label, delta_tf = 7, "7 Days", timedelta(days=1)
+                                    bars, dur_label, delta_tf, sl_mult = 7, "7 Days", timedelta(days=1), 2.5
                                 elif "biweekly" in h_key or "15d" in h_key:
-                                    bars, dur_label, delta_tf = 15, "15 Days", timedelta(days=1)
+                                    bars, dur_label, delta_tf, sl_mult = 15, "15 Days", timedelta(days=1), 3.0
                                 elif "monthly" in h_key or "30d" in h_key:
-                                    bars, dur_label, delta_tf = 30, "30 Days", timedelta(days=1)
+                                    bars, dur_label, delta_tf, sl_mult = 30, "30 Days", timedelta(days=1), 3.5
 
                                 trade_open = candle_open_utc + delta_tf
                                 target_close = trade_open + (delta_tf * bars)
@@ -635,6 +639,52 @@ class SignalService:
                                 h_data["trade_close_str"] = t_close_str
                                 h_data["predicted_close_utc"] = t_close_str
                                 h_data["predicted_window_str"] = f"{t_open_str} ➔ {t_close_str} ({dur_label})"
+
+                                exp_ret = float(h_data.get('exp_return', 0.008))
+                                h_dir = h_data.get('direction', 'BULLISH')
+                                is_bull = (h_dir == 'BULLISH' or h_dir == 'LONG')
+                                is_hype = bool(h_data.get('is_hype_surge', False))
+                                is_blowoff = bool(h_data.get('is_blowoff_top', False))
+
+                                tp_step = max(0.0075, abs(exp_ret))
+                                sl_dist = max(p * 0.005, sl_mult * 0.0035 * p)
+
+                                if is_bull:
+                                    tp1 = p * (1.0 + tp_step)
+                                    tp2 = p * (1.0 + tp_step * 1.85)
+                                    tp3 = p * (1.0 + tp_step * 2.90)
+                                    tp4 = p * (1.0 + tp_step * 4.00)
+                                    sl = p - sl_dist
+                                    best_sell = tp4 if is_hype else tp3
+                                    prev_pred = float(h_data.get('predicted_next_price', 0))
+                                    if prev_pred > 0 and p >= prev_pred:
+                                        projected = tp2 if p < tp2 else (tp3 if p < tp3 else tp4)
+                                    else:
+                                        projected = tp1
+                                    pred_ret = ((projected - p) / p) * 100.0
+                                else:
+                                    tp1 = p * (1.0 - tp_step)
+                                    tp2 = p * (1.0 - tp_step * 1.85)
+                                    tp3 = p * (1.0 - tp_step * 2.90)
+                                    tp4 = p * (1.0 - tp_step * 4.00)
+                                    sl = p + sl_dist
+                                    best_sell = tp4 if is_blowoff else tp3
+                                    prev_pred = float(h_data.get('predicted_next_price', 0))
+                                    if prev_pred > 0 and p <= prev_pred:
+                                        projected = tp2 if p > tp2 else (tp3 if p > tp3 else tp4)
+                                    else:
+                                        projected = tp1
+                                    pred_ret = ((projected - p) / p) * 100.0
+
+                                h_data['predicted_next_price'] = round(projected, 6)
+                                h_data['predicted_return_pct'] = round(pred_ret, 2)
+                                h_data['best_sell_price'] = round(best_sell, 6)
+                                h_data['tp_price'] = round(tp1, 6)
+                                h_data['tp1_price'] = round(tp1, 6)
+                                h_data['tp2_price'] = round(tp2, 6)
+                                h_data['tp3_price'] = round(tp3, 6)
+                                h_data['tp4_price'] = round(tp4, 6)
+                                h_data['sl_price'] = round(sl, 6)
 
                 updated_board.append(coin_dict)
             res["scanner_leaderboard"] = updated_board
