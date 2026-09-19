@@ -5486,8 +5486,8 @@ class HybridQuantEngine:
                                         sync_files_to_db_live(force=True)
                                     last_synced_count = len(scanner_results)
                                     last_partial_sync_ts = time.time()
-                                 except Exception as e:
-                                     print(f"[STREAM SYNC ERROR] {e}", flush=True)
+                                except Exception as e:
+                                    print(f"[STREAM SYNC ERROR] {e}", flush=True)
 
                             # Periodically persist model cache to disk every 20 assets
                             if len(scanner_results) % 20 == 0:
