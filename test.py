@@ -2844,10 +2844,17 @@ class SignalAuditTracker:
                     r['realized_return_pct'] = f"{ret_current:+.2f}%"
                     r['outcome_label'] = f"🛡️ EXPIRED (TIER-0 BE {ret_current:+.2f}%)"
                 else:
-                    r['status'] = "EXPIRED_PROFIT" if ret_current > 0 else ("EXPIRED_LOSS" if ret_current < 0 else "EXPIRED_FLAT")
+                    if ret_current >= 0.10:
+                        r['status'] = "WON_EXP_PROFIT"
+                        r['outcome_label'] = f"🟢 WON (EXP PROFIT {ret_current:+.2f}%)"
+                    elif ret_current <= -0.10:
+                        r['status'] = "LOST_EXP"
+                        r['outcome_label'] = f"🔴 LOST (EXPIRY {ret_current:+.2f}%)"
+                    else:
+                        r['status'] = "BREAKEVEN_EXP"
+                        r['outcome_label'] = f"⚪ BREAKEVEN (EXPIRY {ret_current:+.2f}%)"
                     r['exit_price'] = round(curr_p, 6)
                     r['realized_return_pct'] = f"{ret_current:+.2f}%"
-                    r['outcome_label'] = f"{'🟢' if ret_current>=0 else '🔴'} EXPIRED ({ret_current:+.2f}%)"
                 r['evaluated_at_utc'] = now_str
                 updated = True
                 resolved_count += 1
@@ -4749,8 +4756,12 @@ class HybridQuantEngine:
         live_low_c = float(live_candle['low'].values[0]) if 'low' in live_candle.columns else current_price
         live_high_c = float(live_candle['high'].values[0]) if 'high' in live_candle.columns else current_price
 
-        # Guarantee TP1 exceeds exchange roundtrip fee drag (min 0.45%)
-        min_tp1_dist = max(0.0045 * current_price, (0.0085 * current_price) if horizon_key == "scalp" else (1.15 * risk_dist))
+        # Guarantee TP1 exceeds exchange roundtrip fee drag (min 0.20% for BTC/ETH, 0.45% for altcoins)
+        is_mega_cap = symbol in ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+        if is_mega_cap:
+            min_tp1_dist = max(0.0020 * current_price, (0.0035 * current_price) if horizon_key in ["scalp", "horizon_30m"] else (1.10 * risk_dist))
+        else:
+            min_tp1_dist = max(0.0045 * current_price, (0.0085 * current_price) if horizon_key == "scalp" else (1.15 * risk_dist))
         if h_dir == "BULLISH":
             sl_base = current_price - risk_dist
             if is_reversal_setup or is_bull_sweep:
@@ -4799,19 +4810,20 @@ class HybridQuantEngine:
         # Minimum Profit Hurdle Check against TP1
         tp1_gain_pct = (abs(tp1_p - current_price) / (current_price + 1e-10)) * 100.0
         min_reward_map = {
-            'scalp': 0.70,
-            'horizon_30m': 0.75,
-            'swing': 0.80,
-            'horizon_4h': 1.10,
-            'horizon_12h': 1.40,
-            'macro': 1.70,
-            'horizon_4d': 2.20,
-            'weekly': 3.50,
-            'biweekly': 5.00,
-            'monthly': 7.00
+            'scalp': 0.30 if is_mega_cap else 0.70,
+            'horizon_30m': 0.35 if is_mega_cap else 0.75,
+            'swing': 0.45 if is_mega_cap else 0.80,
+            'horizon_4h': 0.70 if is_mega_cap else 1.10,
+            'horizon_12h': 1.00 if is_mega_cap else 1.40,
+            'macro': 1.20 if is_mega_cap else 1.70,
+            'horizon_4d': 1.80 if is_mega_cap else 2.20,
+            'weekly': 2.50 if is_mega_cap else 3.50,
+            'biweekly': 3.50 if is_mega_cap else 5.00,
+            'monthly': 5.00 if is_mega_cap else 7.00
         }
         min_hurdle = min_reward_map.get(horizon_key, 0.45)
-        if (tp1_gain_pct < min_hurdle or abs(exp_ret * 100.0) < (0.60 if horizon_key == 'scalp' else 0.35)) and not is_hype_surge and not is_blowoff_top and h_conf < 78.0:
+        min_exp_req = (0.20 if is_mega_cap else (0.60 if horizon_key == 'scalp' else 0.35))
+        if (tp1_gain_pct < min_hurdle or abs(exp_ret * 100.0) < min_exp_req) and not is_hype_surge and not is_blowoff_top and h_conf < 78.0:
             decision = f"⛔ FILTER (SUB-{min_hurdle:.1f}% RETURN / FEE DRAG)"
             priority = 4
 
@@ -6088,22 +6100,27 @@ class HybridQuantEngine:
             min_ret = b["min_return"]
 
             # Filter candidates for this exact horizon with Quality Filter Gate
-            h_candidates = [
-                s for s in all_signals
-                if (s['horizon_key'] == h_k or h_tag.lower() in s['horizon_key'].lower())
-                and not s['is_shield_blocked']
-                and not s['is_parabolic_short']
-                and not s['is_fee_drag_rejected']
-                and not s.get('is_asset_locked', False)
-                and abs(s.get('exp_return', 0.0) * 100.0) >= min_ret
-            ]
+            h_candidates = []
+            for s in all_signals:
+                if (s['horizon_key'] != h_k and h_tag.lower() not in s['horizon_key'].lower()):
+                    continue
+                if s['is_shield_blocked'] or s['is_parabolic_short'] or s['is_fee_drag_rejected'] or s.get('is_asset_locked', False):
+                    continue
+                is_mega = s['symbol'] in ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
+                min_ret_eff = (0.25 if is_mega and h_k in ['scalp', 'horizon_30m', 'swing'] else min_ret)
+                if abs(s.get('exp_return', 0.0) * 100.0) < min_ret_eff:
+                    continue
+                h_candidates.append(s)
 
-            # Priority 1: High Conviction Grade A+ / Grade A setups only
+            # Priority 1: High Conviction Grade A+ / Grade A setups only (Block low-conviction/consolidation setups)
             tier_high = [
                 s for s in h_candidates
                 if ((s['grade_tier'] == 1 and (s['meta_win_prob'] >= 0.58 or s['conviction'] >= 68.0)) or
                     (s['grade_tier'] == 2 and s['conviction'] >= 62.0 and s['meta_win_prob'] >= 0.58) or
-                    (any(k in s.get('decision', '') for k in ['EXECUTE', 'DIP-BUY', 'RALLY-SELL', 'BREAKDOWN', 'BREAKOUT', 'MOMENTUM', 'REVERSAL', 'SWEEP'])))
+                    (any(k in s.get('decision', '') for k in ['EXECUTE', 'DIP-BUY', 'RALLY-SELL', 'BREAKDOWN', 'BREAKOUT', 'MOMENTUM', 'REVERSAL', 'SWEEP', 'HYPE PUMP'])))
+                and "CONSOLIDATION" not in s.get('decision', '')
+                and "FILTER" not in s.get('decision', '')
+                and s.get('conviction', 50.0) >= 60.0
             ]
             pool = tier_high
             pool.sort(key=lambda x: (
