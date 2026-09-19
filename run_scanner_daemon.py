@@ -4,6 +4,12 @@ import time
 import traceback
 from datetime import datetime, timezone, timedelta
 
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 # Ensure workspace root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 

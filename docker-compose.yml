@@ -49,6 +49,7 @@ services:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:-crypto_secure_pass_2026}
       - MYSQL_DB=${MYSQL_DATABASE:-crypto_trading}
       - EXPORT_DIR=/app/export_app_data
+      - PYTHONUNBUFFERED=1
     volumes:
       - app_exports:/app/export_app_data
       - app_models:/app/models_export_v3
@@ -78,7 +79,7 @@ services:
     container_name: crypto_scanner
     init: true
     restart: unless-stopped
-    command: python run_scanner_daemon.py
+    command: python -u run_scanner_daemon.py
     environment:
       - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-crypto_user}:${MYSQL_PASSWORD:-crypto_secure_pass_2026}@db:3306/${MYSQL_DATABASE:-crypto_trading}
       - MYSQL_HOST=db
@@ -87,6 +88,7 @@ services:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD:-crypto_secure_pass_2026}
       - MYSQL_DB=${MYSQL_DATABASE:-crypto_trading}
       - EXPORT_DIR=/app/export_app_data
+      - PYTHONUNBUFFERED=1
       - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-1}
       - SCANNER_TOP_N=${SCANNER_TOP_N:-110}
       - MAX_SCAN_WORKERS=${MAX_SCAN_WORKERS:-16}
