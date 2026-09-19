@@ -2145,14 +2145,14 @@ class PaperTradingLedger:
         if horizon_key not in self.allowed_horizons:
             return
 
-        decision = result.get('decision', '')
-        if "FILTER" in decision or "PAUSED" in decision or "QUARANTINED" in decision:
+        decision = str(result.get('decision', ''))
+        if "FILTER" in decision or "PAUSED" in decision or "QUARANTINED" in decision or "CONSOLIDATION" in decision:
             return
 
-        is_executable = any(k in decision for k in [
+        is_executable = any(k in decision.upper() for k in [
             "EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT",
             "MOMENTUM", "REVERSAL", "SWEEP", "BLOW-OFF TOP", "HYPE PUMP",
-            "LONG", "SHORT", "SCALP"
+            "LONG", "SHORT", "SCALP", "BULLISH", "BEARISH"
         ])
         if not is_executable:
             return
@@ -2165,12 +2165,12 @@ class PaperTradingLedger:
         if self.config.get('spot_only', False) and is_short:
             return
 
-        entry_p = float(result.get('current_price', 0.0) or 0.0)
-        tp_p = float(result.get('tp_price', result.get('tp1_price', 0.0)) or 0.0)
-        tp1_p = float(result.get('tp1_price', tp_p) or tp_p)
-        tp2_p = float(result.get('tp2_price', tp_p) or tp_p)
-        tp3_p = float(result.get('tp3_price', tp_p) or tp_p)
-        sl_p = float(result.get('sl_price', 0.0) or 0.0)
+        entry_p = float(result.get('current_price') or result.get('entry_price') or 0.0)
+        tp_p = float(result.get('tp_price') or result.get('tp1_price') or 0.0)
+        tp1_p = float(result.get('tp1_price') or tp_p or 0.0)
+        tp2_p = float(result.get('tp2_price') or tp_p or 0.0)
+        tp3_p = float(result.get('tp3_price') or tp_p or 0.0)
+        sl_p = float(result.get('sl_price') or 0.0)
 
         if entry_p <= 0 or tp1_p <= 0 or sl_p <= 0:
             return
@@ -2220,22 +2220,23 @@ class PaperTradingLedger:
         if (expected_net_gain_pct * 100.0) < self.min_expected_return_pct or est_net_profit_usd < self.min_net_profit_usd:
             return  # Skip trade: Expected net profit after fees is below hurdle
 
-        # 6. Track Record & Quarantine Check: Block assets with proven negative alpha (2+ consecutive losses)
+        # 6. Track Record & Quarantine Check: Only active if require_positive_track_record is True
         past_won = 0
         past_lost = 0
-        if signal_history:
+        if signal_history and self.config.get('require_positive_track_record', False):
             coin_signals = [s for s in signal_history if s.get('symbol') == sym]
-            past_won = sum(1 for s in coin_signals if "WON" in str(s.get('outcome_label', '')).upper())
-            past_lost = sum(1 for s in coin_signals if "LOST" in str(s.get('outcome_label', '')).upper())
+            recent_coin_signals = coin_signals[-5:]
+            past_won = sum(1 for s in recent_coin_signals if "WON" in str(s.get('outcome_label', '')).upper() or "WON" in str(s.get('status', '')).upper())
+            past_lost = sum(1 for s in recent_coin_signals if ("LOST_SL" in str(s.get('status', '')) or "STOP" in str(s.get('outcome_label', '')).upper()))
             
-            # Block asset if it has recorded 2+ stop-outs and negative win/loss track record
-            if past_lost >= 2 and past_lost > past_won:
+            # Block asset if it has recorded 3+ recent stop-outs and negative win/loss track record
+            if past_lost >= 3 and past_lost > past_won:
                 return
 
         # Check Active Queue Capacity & Liquid Cash
         max_concurrent = int(self.config.get('max_concurrent_positions', 10))
-        total_open_collateral = sum(p.get('remaining_position_size_usd', p.get('position_size_usd', 10.0)) for p in self.data.get('open_positions', []))
-        avail_cash = max(0.0, self.data['current_balance_usd'] - total_open_collateral)
+        total_open_collateral = sum(float(p.get('remaining_position_size_usd', p.get('position_size_usd', pos_size))) for p in self.data.get('open_positions', []))
+        avail_cash = max(0.0, float(self.data.get('current_balance_usd', 100.0)) - total_open_collateral)
         queue_is_full = (len(self.data.get('open_positions', [])) >= max_concurrent) or (avail_cash < pos_size)
 
         if queue_is_full:
