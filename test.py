@@ -91,6 +91,28 @@ def _safe_sort_key(x):
     oscore = _safe_float(x.get('overall_score'), 0.0)
     return (bp, tc, -ci, -als, -oscore)
 
+def resolve_horizon_tag(horizon_key: str) -> str:
+    key_map = {
+        "scalp": "15M",
+        "horizon_30m": "30M",
+        "swing": "1H",
+        "horizon_4h": "4H",
+        "horizon_12h": "12H",
+        "macro": "24H",
+        "horizon_2d": "2D",
+        "horizon_3d": "3D",
+        "horizon_4d": "4D",
+        "weekly": "7D",
+        "biweekly": "15D",
+        "monthly": "30D",
+        "15m": "15M", "30m": "30M", "1h": "1H", "4h": "4H", "12h": "12H", "24h": "24H",
+        "2d": "2D", "3d": "3D", "4d": "4D", "7d": "7D", "15d": "15D", "30d": "30D"
+    }
+    if not horizon_key:
+        return "15M"
+    k_lower = str(horizon_key).lower().strip()
+    return key_map.get(k_lower, str(horizon_key).upper().strip())
+
 EXCLUDED_STABLECOIN_BASES = {
     "USDC", "FDUSD", "TUSD", "USDD", "DAI", "BUSD", "EUR", "TRY", "PAXG", "WBTC",
     "USDP", "AEUR", "T", "USTC", "EURI", "USD", "EURR", "RLUSD", "USD1", "U", "USDE",
@@ -5544,7 +5566,7 @@ class HybridQuantEngine:
 
         # 4. Update Paper Trading Portfolio with Intra-Candle High/Low Wick Verification
         if self.config['paper_trading']['enabled']:
-            self._update_and_admit_paper_trading(top_round_signals, scanner_results, live_prices, live_highs, live_lows)
+            self._update_and_admit_paper_trading(top_round_signals, scanner_results, live_prices, live_highs, live_lows, deep_dive_result=deep_dive_result)
             self.ledger.render_portfolio_card()
 
         # 5. Persistent Signal Audit Logger: Record & Evaluate ONLY Trader Signals in CSV
@@ -5553,7 +5575,7 @@ class HybridQuantEngine:
         self.institutional_signal_manager.evaluate_signals(live_prices, live_highs, live_lows)
         self.signal_tracker.render_performance_card()
 
-    def _update_and_admit_paper_trading(self, top_round_signals, scanner_results, live_prices, live_highs, live_lows):
+    def _update_and_admit_paper_trading(self, top_round_signals, scanner_results, live_prices, live_highs, live_lows, deep_dive_result=None):
         """Processes real-time ticks and admits top ranked signals across all horizons."""
         if not self.config.get('paper_trading', {}).get('enabled', True):
             return
