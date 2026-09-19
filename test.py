@@ -1739,9 +1739,11 @@ class PaperTradingLedger:
         self.execution_engine = self.config.get('execution_engine', 'binance_spot')
         self.convert_buy_spread_rate = float(self.config.get('convert_buy_spread_rate', 0.0010))
         self.convert_sell_spread_rate = float(self.config.get('convert_sell_spread_rate', 0.0010))
-        self.allowed_horizons = set(self.config.get('allowed_horizons', [
-            "scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"
-        ]))
+        self.allowed_horizons = set([
+            "scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "horizon_4d", "weekly", "biweekly", "monthly",
+            "15m", "30m", "1h", "4h", "12h", "24h", "2d", "3d", "4d", "7d", "15d", "30d",
+            "15M", "30M", "1H", "4H", "12H", "24H", "2D", "3D", "4D", "7D", "15D", "30D"
+        ])
         self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 0.20))
         self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.02))
 
@@ -2142,7 +2144,9 @@ class PaperTradingLedger:
             return
 
         # 0. Targeted Execution Horizons Guard: Only execute trades on allowed horizons
-        if horizon_key not in self.allowed_horizons:
+        h_tag = resolve_horizon_tag(horizon_key)
+        h_k_clean = str(horizon_key or "").lower().strip()
+        if h_k_clean not in [h.lower() for h in self.allowed_horizons] and h_tag not in self.allowed_horizons:
             return
 
         decision = str(result.get('decision', ''))
@@ -5558,25 +5562,21 @@ class HybridQuantEngine:
             self.ledger.on_tick(live_prices, live_highs, live_lows)
 
             # Extract executable candidate signals from Alpha Signal Engine (Filtered to Allowed Horizons)
-            allowed_pt_horizons = self.ledger.allowed_horizons
             all_candidates = []
 
             # 1. Direct Top Priority: Institutional Top Signals for this round
             if top_round_signals:
                 for sig in top_round_signals:
-                    h_k = sig.get('horizon_key', 'scalp')
-                    if h_k in allowed_pt_horizons:
-                        all_candidates.append((sig, h_k))
+                    h_k = sig.get('horizon_key') or sig.get('horizon_tag') or 'scalp'
+                    all_candidates.append((sig, h_k))
 
             # 2. Scanner Leaderboard candidates
             for r in scanner_results:
-                for h_key, h in r['horizons'].items():
-                    if h_key not in allowed_pt_horizons:
-                        continue
+                for h_key, h in r.get('horizons', {}).items():
                     dec = h.get('decision', '')
-                    if "FILTER" in dec or "PAUSED" in dec or "QUARANTINED" in dec:
+                    if "FILTER" in dec or "PAUSED" in dec or "QUARANTINED" in dec or "CONSOLIDATION" in dec:
                         continue
-                    if h['priority'] <= 2 or any(k in dec for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT", "MOMENTUM", "REVERSAL", "SWEEP"]):
+                    if h.get('priority', 4) <= 2 or any(k in dec.upper() for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT", "MOMENTUM", "REVERSAL", "SWEEP", "HYPE PUMP"]):
                         # Avoid duplicating signals already added from top_round_signals
                         if not any(c[0].get('symbol') == h.get('symbol') and c[1] == h_key for c in all_candidates):
                             all_candidates.append((h, h_key))
