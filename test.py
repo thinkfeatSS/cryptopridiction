@@ -284,14 +284,14 @@ CONFIG = {
         "enabled": True,
         "spot_only": False,                 # Allow both LONG and SHORT paper trades (Futures & Spot)
         "start_balance_usd": 100.0,         # $100.00 Virtual Wallet
-        "position_size_usd": 100.0,         # Fixed $100.00 margin per trade
-        "dynamic_sizing": False,            # Fixed $100.00 per trade (no over-leveraging)
-        "min_position_size_usd": 100.0,
+        "position_size_usd": 10.0,          # Fixed $10.00 margin per trade (10 slots)
+        "dynamic_sizing": False,            # Fixed $10.00 per trade (no over-leveraging)
+        "min_position_size_usd": 10.0,
         "max_concurrent_positions": 10,     # Max concurrent positions
         # Targeted Execution Horizons: Multi-horizon execution across all high-conviction timeframes
         "allowed_horizons": ["scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"],
         "min_expected_return_pct": 0.20,    # Minimum expected return hurdle: >= 0.20% (clears round-trip Binance fees)
-        "min_net_profit_usd": 20.0,         # Minimum $20.00 net profit target on $100.00 margin trades
+        "min_net_profit_usd": 0.02,         # Minimum $0.02 net profit target on $10.00 margin trades (0.20% net after fees)
         "require_positive_track_record": False, # Do not block untested coins; 2-strike quarantine blocks toxic assets
         # Realistic Binance Trading Fee Engine (0.10% Buy Fee + 0.10% Sell Fee Standard, or 0.075% BNB discount)
         "execution_engine": "binance_spot", # "binance_spot" (100% real Binance fees) or "binance_convert"
@@ -1743,7 +1743,7 @@ class PaperTradingLedger:
             "scalp", "horizon_30m", "swing", "horizon_4h", "horizon_12h", "macro", "horizon_2d", "horizon_3d", "weekly", "biweekly", "monthly"
         ]))
         self.min_expected_return_pct = float(self.config.get('min_expected_return_pct', 0.20))
-        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 20.0))
+        self.min_net_profit_usd = float(self.config.get('min_net_profit_usd', 0.02))
 
         self.base_fee_rate = float(self.config.get('binance_fee_rate', 0.0010))
         self.use_bnb_discount = self.config.get('use_bnb_fee_discount', False)
@@ -2149,7 +2149,11 @@ class PaperTradingLedger:
         if "FILTER" in decision or "PAUSED" in decision or "QUARANTINED" in decision:
             return
 
-        is_executable = any(k in decision for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "REVERSAL", "SWEEP"])
+        is_executable = any(k in decision for k in [
+            "EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT",
+            "MOMENTUM", "REVERSAL", "SWEEP", "BLOW-OFF TOP", "HYPE PUMP",
+            "LONG", "SHORT", "SCALP"
+        ])
         if not is_executable:
             return
 
@@ -2162,7 +2166,7 @@ class PaperTradingLedger:
             return
 
         entry_p = float(result.get('current_price', 0.0) or 0.0)
-        tp_p = float(result.get('tp_price', 0.0) or 0.0)
+        tp_p = float(result.get('tp_price', result.get('tp1_price', 0.0)) or 0.0)
         tp1_p = float(result.get('tp1_price', tp_p) or tp_p)
         tp2_p = float(result.get('tp2_price', tp_p) or tp_p)
         tp3_p = float(result.get('tp3_price', tp_p) or tp_p)
@@ -2172,9 +2176,9 @@ class PaperTradingLedger:
             return
 
         # Directional Invariant Guard: Prevent inverted targets from ever opening a position
-        if not is_short and (tp_p <= entry_p or sl_p >= entry_p):
+        if not is_short and (tp1_p <= entry_p or sl_p >= entry_p):
             return
-        if is_short and (tp_p >= entry_p or sl_p <= entry_p):
+        if is_short and (tp1_p >= entry_p or sl_p <= entry_p):
             return
 
         # 2. Cooldown Guard on Choppy/Breakeven Coins (45 min cooldown)
@@ -2190,8 +2194,8 @@ class PaperTradingLedger:
             if pos['symbol'] == sym:
                 return
 
-        # 4. Fixed Position Size: $100.00 margin per trade
-        pos_size = float(self.config.get('position_size_usd', 100.0))
+        # 4. Fixed Position Size: $10.00 margin per trade (10 slots)
+        pos_size = float(self.config.get('position_size_usd', 10.0))
 
         # 5. Net Profit Hurdle: Must beat round-trip Binance trading fees
         if self.execution_engine == 'binance_convert':
