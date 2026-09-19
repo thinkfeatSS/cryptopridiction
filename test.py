@@ -3700,15 +3700,6 @@ class HybridQuantEngine:
         now_iso = now_utc.isoformat()
         now_ts = int(now_utc.timestamp())
         
-        sym = item.get('symbol', '')
-        if (not live_price or live_price <= 0) and sym and hasattr(self, 'loader'):
-            try:
-                lp = self.loader.get_live_price(sym)
-                if lp > 0:
-                    live_price = float(lp)
-            except Exception:
-                pass
-        
         p = float(live_price) if (live_price and live_price > 0) else float(item.get('current_price', 1.0))
         p_fmt = lambda val: f"{val:,.4f}" if val >= 1.0 else f"{val:.6g}"
         
