@@ -8,7 +8,7 @@ export function cn(...inputs: ClassValue[]) {
 export function formatUsd(price: number | string | null | undefined): string {
   if (price === null || price === undefined || price === "") return "$0.00";
   const num = typeof price === "string" ? parseFloat(price) : price;
-  if (isNaN(num)) return "$0.00";
+  if (isNaN(num) || num <= 0) return "$0.00";
 
   if (num >= 50.0) {
     return new Intl.NumberFormat("en-US", {

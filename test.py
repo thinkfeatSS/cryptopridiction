@@ -3749,12 +3749,13 @@ class HybridQuantEngine:
                 type_str = "LONG 🟢"
                 market_str = "Spot & Futures"
             else:
-                tp1 = p * (1.0 - tp_step)
-                tp2 = p * (1.0 - tp_step * 1.85)
-                tp3 = p * (1.0 - tp_step * 2.90)
-                tp4 = p * (1.0 - tp_step * 4.00)
+                min_floor = max(1e-8, p * 0.15)
+                tp1 = max(min_floor, p * (1.0 - min(0.35, tp_step)))
+                tp2 = max(min_floor, p * (1.0 - min(0.55, tp_step * 1.50)))
+                tp3 = max(min_floor, p * (1.0 - min(0.70, tp_step * 2.00)))
+                tp4 = max(min_floor, p * (1.0 - min(0.80, tp_step * 2.50)))
                 sl = p + sl_dist
-                best_sell = tp4 if is_blowoff else tp3
+                best_sell = max(min_floor, tp4 if is_blowoff else tp3)
                 
                 prev_pred = float(h_data.get('predicted_next_price', 0))
                 if prev_pred > 0 and p <= prev_pred:
@@ -4552,8 +4553,9 @@ class HybridQuantEngine:
             
             high_now = float(df_15['high'].iloc[-1])
             low_now = float(df_15['low'].iloc[-1])
+            open_now = float(df_15['open'].iloc[-1])
             bar_rng = max(1e-8, high_now - low_now)
-            upper_wick_ratio = (high_now - max(c_now, float(df_15['open'].iloc[-1]))) / bar_rng
+            upper_wick_ratio = (high_now - max(c_now, open_now)) / bar_rng
             
             # Base and peak calculation over recent 30 bars
             base_pump_price = float(df_15['low'].rolling(30, min_periods=5).min().iloc[-1])
@@ -4565,25 +4567,20 @@ class HybridQuantEngine:
             ema20_15m = float(df_15['close'].ewm(span=20).mean().iloc[-1])
             overextension_z = (c_now - ema20_15m) / max(1e-8, live_raw_atr)
 
-            # Break of micro-trend (candle breakdown)
-            is_candle_broken = len(df_15) >= 2 and c_now < float(df_15['low'].iloc[-2])
+            # Candle close status
+            is_closed_red = c_now < open_now
+            is_heavy_pump = (pump_magnitude >= 0.12) or (gain_recent_pct >= 0.045) or (gain_10bar_pct >= 0.08)
 
-            # A. Blow-Off Top Exhaustion (Peak reached, overextension >= 2.5 ATRs or RSI >= 72 or Upper Wick or Candle Breakdown after heavy pump)
-            is_heavy_pump = (pump_magnitude >= 0.12) or (gain_recent_pct >= 0.055) or (gain_10bar_pct >= 0.10)
-            is_exhaustion_trigger = (
-                (upper_wick_ratio >= 0.25) or
-                (overextension_z >= 3.0) or
-                (rsi_anchor >= 72.0 and is_candle_broken) or
-                (bear_rev_score >= 0.35) or
-                (td9_sell_ex) or
-                (bb_upthrust) or
-                (rsi_bear_div) or
-                (vol_ratio_now >= 1.8 and c_now < float(df_15['open'].iloc[-1]))
-            )
-
-            if is_heavy_pump and is_exhaustion_trigger:
+            # A. Blow-Off Top Exhaustion: REQUIRES verified distribution breakdown
+            # Must have heavy prior pump AND a confirmed violent bearish rejection / breakdown
+            is_wick_rejection = (upper_wick_ratio >= 0.48) and is_closed_red
+            is_breakdown_candle = len(df_15) >= 3 and c_now < float(df_15['low'].iloc[-2]) and c_now < float(df_15['low'].iloc[-3]) and is_closed_red
+            is_exhaustion_div = (rsi_bear_div or bb_upthrust or td9_sell_ex) and is_closed_red and (bear_rev_score >= 0.40)
+            
+            if is_heavy_pump and (is_wick_rejection or is_breakdown_candle or is_exhaustion_div):
                 is_blowoff_top = True
-            elif vol_ratio_now >= 2.2 and gain_recent_pct >= 0.030 and upper_wick_ratio < 0.25 and overextension_z < 4.0:
+            elif is_heavy_pump or (vol_ratio_now >= 1.4 and gain_recent_pct >= 0.020 and c_now >= ema20_15m):
+                # Strong upward continuation / parabolic momentum hype pump
                 is_hype_surge = True
 
         # Reversal Conditions
@@ -4822,7 +4819,7 @@ class HybridQuantEngine:
         if h_dir == "BULLISH":
             best_sell_price = tp4_p if is_hype_surge else tp3_p
         else:
-            best_sell_price = tp4_p if is_blowoff_top else tp3_p
+            best_sell_price = max(current_price * 0.15, tp4_p if is_blowoff_top else tp3_p)
 
         coin_tag = symbol.split('/')[0]
         p_fmt = lambda p: f"{p:,.4f}" if p >= 1.0 else f"{p:.6g}"

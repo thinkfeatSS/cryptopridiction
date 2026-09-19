@@ -663,12 +663,13 @@ class SignalService:
                                         projected = tp1
                                     pred_ret = ((projected - p) / p) * 100.0
                                 else:
-                                    tp1 = p * (1.0 - tp_step)
-                                    tp2 = p * (1.0 - tp_step * 1.85)
-                                    tp3 = p * (1.0 - tp_step * 2.90)
-                                    tp4 = p * (1.0 - tp_step * 4.00)
+                                    min_floor = max(1e-8, p * 0.15)
+                                    tp1 = max(min_floor, p * (1.0 - min(0.35, tp_step)))
+                                    tp2 = max(min_floor, p * (1.0 - min(0.55, tp_step * 1.50)))
+                                    tp3 = max(min_floor, p * (1.0 - min(0.70, tp_step * 2.00)))
+                                    tp4 = max(min_floor, p * (1.0 - min(0.80, tp_step * 2.50)))
                                     sl = p + sl_dist
-                                    best_sell = tp4 if is_blowoff else tp3
+                                    best_sell = max(min_floor, tp4 if is_blowoff else tp3)
                                     prev_pred = float(h_data.get('predicted_next_price', 0))
                                     if prev_pred > 0 and p <= prev_pred:
                                         projected = tp2 if p > tp2 else (tp3 if p > tp3 else tp4)
