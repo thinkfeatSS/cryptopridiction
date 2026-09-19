@@ -2377,8 +2377,10 @@ class PaperTradingLedger:
         self.save()
 
     def save(self):
-        with open(self.ledger_file, 'w') as f:
+        temp_path = self.ledger_file + ".tmp"
+        with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, indent=4, default=str)
+        os.replace(temp_path, self.ledger_file)
 
     def on_tick(self, live_prices: dict, live_highs: dict = None, live_lows: dict = None):
         """Processes real-time price updates, stepped risk ratchets, partial TP scaling, and trailing stops."""
