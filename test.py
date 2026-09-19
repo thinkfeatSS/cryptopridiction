@@ -17,11 +17,11 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
 
-if sys.stdout.encoding != 'utf-8':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
+try:
+    sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
+    sys.stderr.reconfigure(encoding='utf-8', line_buffering=True)
+except Exception:
+    pass
 
 import json
 import time
@@ -5470,6 +5470,11 @@ class HybridQuantEngine:
                                 try:
                                     partial_sorted = sorted(list(self.master_matrix_universe.values()), key=_safe_sort_key)
                                     partial_signals = self.render_top_round_signals(partial_sorted, verbose=False)
+                                    
+                                    # Continuous Paper Trading Admission during Streaming Scan
+                                    if self.config.get('paper_trading', {}).get('enabled'):
+                                        self._update_and_admit_paper_trading(partial_signals, partial_sorted, live_prices, live_highs, live_lows)
+
                                     self.export_web_app_json(
                                         partial_sorted,
                                         deep_dive_result=None,
@@ -5481,8 +5486,8 @@ class HybridQuantEngine:
                                         sync_files_to_db_live(force=True)
                                     last_synced_count = len(scanner_results)
                                     last_partial_sync_ts = time.time()
-                                except Exception as e:
-                                    print(f"[STREAM SYNC ERROR] {e}", flush=True)
+                                 except Exception as e:
+                                     print(f"[STREAM SYNC ERROR] {e}", flush=True)
 
                             # Periodically persist model cache to disk every 20 assets
                             if len(scanner_results) % 20 == 0:
@@ -5497,7 +5502,7 @@ class HybridQuantEngine:
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
 
-            print(f"[SCANNER ✅] Processed active horizons for {len(scanner_results)} assets.")
+            print(f"[SCANNER ✅] Processed active horizons for {len(scanner_results)} assets.", flush=True)
 
             # Persist warmed model cache to disk so subsequent scans load hot in zero seconds
             try:
@@ -5533,9 +5538,9 @@ class HybridQuantEngine:
         # 2. Single-Coin Deep Dive
         if mode in ["single", "both"]:
             target_sym = self.config['single_symbol']
-            print(f"\n" + "=" * 95)
-            print(f" 🔬 RUNNING MULTI-HORIZON DEEP DIVE: {target_sym}")
-            print("=" * 95)
+            print(f"\n" + "=" * 95, flush=True)
+            print(f" 🔬 RUNNING MULTI-HORIZON DEEP DIVE: {target_sym}", flush=True)
+            print("=" * 95, flush=True)
 
             deep_dive_result = self.process_single_asset(target_sym)
             live_prices[target_sym] = deep_dive_result['current_price']
@@ -5548,63 +5553,7 @@ class HybridQuantEngine:
 
         # 4. Update Paper Trading Portfolio with Intra-Candle High/Low Wick Verification
         if self.config['paper_trading']['enabled']:
-            # Refresh live prices for all open positions immediately to eliminate batch scan latency
-            for pos in self.ledger.data['open_positions']:
-                sym = pos['symbol']
-                try:
-                    ticker = self.loader.fetch_ticker(sym)
-                    if ticker and 'last' in ticker:
-                        live_prices[sym] = float(ticker['last'])
-                except Exception:
-                    pass
-
-            # Order Execution Manager: Process Real-Time Tick & Admit Top Ranked Candidates
-            self.ledger.on_tick(live_prices, live_highs, live_lows)
-
-            # Extract executable candidate signals from Alpha Signal Engine (Filtered to Allowed Horizons)
-            all_candidates = []
-
-            # 1. Direct Top Priority: Institutional Top Signals for this round
-            if top_round_signals:
-                for sig in top_round_signals:
-                    h_k = sig.get('horizon_key') or sig.get('horizon_tag') or 'scalp'
-                    all_candidates.append((sig, h_k))
-
-            # 2. Scanner Leaderboard candidates
-            for r in scanner_results:
-                for h_key, h in r.get('horizons', {}).items():
-                    dec = h.get('decision', '')
-                    if "FILTER" in dec or "PAUSED" in dec or "QUARANTINED" in dec or "CONSOLIDATION" in dec:
-                        continue
-                    if h.get('priority', 4) <= 2 or any(k in dec.upper() for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT", "MOMENTUM", "REVERSAL", "SWEEP", "HYPE PUMP"]):
-                        # Avoid duplicating signals already added from top_round_signals
-                        if not any(c[0].get('symbol') == h.get('symbol') and c[1] == h_key for c in all_candidates):
-                            all_candidates.append((h, h_key))
-
-            # Rank candidates: Prioritize Institutional Top Picks first, then Grade A+, Macro/Daily/4H setups, and Conviction/Alpha edge
-            horizon_tier = {
-                'monthly': 8,
-                'biweekly': 7,
-                'weekly': 6,
-                'horizon_3d': 5,
-                'horizon_2d': 4,
-                'macro': 3,
-                'horizon_12h': 2.5,
-                'horizon_4h': 2,
-                'swing': 1,
-                'horizon_30m': 0.5,
-                'scalp': 0
-            }
-            top_sigs_set = set(id(s) for s in (top_round_signals or []))
-            all_candidates.sort(key=lambda x: (
-                0 if id(x[0]) in top_sigs_set else 1,
-                x[0].get('priority', 2),
-                -horizon_tier.get(x[1], 1),
-                -(x[0].get('conviction', 50.0) * abs(x[0].get('exp_return', 0.01)) + 5.0 * max(0.0, x[0].get('rs_btc', 0.0)))
-            ))
-
-            # Route top ranked signals into Order Execution Manager
-            self.ledger.admit_ranked_candidates(all_candidates, signal_history=self.signal_tracker.records)
+            self._update_and_admit_paper_trading(top_round_signals, scanner_results, live_prices, live_highs, live_lows)
             self.ledger.render_portfolio_card()
 
         # 5. Persistent Signal Audit Logger: Record & Evaluate ONLY Trader Signals in CSV
@@ -5612,6 +5561,67 @@ class HybridQuantEngine:
         self.signal_tracker.evaluate_signals(live_prices, live_highs, live_lows)
         self.institutional_signal_manager.evaluate_signals(live_prices, live_highs, live_lows)
         self.signal_tracker.render_performance_card()
+
+    def _update_and_admit_paper_trading(self, top_round_signals, scanner_results, live_prices, live_highs, live_lows):
+        """Processes real-time ticks and admits top ranked signals across all horizons."""
+        if not self.config.get('paper_trading', {}).get('enabled', True):
+            return
+
+        for pos in self.ledger.data['open_positions']:
+            sym = pos['symbol']
+            try:
+                ticker = self.loader.fetch_ticker(sym)
+                if ticker and 'last' in ticker:
+                    live_prices[sym] = float(ticker['last'])
+            except Exception:
+                pass
+
+        # Order Execution Manager: Process Real-Time Tick
+        self.ledger.on_tick(live_prices, live_highs, live_lows)
+
+        # Extract executable candidate signals from Alpha Signal Engine (Filtered to Allowed Horizons)
+        all_candidates = []
+
+        # 1. Direct Top Priority: Institutional Top Signals for this round
+        if top_round_signals:
+            for sig in top_round_signals:
+                h_k = sig.get('horizon_key') or sig.get('horizon_tag') or 'scalp'
+                all_candidates.append((sig, h_k))
+
+        # 2. Scanner Leaderboard candidates
+        for r in (scanner_results or []):
+            for h_key, h in r.get('horizons', {}).items():
+                dec = str(h.get('decision', ''))
+                if "FILTER" in dec or "PAUSED" in dec or "QUARANTINED" in dec or "CONSOLIDATION" in dec:
+                    continue
+                if h.get('priority', 4) <= 2 or any(k in dec.upper() for k in ["EXECUTE", "DIP-BUY", "RALLY-SELL", "BREAKDOWN", "BREAKOUT", "MOMENTUM", "REVERSAL", "SWEEP", "HYPE PUMP", "LONG", "SHORT", "BULLISH", "BEARISH"]):
+                    if not any(c[0].get('symbol') == h.get('symbol') and c[1] == h_key for c in all_candidates):
+                        all_candidates.append((h, h_key))
+
+        # Rank candidates: Prioritize Institutional Top Picks first, then Grade A+, Macro/Daily/4H setups, and Conviction/Alpha edge
+        horizon_tier = {
+            'monthly': 8,
+            'biweekly': 7,
+            'weekly': 6,
+            'horizon_3d': 5,
+            'horizon_2d': 4,
+            'macro': 3,
+            'horizon_12h': 2.5,
+            'horizon_4h': 2,
+            'swing': 1,
+            'horizon_30m': 0.5,
+            'scalp': 0
+        }
+        top_sigs_set = set(id(s) for s in (top_round_signals or []))
+        all_candidates.sort(key=lambda x: (
+            0 if id(x[0]) in top_sigs_set else 1,
+            x[0].get('priority', 2),
+            -horizon_tier.get(x[1], 1),
+            -(x[0].get('conviction', 50.0) * abs(x[0].get('exp_return', 0.01)) + 5.0 * max(0.0, x[0].get('rs_btc', 0.0)))
+        ))
+
+        # Route top ranked signals into Order Execution Manager
+        self.ledger.admit_ranked_candidates(all_candidates, signal_history=self.signal_tracker.records)
 
         # 6. Export JSON Data
         self.export_web_app_json(scanner_results, deep_dive_result, top_round_signals)
