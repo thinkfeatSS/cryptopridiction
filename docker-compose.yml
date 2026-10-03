@@ -31,7 +31,30 @@ services:
       - crypto_network
 
   # ============================================================================
-  # 2. FastAPI REST Backend Service (4 Concurrency Workers)
+  # 1b. Redis In-Memory Cache & Message Broker (10k User Scaling)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: crypto_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --save ""
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "2"
+    networks:
+      - crypto_network
+
+  # ============================================================================
+  # 2. FastAPI REST Backend Service (4 Concurrency Workers + Redis Cache)
   # ============================================================================
   backend:
     build:
@@ -40,9 +63,10 @@ services:
     container_name: crypto_backend
     init: true
     restart: unless-stopped
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
     environment:
       - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-crypto_user}:${MYSQL_PASSWORD:-crypto_secure_pass_2026}@db:3306/${MYSQL_DATABASE:-crypto_trading}
+      - REDIS_URL=redis://redis:6379/0
       - MYSQL_HOST=db
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER:-crypto_user}
@@ -50,6 +74,18 @@ services:
       - MYSQL_DB=${MYSQL_DATABASE:-crypto_trading}
       - EXPORT_DIR=/app/export_app_data
       - PYTHONUNBUFFERED=1
+      - WHATSAPP_ENABLED=${WHATSAPP_ENABLED:-false}
+      - WHATSAPP_GATEWAY_TYPE=${WHATSAPP_GATEWAY_TYPE:-evolution_api}
+      - WHATSAPP_API_URL=${WHATSAPP_API_URL:-http://whatsapp:8080}
+      - WHATSAPP_API_KEY=${WHATSAPP_API_KEY:-crypto_quant_secret_2026}
+      - WHATSAPP_INSTANCE_NAME=${WHATSAPP_INSTANCE_NAME:-crypto_bot}
+      - WHATSAPP_GROUP_ID=${WHATSAPP_GROUP_ID:-}
+      - WHATSAPP_CHANNEL_ID=${WHATSAPP_CHANNEL_ID:-}
+      - WHATSAPP_MIN_GRADE=${WHATSAPP_MIN_GRADE:-Grade A}
+      - WHATSAPP_MIN_WIN_PROB=${WHATSAPP_MIN_WIN_PROB:-0.70}
+      - WHATSAPP_SEND_TP_UPDATES=${WHATSAPP_SEND_TP_UPDATES:-true}
+      - WHATSAPP_SEND_SL_UPDATES=${WHATSAPP_SEND_SL_UPDATES:-true}
+      - WHATSAPP_SEND_REGIME_ALERTS=${WHATSAPP_SEND_REGIME_ALERTS:-true}
     volumes:
       - app_exports:/app/export_app_data
       - app_models:/app/models_export_v3
@@ -60,6 +96,8 @@ services:
       - "127.0.0.1:8005:8000"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     logging:
       driver: "json-file"
@@ -82,6 +120,7 @@ services:
     command: python -u run_scanner_daemon.py
     environment:
       - DATABASE_URL=mysql+pymysql://${MYSQL_USER:-crypto_user}:${MYSQL_PASSWORD:-crypto_secure_pass_2026}@db:3306/${MYSQL_DATABASE:-crypto_trading}
+      - REDIS_URL=redis://redis:6379/0
       - MYSQL_HOST=db
       - MYSQL_PORT=3306
       - MYSQL_USER=${MYSQL_USER:-crypto_user}
@@ -89,10 +128,27 @@ services:
       - MYSQL_DB=${MYSQL_DATABASE:-crypto_trading}
       - EXPORT_DIR=/app/export_app_data
       - PYTHONUNBUFFERED=1
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - VECLIB_MAXIMUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
       - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-1}
       - SCANNER_TOP_N=${SCANNER_TOP_N:-110}
       - MAX_SCAN_WORKERS=${MAX_SCAN_WORKERS:-16}
       - HEARTBEAT_SECONDS=${HEARTBEAT_SECONDS:-4}
+      - WHATSAPP_ENABLED=${WHATSAPP_ENABLED:-false}
+      - WHATSAPP_GATEWAY_TYPE=${WHATSAPP_GATEWAY_TYPE:-evolution_api}
+      - WHATSAPP_API_URL=${WHATSAPP_API_URL:-http://whatsapp:8080}
+      - WHATSAPP_API_KEY=${WHATSAPP_API_KEY:-crypto_quant_secret_2026}
+      - WHATSAPP_INSTANCE_NAME=${WHATSAPP_INSTANCE_NAME:-crypto_bot}
+      - WHATSAPP_GROUP_ID=${WHATSAPP_GROUP_ID:-}
+      - WHATSAPP_CHANNEL_ID=${WHATSAPP_CHANNEL_ID:-}
+      - WHATSAPP_MIN_GRADE=${WHATSAPP_MIN_GRADE:-Grade A}
+      - WHATSAPP_MIN_WIN_PROB=${WHATSAPP_MIN_WIN_PROB:-0.70}
+      - WHATSAPP_SEND_TP_UPDATES=${WHATSAPP_SEND_TP_UPDATES:-true}
+      - WHATSAPP_SEND_SL_UPDATES=${WHATSAPP_SEND_SL_UPDATES:-true}
+      - WHATSAPP_SEND_REGIME_ALERTS=${WHATSAPP_SEND_REGIME_ALERTS:-true}
     volumes:
       - app_exports:/app/export_app_data
       - app_models:/app/models_export_v3
@@ -101,6 +157,8 @@ services:
       - ./run_scanner_daemon.py:/app/run_scanner_daemon.py
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       backend:
         condition: service_started
@@ -139,6 +197,30 @@ services:
     networks:
       - crypto_network
 
+  # ============================================================================
+  # 5. WhatsApp Multi-Device Gateway (Custom Baileys Server)
+  # ============================================================================
+  whatsapp:
+    build:
+      context: .
+      dockerfile: Dockerfile.whatsapp
+    container_name: crypto_whatsapp
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - NODE_ENV=production
+    volumes:
+      - whatsapp_auth:/app/auth_info_baileys
+    ports:
+      - "127.0.0.1:8088:8080"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "2"
+    networks:
+      - crypto_network
+
 # ==============================================================================
 # Persistent Named Volumes & Bridge Network
 # ==============================================================================
@@ -146,6 +228,8 @@ volumes:
   mysql_data:
   app_exports:
   app_models:
+  whatsapp_auth:
+
 
 networks:
   crypto_network:
