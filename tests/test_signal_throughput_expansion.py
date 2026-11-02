@@ -156,6 +156,47 @@ class TestSignalThroughputExpansion(unittest.TestCase):
         self.assertEqual(q_15m["direction"], "LONG")
         self.assertFalse(q_24h["qualified"], "24H Macro swing must remain blocked by 1D middle chop")
 
+    def test_short_signal_without_fundamental_matrix_no_unbound_error(self):
+        """Verifies SHORT signal generation safely handles None fundamental_matrix without UnboundLocalError."""
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+        import numpy as np
+
+        sig_sys = SignalGenerationSystem()
+        # Build dummy df with 30 candles
+        dates = pd.date_range("2026-01-01", periods=30, freq="15min")
+        df_15m = pd.DataFrame({
+            "open": np.linspace(100, 90, 30),
+            "high": np.linspace(101, 91, 30),
+            "low": np.linspace(99, 89, 30),
+            "close": np.linspace(99.5, 89.5, 30),
+            "volume": [1000.0] * 30
+        }, index=dates)
+
+        dfs = {"15m": df_15m, "1d": df_15m}
+        btc_shield = {
+            "altcoin_longs_allowed": True,
+            "altcoin_shorts_allowed": True,
+            "active": False,
+            "status_code": "CLEAR"
+        }
+
+        # Should complete without throwing UnboundLocalError: local variable 'has_severe_positive_news' referenced before assignment
+        sig = sig_sys._build_single_horizon_signal(
+            symbol="BTC/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="SHORT",
+            current_price=90.0,
+            dfs_9=dfs,
+            horizon_prediction=None,
+            btc_shield_state=btc_shield,
+            aligned_horizons=["5m", "15m", "1h"],
+            fundamental_matrix=None # explicitly None
+        )
+        self.assertIsNotNone(sig)
+        self.assertIn("signal_status", sig)
+        self.assertEqual(sig["direction"], "SHORT")
+
 
 if __name__ == "__main__":
     unittest.main()

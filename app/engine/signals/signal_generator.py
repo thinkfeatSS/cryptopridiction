@@ -495,6 +495,7 @@ class SignalGenerationSystem:
         # ---------------------------------------------------------------------
         fund_matrix = fundamental_matrix
         has_severe_negative_news = False
+        has_severe_positive_news = False
         is_sell_the_news = False
         is_pre_event = False
         news_score = 0.0
@@ -1020,9 +1021,9 @@ class SignalGenerationSystem:
         )
         q_15m_direction = (
             ob_setup_15m.get("direction") if (has_ob_15m and ob_setup_15m.get("zeiierman_rank", 99) <= 3) else (
-                smc_dir_15m if has_smc_15m else (
-                    "LONG" if is_15m_bull else (
-                        "SHORT" if is_15m_bear else (
+                "LONG" if is_15m_bull else (
+                    "SHORT" if is_15m_bear else (
+                        smc_dir_15m if has_smc_15m else (
                             matrix_eval.get("dominant_direction") if (is_coiling_breakout or is_range_rotation or is_breakout_expansion) else None
                         )
                     )
@@ -1108,9 +1109,9 @@ class SignalGenerationSystem:
         )
         q_1h_direction = (
             ob_setup_1h.get("direction") if (has_ob_1h and ob_setup_1h.get("zeiierman_rank", 99) <= 3) else (
-                smc_dir_1h if has_smc_1h else (
-                    "LONG" if is_1h_bull else (
-                        "SHORT" if is_1h_bear else (
+                "LONG" if is_1h_bull else (
+                    "SHORT" if is_1h_bear else (
+                        smc_dir_1h if has_smc_1h else (
                             matrix_eval.get("dominant_direction") if (is_coiling_breakout or is_range_rotation or is_breakout_expansion) else None
                         )
                     )
@@ -1179,10 +1180,10 @@ class SignalGenerationSystem:
             )
         )
         q_24h_direction = (
-            ob_setup_24h.get("direction") if (has_ob_24h and ob_setup_24h.get("zeiierman_rank", 99) <= 2) else (
-                smc_dir_24h if has_smc_24h else (
-                    "LONG" if is_24h_bull else (
-                        "SHORT" if is_24h_bear else (
+            ob_setup_24h.get("direction") if (has_ob_24h and ob_setup_24h.get("zeiierman_rank", 99) <= 3) else (
+                "LONG" if is_24h_bull else (
+                    "SHORT" if is_24h_bear else (
+                        smc_dir_24h if has_smc_24h else (
                             matrix_eval.get("dominant_direction") if is_breakout_expansion else None
                         )
                     )
