@@ -209,10 +209,8 @@ class NetExpectancyEngine:
             return "A", True, f"Grade A Expectancy ({expected_net_return_pct:+.2f}% net return)"
         elif expected_net_return_pct >= 0.25:
             return "B", True, f"Grade B Expectancy ({expected_net_return_pct:+.2f}% net return)"
-        elif expected_net_return_pct >= min_ev_hurdle and expected_net_return_pct > 0.00:
-            return "B", True, f"Grade B Expectancy ({expected_net_return_pct:+.2f}% net return)"
         elif expected_net_return_pct > 0.00:
-            return "WATCH", False, f"Blocked: Marginal Net Expectancy ({expected_net_return_pct:+.2f}% < {min_ev_hurdle:.2f}% threshold)"
+            return "WATCH", False, f"Blocked: Marginal Net Expectancy ({expected_net_return_pct:+.2f}% < 0.25% threshold)"
         else:
             return "NO_TRADE", False, f"Negative/Zero Net Expectancy ({expected_net_return_pct:+.2f}% after costs)"
 

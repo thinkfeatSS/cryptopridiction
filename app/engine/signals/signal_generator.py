@@ -357,16 +357,27 @@ class SignalGenerationSystem:
                 except Exception:
                     bbw_val = 3.0
 
-            if bbw_val <= 1.50:
-                tp_mult_scale = 0.85
+            is_range_regime = any(k in str(active_market_regime).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP", "SIDEWAYS"])
+            if is_range_regime:
+                tp1_mult = 1.30 * (0.85 if bbw_val <= 1.50 else 1.00)
+                tp2_mult = 2.40 * (0.85 if bbw_val <= 1.50 else 1.00)
+                tp3_mult = 3.80 * (0.85 if bbw_val <= 1.50 else 1.00)
+            elif bbw_val <= 1.50:
+                tp1_mult = 1.70
+                tp2_mult = 2.975
+                tp3_mult = 4.675
             elif bbw_val >= 4.50 and active_market_regime in ["TREND", "BULLISH", "BEARISH"]:
-                tp_mult_scale = 1.25
+                tp1_mult = 2.50
+                tp2_mult = 4.375
+                tp3_mult = 6.875
             else:
-                tp_mult_scale = 1.00
+                tp1_mult = 2.00
+                tp2_mult = 3.50
+                tp3_mult = 5.50
 
-            cand_tp1 = format_dynamic_precision(exec_entry_price + (active_atr * 2.0 * tp_mult_scale))
-            cand_tp2 = format_dynamic_precision(exec_entry_price + (active_atr * 3.5 * tp_mult_scale))
-            cand_tp3 = format_dynamic_precision(exec_entry_price + (active_atr * 5.5 * tp_mult_scale))
+            cand_tp1 = format_dynamic_precision(exec_entry_price + (active_atr * tp1_mult))
+            cand_tp2 = format_dynamic_precision(exec_entry_price + (active_atr * tp2_mult))
+            cand_tp3 = format_dynamic_precision(exec_entry_price + (active_atr * tp3_mult))
             cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 1.2)))
             actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
@@ -382,16 +393,27 @@ class SignalGenerationSystem:
                 except Exception:
                     bbw_val = 3.0
 
-            if bbw_val <= 1.50:
-                tp_mult_scale = 0.85
+            is_range_regime = any(k in str(active_market_regime).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP", "SIDEWAYS"])
+            if is_range_regime:
+                tp1_mult = 1.30 * (0.85 if bbw_val <= 1.50 else 1.00)
+                tp2_mult = 2.40 * (0.85 if bbw_val <= 1.50 else 1.00)
+                tp3_mult = 3.80 * (0.85 if bbw_val <= 1.50 else 1.00)
+            elif bbw_val <= 1.50:
+                tp1_mult = 1.70
+                tp2_mult = 2.975
+                tp3_mult = 4.675
             elif bbw_val >= 4.50 and active_market_regime in ["TREND", "BULLISH", "BEARISH"]:
-                tp_mult_scale = 1.25
+                tp1_mult = 2.50
+                tp2_mult = 4.375
+                tp3_mult = 6.875
             else:
-                tp_mult_scale = 1.00
+                tp1_mult = 2.00
+                tp2_mult = 3.50
+                tp3_mult = 5.50
 
-            cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 2.0 * tp_mult_scale)))
-            cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 3.5 * tp_mult_scale)))
-            cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 5.5 * tp_mult_scale)))
+            cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * tp1_mult)))
+            cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * tp2_mult)))
+            cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * tp3_mult)))
             cand_sl = format_dynamic_precision(exec_entry_price + (active_atr * 1.2))
             actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"

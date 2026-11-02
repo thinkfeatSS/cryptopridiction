@@ -171,7 +171,7 @@ class CrossTimeframeMatrixEngine:
             htf_mid = (htf_high + htf_low) / 2.0
 
             # Sub-Range Support Mean Reversion (Intraday floor bounce within macro box)
-            if sub_span > 0 and sub_pos <= 0.25 and sub_prof.headroom_to_high_pct >= 1.5:
+            if sub_span > 0 and (0.0 <= sub_pos <= 0.25) and sub_prof.headroom_to_high_pct >= 1.5:
                 # Target TP1 capped at macro equilibrium (1D mid) to eliminate fighting macro chop
                 target_mid_cap = ((htf_mid - current_price) / max(1e-8, current_price)) * 100.0 if htf_mid > current_price else sub_prof.headroom_to_high_pct
                 sub_headroom = round(min(sub_prof.headroom_to_high_pct, max(1.0, target_mid_cap)), 2)
@@ -188,7 +188,7 @@ class CrossTimeframeMatrixEngine:
                 }
 
             # Sub-Range Resistance Mean Reversion (Intraday ceiling rejection within macro box)
-            if sub_span > 0 and sub_pos >= 0.75 and sub_prof.headroom_to_low_pct >= 1.5:
+            if sub_span > 0 and (0.75 <= sub_pos <= 1.0) and sub_prof.headroom_to_low_pct >= 1.5:
                 # Target TP1 capped at macro equilibrium (1D mid) to eliminate fighting macro chop
                 target_mid_cap = ((current_price - htf_mid) / max(1e-8, current_price)) * 100.0 if current_price > htf_mid else sub_prof.headroom_to_low_pct
                 sub_headroom = round(min(sub_prof.headroom_to_low_pct, max(1.0, target_mid_cap)), 2)

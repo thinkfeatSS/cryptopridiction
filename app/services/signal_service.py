@@ -688,7 +688,12 @@ class SignalService:
                 if not canc_match:
                     fallback_canc = cancelled_paper_map.get((s_sym, norm_hz)) or cancelled_paper_map.get((s_sym.replace("/", "").replace(":USDT", ""), norm_hz))
                     if fallback_canc:
-                        canc_match = fallback_canc
+                        sig_time = f"{s.date_utc or ''} {s.time_utc or ''}".strip()
+                        canc_time = str(fallback_canc.get("cancelled_at_utc") or fallback_canc.get("cancelled_at") or "")
+                        if canc_time and sig_time and canc_time >= sig_time:
+                            canc_match = fallback_canc
+                        elif not sig_time:
+                            canc_match = fallback_canc
 
                 if canc_match:
                     canc_reason = str(canc_match.get("cancellation_reason", "CANCELLED"))
@@ -805,12 +810,13 @@ class SignalService:
                     if sig_age_sec is not None and sig_age_sec >= max_sec:
                         is_expired = True
 
-                # 0. Tier-0 Early Breakeven Guard (Requires at least +1.60% gain and 75% of TP1 distance)
+                # 0. Tier-0 Early Breakeven Guard (Requires at least 50% of TP1 distance or +0.60% gain in range)
                 tp1_dist = abs(tp1_p - entry_p) / max(1e-12, entry_p) * 100.0
-                t0_hurdle = max(1.60, 0.75 * tp1_dist)
+                is_range_regime = any(k in str(getattr(s, "market_shield", "")).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP"])
+                t0_hurdle = min(1.20, max(0.60, 0.50 * tp1_dist)) if is_range_regime else max(1.00, 0.65 * tp1_dist)
                 if max_gain >= t0_hurdle and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
                     s.status = "TIER0_PROTECTED_BREAKEVEN"
-                    soft_be_p = (entry_p * 1.0020) if direction == "LONG" else (entry_p * 0.9980)
+                    soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)
                     s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
                     sl_p = s.sl_price
                     s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"

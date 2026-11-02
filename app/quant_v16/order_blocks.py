@@ -587,15 +587,26 @@ class InstitutionalOrderBlockEngine:
         cls,
         df: pd.DataFrame,
         timeframe: str = "1h",
-        current_price: Optional[float] = None
+        current_price: Optional[float] = None,
+        market_regime: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Synthesizes active order blocks with live candle price to evaluate precision trade setups.
-        Evaluates Ranks 1 to 5 with tight invalidation and asymmetric 1:2.5+ to 1:6.5 R:R targets.
+        Evaluates Ranks 1 to 5 with tight invalidation and asymmetric targets dynamically scaled for market regimes.
         """
         n = len(df)
         if n < 25:
             return {"setup_detected": False, "reason": "Insufficient history"}
+
+        # Dynamic target multipliers: in range/consolidation, scale targets so TP1 is quickly reachable
+        is_range_regime = bool(market_regime and any(k in str(market_regime).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP", "SIDEWAYS"]))
+        ob_tp1_mult = 1.65 if is_range_regime else 2.80
+        ob_tp2_mult = 2.80 if is_range_regime else 4.50
+        ob_tp3_mult = 4.50 if is_range_regime else 7.00
+
+        bb_tp1_mult = 1.60 if is_range_regime else 2.20
+        bb_tp2_mult = 2.60 if is_range_regime else 3.50
+        bb_tp3_mult = 4.00 if is_range_regime else 5.50
 
         live_p = current_price or float(df['close'].iloc[-1])
         live_low = float(df['low'].iloc[-1])
@@ -643,9 +654,9 @@ class InstitutionalOrderBlockEngine:
                         entry_p = live_p
                         sl_p = format_dynamic_precision(sweep_low - (0.05 * atr))
                         risk_amt = max(1e-6, entry_p - sl_p)
-                        tp1_p = format_dynamic_precision(entry_p + (2.8 * risk_amt))
-                        tp2_p = format_dynamic_precision(entry_p + (4.5 * risk_amt))
-                        tp3_p = format_dynamic_precision(entry_p + (7.0 * risk_amt))
+                        tp1_p = format_dynamic_precision(entry_p + (ob_tp1_mult * risk_amt))
+                        tp2_p = format_dynamic_precision(entry_p + (ob_tp2_mult * risk_amt))
+                        tp3_p = format_dynamic_precision(entry_p + (ob_tp3_mult * risk_amt))
                         rr_ratio = round((tp1_p - entry_p) / risk_amt, 2)
                         return {
                             "setup_detected": True,
@@ -698,9 +709,9 @@ class InstitutionalOrderBlockEngine:
                 # Enforce strict price invariant: entry must be comfortably above stop loss
                 if entry_p > (sl_p + 0.05 * atr):
                     risk_amt = max(1e-6, entry_p - sl_p)
-                    tp1_p = format_dynamic_precision(entry_p + (2.8 * risk_amt))
-                    tp2_p = format_dynamic_precision(entry_p + (4.5 * risk_amt))
-                    tp3_p = format_dynamic_precision(entry_p + (7.0 * risk_amt))
+                    tp1_p = format_dynamic_precision(entry_p + (ob_tp1_mult * risk_amt))
+                    tp2_p = format_dynamic_precision(entry_p + (ob_tp2_mult * risk_amt))
+                    tp3_p = format_dynamic_precision(entry_p + (ob_tp3_mult * risk_amt))
                     entry_p = format_dynamic_precision(entry_p)
                     sl_p = format_dynamic_precision(sl_p)
 
@@ -785,9 +796,9 @@ class InstitutionalOrderBlockEngine:
                         entry_p = live_p
                         sl_p = format_dynamic_precision(sweep_high + (0.05 * atr))
                         risk_amt = max(1e-6, sl_p - entry_p)
-                        tp1_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (2.8 * risk_amt)))
-                        tp2_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (4.5 * risk_amt)))
-                        tp3_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (7.0 * risk_amt)))
+                        tp1_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (ob_tp1_mult * risk_amt)))
+                        tp2_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (ob_tp2_mult * risk_amt)))
+                        tp3_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (ob_tp3_mult * risk_amt)))
                         rr_ratio = round((entry_p - tp1_p) / risk_amt, 2)
                         return {
                             "setup_detected": True,
@@ -840,9 +851,9 @@ class InstitutionalOrderBlockEngine:
                 # Enforce strict price invariant: entry must be comfortably below stop loss
                 if entry_p < (sl_p - 0.05 * atr):
                     risk_amt = max(1e-6, sl_p - entry_p)
-                    tp1_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (2.8 * risk_amt)))
-                    tp2_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (4.5 * risk_amt)))
-                    tp3_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (7.0 * risk_amt)))
+                    tp1_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (ob_tp1_mult * risk_amt)))
+                    tp2_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (ob_tp2_mult * risk_amt)))
+                    tp3_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (ob_tp3_mult * risk_amt)))
                     entry_p = format_dynamic_precision(entry_p)
                     sl_p = format_dynamic_precision(sl_p)
 
@@ -905,9 +916,9 @@ class InstitutionalOrderBlockEngine:
                     entry_p = live_p
                     sl_p = bb.ob_high + (0.25 * atr)
                     risk_amt = max(1e-8, sl_p - entry_p)
-                    tp1_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (2.2 * risk_amt)))
-                    tp2_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (3.5 * risk_amt)))
-                    tp3_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (5.5 * risk_amt)))
+                    tp1_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (bb_tp1_mult * risk_amt)))
+                    tp2_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (bb_tp2_mult * risk_amt)))
+                    tp3_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (bb_tp3_mult * risk_amt)))
                     entry_p = format_dynamic_precision(entry_p)
                     sl_p = format_dynamic_precision(sl_p)
                     return {
@@ -948,9 +959,9 @@ class InstitutionalOrderBlockEngine:
                     entry_p = live_p
                     sl_p = bb.ob_low - (0.25 * atr)
                     risk_amt = max(1e-8, entry_p - sl_p)
-                    tp1_p = format_dynamic_precision(entry_p + (2.2 * risk_amt))
-                    tp2_p = format_dynamic_precision(entry_p + (3.5 * risk_amt))
-                    tp3_p = format_dynamic_precision(entry_p + (5.5 * risk_amt))
+                    tp1_p = format_dynamic_precision(entry_p + (bb_tp1_mult * risk_amt))
+                    tp2_p = format_dynamic_precision(entry_p + (bb_tp2_mult * risk_amt))
+                    tp3_p = format_dynamic_precision(entry_p + (bb_tp3_mult * risk_amt))
                     entry_p = format_dynamic_precision(entry_p)
                     sl_p = format_dynamic_precision(sl_p)
                     return {
@@ -1053,7 +1064,10 @@ class InstitutionalOrderBlockEngine:
                 blocks = cls.detect_order_blocks(df, timeframe=tf, current_price=live_p)
                 horizon_blocks[tf] = blocks
                 all_active_blocks.extend(blocks)
-                live_setup = cls.evaluate_live_setup(df, timeframe=tf, current_price=live_p)
+                regime_str = ""
+                if btc_shield:
+                    regime_str = str(btc_shield.get("btc_shield_status") or btc_shield.get("btc_regime") or "")
+                live_setup = cls.evaluate_live_setup(df, timeframe=tf, current_price=live_p, market_regime=regime_str)
                 # Only genuine active touches on valid institutional blocks (Ranks 1..4) qualify
                 if live_setup.get("setup_detected") and live_setup.get("is_touching") and live_setup.get("zeiierman_rank", 5) <= 4:
                     horizon_setups[tf] = live_setup

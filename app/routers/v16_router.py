@@ -515,10 +515,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                     if gen_at_str and not gen_at_str.startswith(now_utc.strftime("%Y-%m-%d")):
                         is_stale = True
 
-                # Also check if it's currently present in active forecast signals
-                is_in_forecast = any(f.get("symbol") == sym and (f.get("signal_id") == sid or f.get("trade_id") == sid) for f in active_forecast_sigs)
-
-                if is_stale or not is_in_forecast:
+                if is_stale:
                     dyn["status"] = "EXPIRED_HORIZON"
                     dyn["outcome_label"] = "⏱️ EXPIRED"
                     imm["status"] = "EXPIRED_HORIZON"

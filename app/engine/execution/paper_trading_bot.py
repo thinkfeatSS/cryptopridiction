@@ -417,10 +417,9 @@ class PaperTradingBot:
                 "total_gross_partial_usd": 0.0,
                 "total_frictions_partial_usd": 0.0,
                 "remaining_position_size_usd": position_size_usd,
-                # Tier-0 BE thresholds raised (Fix RC-1): require stronger excursion before locking BE
-                # Scalp: 1.2% → 2.0%, Day: 1.5% → 2.5%, Swing: 2.0% → 3.5%
-                # These align with the TP1 proximity gate so Tier-0 doesn't fire before TP1 is approached
-                "tier0_threshold_pct": 2.00 if desk_key == "scalp" else (2.50 if desk_key in ["day", "intraday"] else 3.50),
+                # Dynamic Tier-0 BE threshold: scaled by desk and range-regime awareness
+                # Scalp: 0.80%, Day: 1.20%, Swing: 2.00%
+                "tier0_threshold_pct": 0.80 if desk_key == "scalp" else (1.20 if desk_key in ["day", "intraday"] else 2.00),
                 "is_breakeven_locked": False,
                 "peak_gain_pct": 0.0,
                 "unrealized_pnl_usd": 0.0,
@@ -887,14 +886,17 @@ class PaperTradingBot:
                             tp1_p = cand_p
                             is_tp1 = curr_p <= tp1_p
 
-                # Tier-0 Breakeven Ratchet: Tied to TP1 proximity (90% of TP1 range touched)
+                # Tier-0 Breakeven Ratchet: Tied to TP1 proximity (65% of TP1 range touched OR peak_gain reaches tier0 threshold)
                 tp1_p_pos = float(pos.get("tp1_price", 0.0))
+                tp1_dist = abs(tp1_p_pos - entry_p) / max(1e-12, entry_p) * 100.0
                 if direction == "LONG":
-                    tp1_proximity_reached = (tp1_p_pos > entry_p and curr_p >= (entry_p + (tp1_p_pos - entry_p) * 0.90))
+                    tp1_proximity_reached = (tp1_p_pos > entry_p and curr_p >= (entry_p + (tp1_p_pos - entry_p) * 0.65))
                 else:
-                    tp1_proximity_reached = (tp1_p_pos < entry_p and curr_p <= (entry_p - (entry_p - tp1_p_pos) * 0.90))
+                    tp1_proximity_reached = (tp1_p_pos < entry_p and curr_p <= (entry_p - (entry_p - tp1_p_pos) * 0.65))
 
-                if not pos.get("is_breakeven_locked") and not pos.get("tp1_hit") and not pos.get("tp2_hit") and tp1_proximity_reached and pos["peak_gain_pct"] >= pos.get("tier0_threshold_pct", 2.50):
+                effective_t0_thresh = min(float(pos.get("tier0_threshold_pct", 1.20)), max(0.60, 0.50 * tp1_dist))
+
+                if not pos.get("is_breakeven_locked") and not pos.get("tp1_hit") and not pos.get("tp2_hit") and (tp1_proximity_reached or pos["peak_gain_pct"] >= effective_t0_thresh):
                     pos["is_breakeven_locked"] = True
                     pos["sl_price"] = entry_p * (1.0005 if direction == "LONG" else 0.9995)
                     try:
