@@ -622,13 +622,69 @@ class InstitutionalOrderBlockEngine:
                 abs(live_p - b.ob_high)
             ))
 
-            in_bull_zone = (live_low <= best_ob.ob_high and live_high >= best_ob.ob_low)
-            has_not_broken_sl = live_low >= (best_ob.ob_low - 0.05 * atr)
+            sweep_low = min(live_low, float(df['low'].iloc[-2])) if len(df) >= 2 else live_low
+            is_valid_sweep_long = bool(best_ob.retest_count >= 3 and sweep_low < best_ob.ob_low and sweep_low >= (best_ob.ob_low - 1.20 * atr) and live_p >= best_ob.ob_low)
+            in_bull_zone = bool((live_low <= best_ob.ob_high and live_high >= best_ob.ob_low) or (is_valid_sweep_long and live_p <= (best_ob.ob_high + 0.50 * atr)))
+            has_not_broken_sl = bool(live_low >= (best_ob.ob_low - 0.05 * atr) or is_valid_sweep_long)
 
             if in_bull_zone and has_not_broken_sl:
-                # SMC-01: Order Block Mitigation Degradation
-                # Blocks with >= 3 retests are fully depleted of institutional resting liquidity
+                # SMC-01: Order Block Mitigation Degradation & Turtle Soup Liquidity Reclaims
+                # Blocks with >= 3 retests are depleted of standard resting limit liquidity.
+                # However, if price sweeps past the zone boundary and reclaims inside with aggression,
+                # convert into an asymmetric Turtle Soup Liquidity Reclaim setup!
                 if best_ob.retest_count >= 3:
+                    vol_series = df['volume'] if 'volume' in df.columns else None
+                    vol_sma20 = float(vol_series.rolling(20).mean().iloc[-1]) if vol_series is not None and len(vol_series) >= 20 else 1.0
+                    current_vol = float(vol_series.iloc[-1]) if vol_series is not None else 1.0
+                    vol_ratio = current_vol / max(1e-8, vol_sma20)
+                    is_wick_rejection = (live_high > live_low) and ((min(live_p, float(df['open'].iloc[-1])) - live_low) / max(1e-8, live_high - live_low) >= 0.25)
+
+                    if is_valid_sweep_long and (vol_ratio >= 1.25 or is_wick_rejection):
+                        entry_p = live_p
+                        sl_p = format_dynamic_precision(sweep_low - (0.05 * atr))
+                        risk_amt = max(1e-6, entry_p - sl_p)
+                        tp1_p = format_dynamic_precision(entry_p + (2.8 * risk_amt))
+                        tp2_p = format_dynamic_precision(entry_p + (4.5 * risk_amt))
+                        tp3_p = format_dynamic_precision(entry_p + (7.0 * risk_amt))
+                        rr_ratio = round((tp1_p - entry_p) / risk_amt, 2)
+                        return {
+                            "setup_detected": True,
+                            "direction": "LONG",
+                            "strategy": "TURTLE_SOUP_LIQUIDITY_RECLAIM",
+                            "decision": f"🐢 [{best_ob.zeiierman_rank_label}] TURTLE SOUP RECLAIM (LONG)",
+                            "block_type": "BULLISH_DEMAND_BLOCK",
+                            "state": best_ob.state.value,
+                            "zeiierman_rank": best_ob.zeiierman_rank,
+                            "zeiierman_rank_label": best_ob.zeiierman_rank_label,
+                            "entry_price": entry_p,
+                            "optimal_entry_limit": best_ob.ob_low,
+                            "mean_threshold_price": best_ob.equilibrium_50,
+                            "order_block_zone": [round(best_ob.ob_low, 6), round(best_ob.ob_high, 6)],
+                            "fvg_zone": [round(best_ob.fvg_low, 6), round(best_ob.fvg_high, 6)] if best_ob.has_fvg else None,
+                            "sl_price": sl_p,
+                            "tp1_price": tp1_p,
+                            "tp2_price": tp2_p,
+                            "tp3_price": tp3_p,
+                            "risk_reward_ratio": rr_ratio,
+                            "conviction": 84.0 + min(12.0, max(0.0, (vol_ratio - 1.0) * 10.0)),
+                            "meta_win_prob": 0.68,
+                            "retest_count": best_ob.retest_count,
+                            "mitigation_factor": 0.60,
+                            "active_block": best_ob.to_dict(),
+                            "in_order_block_zone": True,
+                            "is_touching": best_ob.is_touching,
+                            "touch_type": best_ob.touch_type,
+                            "mitigated": True,
+                            "is_testing": True,
+                            "is_nested_smc": best_ob.is_nested,
+                            "htf_poi_tf": best_ob.htf_parent_tf,
+                            "is_turtle_soup": True,
+                            "reasons": [
+                                f"Turtle Soup Liquidity Sweep Reclaim on {timeframe.upper()} {best_ob.zeiierman_rank_label}",
+                                f"Price swept stops below {best_ob.ob_low:.4f} down to {sweep_low:.4f} and reclaimed inside zone with aggression",
+                            ],
+                        }
+
                     return {
                         "setup_detected": False,
                         "reason": f"Order block depleted after {best_ob.retest_count} touches",
@@ -708,13 +764,69 @@ class InstitutionalOrderBlockEngine:
                 abs(live_p - b.ob_low)
             ))
 
-            in_bear_zone = (live_high >= best_ob.ob_low and live_low <= best_ob.ob_high)
-            has_not_broken_sl = live_high <= (best_ob.ob_high + 0.05 * atr)
+            sweep_high = max(live_high, float(df['high'].iloc[-2])) if len(df) >= 2 else live_high
+            is_valid_sweep_short = bool(best_ob.retest_count >= 3 and sweep_high > best_ob.ob_high and sweep_high <= (best_ob.ob_high + 1.20 * atr) and live_p <= best_ob.ob_high)
+            in_bear_zone = bool((live_high >= best_ob.ob_low and live_low <= best_ob.ob_high) or (is_valid_sweep_short and live_p >= (best_ob.ob_low - 0.50 * atr)))
+            has_not_broken_sl = bool(live_high <= (best_ob.ob_high + 0.05 * atr) or is_valid_sweep_short)
 
             if in_bear_zone and has_not_broken_sl:
-                # SMC-01: Order Block Mitigation Degradation
-                # Blocks with >= 3 retests are fully depleted of institutional resting liquidity
+                # SMC-01: Order Block Mitigation Degradation & Turtle Soup Liquidity Reclaims
+                # Blocks with >= 3 retests are depleted of standard resting limit liquidity.
+                # However, if price sweeps past the supply boundary and reclaims inside with aggression,
+                # convert into an asymmetric Turtle Soup Liquidity Reclaim setup!
                 if best_ob.retest_count >= 3:
+                    vol_series = df['volume'] if 'volume' in df.columns else None
+                    vol_sma20 = float(vol_series.rolling(20).mean().iloc[-1]) if vol_series is not None and len(vol_series) >= 20 else 1.0
+                    current_vol = float(vol_series.iloc[-1]) if vol_series is not None else 1.0
+                    vol_ratio = current_vol / max(1e-8, vol_sma20)
+                    is_wick_rejection = (live_high > live_low) and ((live_high - max(live_p, float(df['open'].iloc[-1]))) / max(1e-8, live_high - live_low) >= 0.25)
+
+                    if is_valid_sweep_short and (vol_ratio >= 1.25 or is_wick_rejection):
+                        entry_p = live_p
+                        sl_p = format_dynamic_precision(sweep_high + (0.05 * atr))
+                        risk_amt = max(1e-6, sl_p - entry_p)
+                        tp1_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (2.8 * risk_amt)))
+                        tp2_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (4.5 * risk_amt)))
+                        tp3_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (7.0 * risk_amt)))
+                        rr_ratio = round((entry_p - tp1_p) / risk_amt, 2)
+                        return {
+                            "setup_detected": True,
+                            "direction": "SHORT",
+                            "strategy": "TURTLE_SOUP_LIQUIDITY_RECLAIM",
+                            "decision": f"🐢 [{best_ob.zeiierman_rank_label}] TURTLE SOUP RECLAIM (SHORT)",
+                            "block_type": "BEARISH_SUPPLY_BLOCK",
+                            "state": best_ob.state.value,
+                            "zeiierman_rank": best_ob.zeiierman_rank,
+                            "zeiierman_rank_label": best_ob.zeiierman_rank_label,
+                            "entry_price": entry_p,
+                            "optimal_entry_limit": best_ob.ob_high,
+                            "mean_threshold_price": best_ob.equilibrium_50,
+                            "order_block_zone": [round(best_ob.ob_low, 6), round(best_ob.ob_high, 6)],
+                            "fvg_zone": [round(best_ob.fvg_low, 6), round(best_ob.fvg_high, 6)] if best_ob.has_fvg else None,
+                            "sl_price": sl_p,
+                            "tp1_price": tp1_p,
+                            "tp2_price": tp2_p,
+                            "tp3_price": tp3_p,
+                            "risk_reward_ratio": rr_ratio,
+                            "conviction": 84.0 + min(12.0, max(0.0, (vol_ratio - 1.0) * 10.0)),
+                            "meta_win_prob": 0.68,
+                            "retest_count": best_ob.retest_count,
+                            "mitigation_factor": 0.60,
+                            "active_block": best_ob.to_dict(),
+                            "in_order_block_zone": True,
+                            "is_touching": best_ob.is_touching,
+                            "touch_type": best_ob.touch_type,
+                            "mitigated": True,
+                            "is_testing": True,
+                            "is_nested_smc": best_ob.is_nested,
+                            "htf_poi_tf": best_ob.htf_parent_tf,
+                            "is_turtle_soup": True,
+                            "reasons": [
+                                f"Turtle Soup Liquidity Sweep Reclaim on {timeframe.upper()} {best_ob.zeiierman_rank_label}",
+                                f"Price swept stops above {best_ob.ob_high:.4f} up to {sweep_high:.4f} and reclaimed inside zone with aggression",
+                            ],
+                        }
+
                     return {
                         "setup_detected": False,
                         "reason": f"Order block depleted after {best_ob.retest_count} touches",

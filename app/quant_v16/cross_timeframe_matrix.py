@@ -162,6 +162,49 @@ class CrossTimeframeMatrixEngine:
         )
 
         if range_span > 0 and (0.25 < range_pos < 0.75) and not is_coiling_spring and not is_strong_secular_trend:
+            # Section 35 Fractal Sub-Range Decomposition:
+            # Even when 1D/macro is trapped in the middle 50% chop zone,
+            # evaluate whether 1H (or 15M) intraday horizon has formed a validated sub-range boundary.
+            sub_prof = p_1h if (p_1h is not None and getattr(p_1h, "range_high", 0) > 0 and getattr(p_1h, "range_low", 0) > 0) else p_15m
+            sub_span = max(1e-8, sub_prof.range_high - sub_prof.range_low) if (sub_prof and sub_prof.range_high > sub_prof.range_low > 0) else 0.0
+            sub_pos = ((current_price - sub_prof.range_low) / sub_span) if sub_span > 0 else 0.50
+            htf_mid = (htf_high + htf_low) / 2.0
+
+            # Sub-Range Support Mean Reversion (Intraday floor bounce within macro box)
+            if sub_span > 0 and sub_pos <= 0.25 and sub_prof.headroom_to_high_pct >= 1.5:
+                # Target TP1 capped at macro equilibrium (1D mid) to eliminate fighting macro chop
+                target_mid_cap = ((htf_mid - current_price) / max(1e-8, current_price)) * 100.0 if htf_mid > current_price else sub_prof.headroom_to_high_pct
+                sub_headroom = round(min(sub_prof.headroom_to_high_pct, max(1.0, target_mid_cap)), 2)
+                return {
+                    "archetype": InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value,
+                    "trade_permitted": True,
+                    "strategy": "SUB_RANGE_SUPPORT_MEAN_REVERSION",
+                    "dominant_direction": "LONG",
+                    "allocation_pct": 50.0,
+                    "headroom_pct": sub_headroom,
+                    "htf_range_high": htf_high,
+                    "htf_range_low": htf_low,
+                    "rationale": f"Fractal Sub-Range Support Reversion active: 1D trapped in middle chop ({price_rel_pct:.1f}%), but {sub_prof.timeframe.upper()} is at intraday support boundary ({sub_pos*100:.1f}%) with {sub_headroom:.1f}% headroom to macro equilibrium.",
+                }
+
+            # Sub-Range Resistance Mean Reversion (Intraday ceiling rejection within macro box)
+            if sub_span > 0 and sub_pos >= 0.75 and sub_prof.headroom_to_low_pct >= 1.5:
+                # Target TP1 capped at macro equilibrium (1D mid) to eliminate fighting macro chop
+                target_mid_cap = ((current_price - htf_mid) / max(1e-8, current_price)) * 100.0 if current_price > htf_mid else sub_prof.headroom_to_low_pct
+                sub_headroom = round(min(sub_prof.headroom_to_low_pct, max(1.0, target_mid_cap)), 2)
+                return {
+                    "archetype": InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value,
+                    "trade_permitted": True,
+                    "strategy": "SUB_RANGE_RESISTANCE_MEAN_REVERSION",
+                    "dominant_direction": "SHORT",
+                    "allocation_pct": 50.0,
+                    "headroom_pct": sub_headroom,
+                    "htf_range_high": htf_high,
+                    "htf_range_low": htf_low,
+                    "rationale": f"Fractal Sub-Range Resistance Reversion active: 1D trapped in middle chop ({price_rel_pct:.1f}%), but {sub_prof.timeframe.upper()} is at intraday resistance boundary ({sub_pos*100:.1f}%) with {sub_headroom:.1f}% headroom to macro equilibrium.",
+                }
+
+            # If both 1D and intraday sub-range are in the dead middle chop, strictly preserve capital
             return {
                 "archetype": InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value,
                 "trade_permitted": False,
@@ -171,7 +214,7 @@ class CrossTimeframeMatrixEngine:
                 "headroom_pct": min(headroom_to_high, headroom_to_low),
                 "htf_range_high": htf_high,
                 "htf_range_low": htf_low,
-                "rationale": f"Trapped in middle 50% chop zone of macro range box (range_pos={range_pos:.3f}, {price_rel_pct:.1f}%). Section 35 capital preservation gate strictly locked: Trades only admitted at validated boundaries (range_pos <= 0.25 or >= 0.75), spring-loaded coiling squeezes, or confirmed macro breakout expansions.",
+                "rationale": f"Trapped in middle 50% chop zone of macro range box (range_pos={range_pos:.3f}, {price_rel_pct:.1f}%) and intraday {sub_prof.timeframe.upper()} sub-range ({sub_pos*100:.1f}%). Section 35 capital preservation gate strictly locked: Trades only admitted at validated boundaries (range_pos <= 0.25 or >= 0.75), spring-loaded coiling squeezes, or confirmed macro breakout expansions.",
             }
 
 

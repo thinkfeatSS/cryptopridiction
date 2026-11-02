@@ -281,7 +281,9 @@ class EntryConfirmationEngine:
             "is_sweep_reclaim": is_sweep_reclaim,
             "is_fvg_retest": is_fvg_retest,
             "is_vwap_bounce": is_vwap_bounce,
-            "is_squeeze_expansion": is_squeeze_expansion
+            "is_squeeze_expansion": is_squeeze_expansion,
+            "is_range_resistance_rejection": bool((not is_long) and (upper_wick_ratio >= 0.30 and close_pos_in_range <= 0.60)),
+            "is_range_support_rejection": bool(is_long and (lower_wick_ratio >= 0.30 and close_pos_in_range >= 0.40))
         }
         if swept_price is not None:
             metrics["swept_price"] = swept_price
@@ -328,13 +330,15 @@ class EntryConfirmationEngine:
                 metrics["pattern"] = "SQUEEZE_EXPANSION_LONG"
                 return True, "Bullish Squeeze Expansion Momentum Eruption Confirmed", metrics
 
-            # Confirmation A: Bullish close with reasonable upper headroom
+            # Confirmation A: Lower wick absorption / Hammer / Pinbar (Supply absorbed by buyers)
+            if lower_wick_ratio >= 0.30 and close_pos_in_range >= 0.40:
+                metrics["is_range_support_rejection"] = True
+                metrics["pattern"] = "RANGE_SUPPORT_REJECTION"
+                return True, f"Lower Wick Absorption Confirmed ({lower_wick_ratio*100:.0f}% wick rejection)", metrics
+
+            # Confirmation B: Bullish close with reasonable upper headroom
             if is_green and upper_wick_ratio < 0.50 and close_pos_in_range >= 0.45:
                 return True, f"Bullish Candle Close Confirmed (Close pos {close_pos_in_range*100:.0f}%)", metrics
-
-            # Confirmation B: Lower wick absorption / Hammer / Pinbar (Supply absorbed by buyers)
-            if lower_wick_ratio >= 0.30 and close_pos_in_range >= 0.40:
-                return True, f"Lower Wick Absorption Confirmed ({lower_wick_ratio*100:.0f}% wick rejection)", metrics
 
             # If candle range is tiny relative to price (< 0.05%), treat as neutral coiling
             if (rng / current_price) < 0.0005:
@@ -390,13 +394,15 @@ class EntryConfirmationEngine:
                 metrics["pattern"] = "SQUEEZE_EXPANSION_SHORT"
                 return True, "Bearish Squeeze Expansion Downside Breakdown Confirmed", metrics
 
-            # Confirmation A: Bearish close with reasonable lower headroom
+            # Confirmation A: Upper wick rejection / Shooting Star / Inverted Hammer (Demand rejected by sellers)
+            if upper_wick_ratio >= 0.30 and close_pos_in_range <= 0.60:
+                metrics["is_range_resistance_rejection"] = True
+                metrics["pattern"] = "RANGE_RESISTANCE_REJECTION"
+                return True, f"Upper Wick Rejection Confirmed ({upper_wick_ratio*100:.0f}% wick rejection)", metrics
+
+            # Confirmation B: Bearish close with reasonable lower headroom
             if is_red and lower_wick_ratio < 0.50 and close_pos_in_range <= 0.55:
                 return True, f"Bearish Candle Close Confirmed (Close pos {close_pos_in_range*100:.0f}%)", metrics
-
-            # Confirmation B: Upper wick rejection / Shooting Star / Inverted Hammer (Demand rejected by sellers)
-            if upper_wick_ratio >= 0.30 and close_pos_in_range <= 0.60:
-                return True, f"Upper Wick Rejection Confirmed ({upper_wick_ratio*100:.0f}% wick rejection)", metrics
 
             # If candle range is tiny relative to price (< 0.05%), treat as neutral coiling
             if (rng / current_price) < 0.0005:
@@ -458,6 +464,8 @@ class EntryConfirmationEngine:
             optimal_limit = float(candle_metrics["rolling_vwap"])
         elif candle_metrics and candle_metrics.get("swept_price") and "LIQUIDITY" in strat_str:
             optimal_limit = float(candle_metrics["swept_price"])
+        elif candle_metrics and (candle_metrics.get("is_range_resistance_rejection") or candle_metrics.get("is_range_support_rejection")):
+            optimal_limit = current_price
         elif is_momentum_breakout:
             optimal_limit = current_price
         else:

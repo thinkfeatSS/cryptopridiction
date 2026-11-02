@@ -72,6 +72,8 @@ def map_canonical_strategy(
         if candle_metrics.get("is_sweep_reclaim"):
             # Highest candle priority: Liquidity sweep with reclaim is a high-confidence institutional pattern
             return StrategyArchetype.LIQUIDITY_RECLAIM_LONG.value if is_long else StrategyArchetype.LIQUIDITY_RECLAIM_SHORT.value
+        if candle_metrics.get("is_range_resistance_rejection") or candle_metrics.get("is_range_support_rejection"):
+            return StrategyArchetype.RANGE_BOUNCE_LONG.value if is_long else StrategyArchetype.RANGE_BOUNCE_SHORT.value
         if candle_metrics.get("is_fvg_retest"):
             return StrategyArchetype.FVG_RETEST_LONG.value if is_long else StrategyArchetype.FVG_RETEST_SHORT.value
         if candle_metrics.get("is_vwap_bounce"):
@@ -336,18 +338,53 @@ class SignalGenerationSystem:
             actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
         elif direction == "LONG":
-            # TP multipliers raised (Fix RC-5): 1.5→2.0, 2.5→3.5, 4.0→5.5x ATR for better R:R
-            cand_tp1 = format_dynamic_precision(exec_entry_price + (active_atr * 2.0))
-            cand_tp2 = format_dynamic_precision(exec_entry_price + (active_atr * 3.5))
-            cand_tp3 = format_dynamic_precision(exec_entry_price + (active_atr * 5.5))
+            # Phase 4C: Volatility-adjusted dynamic target scaling (BBW scale factor)
+            bbw_val = 3.0
+            if df_active is not None and len(df_active) >= 20:
+                try:
+                    c20 = df_active['close'].iloc[-20:].astype(float)
+                    ma20 = float(c20.mean())
+                    std20 = float(c20.std(ddof=0))
+                    if ma20 > 0:
+                        bbw_val = ((2.0 * std20 * 2.0) / ma20) * 100.0
+                except Exception:
+                    bbw_val = 3.0
+
+            if bbw_val <= 1.50:
+                tp_mult_scale = 0.85
+            elif bbw_val >= 4.50 and active_market_regime in ["TREND", "BULLISH", "BEARISH"]:
+                tp_mult_scale = 1.25
+            else:
+                tp_mult_scale = 1.00
+
+            cand_tp1 = format_dynamic_precision(exec_entry_price + (active_atr * 2.0 * tp_mult_scale))
+            cand_tp2 = format_dynamic_precision(exec_entry_price + (active_atr * 3.5 * tp_mult_scale))
+            cand_tp3 = format_dynamic_precision(exec_entry_price + (active_atr * 5.5 * tp_mult_scale))
             cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 1.2)))
             actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
         else: # SHORT
-            # TP multipliers raised (Fix RC-5): 1.5→2.0, 2.5→3.5, 4.0→5.5x ATR for better R:R
-            cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 2.0)))
-            cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 3.5)))
-            cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 5.5)))
+            bbw_val = 3.0
+            if df_active is not None and len(df_active) >= 20:
+                try:
+                    c20 = df_active['close'].iloc[-20:].astype(float)
+                    ma20 = float(c20.mean())
+                    std20 = float(c20.std(ddof=0))
+                    if ma20 > 0:
+                        bbw_val = ((2.0 * std20 * 2.0) / ma20) * 100.0
+                except Exception:
+                    bbw_val = 3.0
+
+            if bbw_val <= 1.50:
+                tp_mult_scale = 0.85
+            elif bbw_val >= 4.50 and active_market_regime in ["TREND", "BULLISH", "BEARISH"]:
+                tp_mult_scale = 1.25
+            else:
+                tp_mult_scale = 1.00
+
+            cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 2.0 * tp_mult_scale)))
+            cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 3.5 * tp_mult_scale)))
+            cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 5.5 * tp_mult_scale)))
             cand_sl = format_dynamic_precision(exec_entry_price + (active_atr * 1.2))
             actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
@@ -383,9 +420,12 @@ class SignalGenerationSystem:
             "canonical_strategy": canonical_strategy,
             "chop_index": float(candle_metrics.get("chop_index", 50.0) if candle_metrics else 50.0)
         }
-        # Meta-labeler hurdle raised (Fix RC-6): 0.50→0.58 for scalp/intraday, 0.55 for swing
-        # Minimum win probability for positive expectancy at 2.0x R:R after fees
-        meta_hurdle = 0.55 if horizon_label == "24H" else 0.58
+        # Phase 4B: Dynamic Meta Hurdle mathematically scaled to actual R:R
+        # Hurdle = max(0.44, min(0.65, ((1.0 + friction) / (1.0 + actual_rr)) * 1.15))
+        est_friction = (float(spread_bps) / 10000.0) * 2.0 + 0.0010
+        target_safety_margin = 1.15
+        breakeven_p = (1.0 + est_friction) / max(1.0, 1.0 + actual_rr)
+        meta_hurdle = round(max(0.44, min(0.65 if horizon_label != "24H" else 0.60, breakeven_p * target_safety_margin)), 3)
         meta_eval = self.meta_labeler.evaluate_signal(symbol, cand_meta_payload, hurdle=meta_hurdle)
 
         # ---------------------------------------------------------------------
@@ -917,13 +957,29 @@ class SignalGenerationSystem:
         bull_cnt_15m = sum(1 for t in trends_15m if t == "BULLISH")
         bear_cnt_15m = sum(1 for t in trends_15m if t == "BEARISH")
 
+        # Phase 4A Elder's Triple Screen Decoupling: Anchor = 1H, Context = 15M, Trigger = 5M
+        desk_bull_cnt_15m = sum(1 for tf in ["5m", "15m", "1h"] if trend_matrix.get(tf) == "BULLISH")
+        desk_bear_cnt_15m = sum(1 for tf in ["5m", "15m", "1h"] if trend_matrix.get(tf) == "BEARISH")
+
         is_15m_bull = (
             (len(converged_tfs_15m) >= 2 and all(trend_matrix.get(tf) == "BULLISH" for tf in converged_tfs_15m))
-            or (trend_matrix.get("15m") == "BULLISH" and trend_matrix.get("1h") != "BEARISH" and bull_cnt_15m >= 3 and bear_cnt_15m <= 1)
+            or (
+                trend_matrix.get("15m") == "BULLISH"
+                and trend_matrix.get("1h") != "BEARISH"
+                and desk_bear_cnt_15m == 0
+                and (desk_bull_cnt_15m >= 2 or bull_cnt_15m >= 3)
+                and bear_cnt_15m <= 1
+            )
         )
         is_15m_bear = (
             (len(converged_tfs_15m) >= 2 and all(trend_matrix.get(tf) == "BEARISH" for tf in converged_tfs_15m))
-            or (trend_matrix.get("15m") == "BEARISH" and trend_matrix.get("1h") != "BULLISH" and bear_cnt_15m >= 3 and bull_cnt_15m <= 1)
+            or (
+                trend_matrix.get("15m") == "BEARISH"
+                and trend_matrix.get("1h") != "BULLISH"
+                and desk_bull_cnt_15m == 0
+                and (desk_bear_cnt_15m >= 2 or bear_cnt_15m >= 3)
+                and bull_cnt_15m <= 1
+            )
         )
 
         has_valid_institutional_trigger_15m = bool(
@@ -989,13 +1045,29 @@ class SignalGenerationSystem:
         bull_cnt_1h = sum(1 for t in trends_1h if t == "BULLISH")
         bear_cnt_1h = sum(1 for t in trends_1h if t == "BEARISH")
 
+        # Phase 4A Elder's Triple Screen Decoupling: Anchor = 4H, Context = 1H, Trigger = 15M
+        desk_bull_cnt_1h = sum(1 for tf in ["15m", "1h", "4h"] if trend_matrix.get(tf) == "BULLISH")
+        desk_bear_cnt_1h = sum(1 for tf in ["15m", "1h", "4h"] if trend_matrix.get(tf) == "BEARISH")
+
         is_1h_bull = (
             (len(converged_tfs_1h) >= 3 and all(trend_matrix.get(tf) == "BULLISH" for tf in converged_tfs_1h))
-            or (trend_matrix.get("1h") == "BULLISH" and trend_matrix.get("4h") != "BEARISH" and bull_cnt_1h >= 4 and bear_cnt_1h <= 1)
+            or (
+                trend_matrix.get("1h") == "BULLISH"
+                and trend_matrix.get("4h") != "BEARISH"
+                and desk_bear_cnt_1h == 0
+                and (desk_bull_cnt_1h >= 2 or bull_cnt_1h >= 4)
+                and bear_cnt_1h <= 1
+            )
         )
         is_1h_bear = (
             (len(converged_tfs_1h) >= 3 and all(trend_matrix.get(tf) == "BEARISH" for tf in converged_tfs_1h))
-            or (trend_matrix.get("1h") == "BEARISH" and trend_matrix.get("4h") != "BULLISH" and bear_cnt_1h >= 4 and bull_cnt_1h <= 1)
+            or (
+                trend_matrix.get("1h") == "BEARISH"
+                and trend_matrix.get("4h") != "BULLISH"
+                and desk_bull_cnt_1h == 0
+                and (desk_bear_cnt_1h >= 2 or bear_cnt_1h >= 4)
+                and bull_cnt_1h <= 1
+            )
         )
 
         has_valid_institutional_trigger_1h = bool(

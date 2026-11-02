@@ -286,9 +286,16 @@ class NoTradeZoneEngine:
                 vol_24h_quote = 0.0
 
         is_sub_liquidity = (vol_24h_quote > 0 and vol_24h_quote < min_quote_vol)
+        # Dynamically adapt RVOL floor: relax during quiet sessions if verified OB trigger or trending momentum exists
+        effective_rvol_thresh = rvol_dry_thresh
+        if ob_setup and ob_setup.get("setup_detected"):
+            effective_rvol_thresh = max(0.40, rvol_dry_thresh - 0.20)
+        elif adx >= 20.0:
+            effective_rvol_thresh = max(0.45, rvol_dry_thresh - 0.15)
+
         # Low relative volume during chop/squeeze or attempted breakout
-        is_dry_breakout = (rvol < rvol_dry_thresh and any(k in decision.upper() for k in ["BREAKOUT", "PUMP", "MOMENTUM", "CHASE"]))
-        is_dry_volume_lull = (rvol < rvol_dry_thresh and (chop >= chop_squeeze_thresh or adx < adx_severe_thresh))
+        is_dry_breakout = (rvol < effective_rvol_thresh and any(k in decision.upper() for k in ["BREAKOUT", "PUMP", "MOMENTUM", "CHASE"]))
+        is_dry_volume_lull = (rvol < effective_rvol_thresh and (chop >= chop_squeeze_thresh or adx < adx_severe_thresh))
 
         if is_sub_liquidity:
             reasons.append(f"Low Liquidity (${vol_24h_quote/1e6:.1f}M < ${min_quote_vol/1e6:.1f}M USDT)")
@@ -297,13 +304,13 @@ class NoTradeZoneEngine:
                 primary_label = f"🛑 NO TRADE ZONE (LOW LIQUIDITY - {tf_label})"
                 badge = f"ILLIQUID (${vol_24h_quote/1e6:.1f}M Vol)"
         elif is_dry_breakout:
-            reasons.append(f"Dry Volume Breakout Deficit on {tf_label} (RVOL: {rvol:.2f}x < {rvol_dry_thresh}x)")
+            reasons.append(f"Dry Volume Breakout Deficit on {tf_label} (RVOL: {rvol:.2f}x < {effective_rvol_thresh}x)")
             if primary_code == NoTradeZoneReason.CLEAR:
                 primary_code = NoTradeZoneReason.DRY_VOLUME_ILLIQUID
                 primary_label = f"🛑 NO TRADE ZONE (BREAKOUT LACKS VOLUME - {tf_label})"
                 badge = f"LOW VOL-{tf_label} ({rvol:.2f}x)"
         elif is_dry_volume_lull:
-            reasons.append(f"Dry Volume Consolidation on {tf_label} (RVOL: {rvol:.2f}x < {rvol_dry_thresh}x)")
+            reasons.append(f"Dry Volume Consolidation on {tf_label} (RVOL: {rvol:.2f}x < {effective_rvol_thresh}x)")
             if primary_code == NoTradeZoneReason.CLEAR:
                 primary_code = NoTradeZoneReason.DRY_VOLUME_ILLIQUID
                 primary_label = f"🛑 NO TRADE ZONE (LOW VOLUME / CHOP - {tf_label})"
