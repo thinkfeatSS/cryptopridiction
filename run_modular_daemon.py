@@ -79,13 +79,14 @@ def get_seconds_until_next_candle(horizon: str = None, buffer_seconds: int = Non
 
 
 def main():
+    top_n = int(os.getenv("TOP_N_UNIVERSE", os.getenv("SCANNER_TOP_N", "40")))
     print("=" * 80)
     print("🚀 QUANT EDGE MULTI-HORIZON CONTINUOUS DAEMON (V16.1)")
-    print("Top 40 Assets | 9 Charts (5M..30D) | 5 Classifiers + 5 Regressors Voting")
+    print(f"Top {top_n} Assets | 9 Charts (5M..30D) | 5 Classifiers + 5 Regressors Voting")
     print("Decoupled Paper Trading Bot Active | BTC Predictive Market Beta Shield")
     print("=" * 80)
 
-    engine = UnifiedCryptoEngine()
+    engine = UnifiedCryptoEngine(top_n=top_n)
     stop_event = threading.Event()
 
     def _sig_handler(signum, frame):

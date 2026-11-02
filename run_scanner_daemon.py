@@ -169,9 +169,10 @@ def start_heartbeat_worker(engine, heartbeat_secs: int = 4, stop_event: threadin
 
 
 def run_daemon():
+    top_n = int(os.getenv("TOP_N_UNIVERSE", os.getenv("SCANNER_TOP_N", "40")))
     use_modular = os.getenv("USE_MODULAR_ENGINE", "true").lower() in ("true", "1", "yes")
     if use_modular:
-        print("[SCANNER DAEMON 🚀] Launching Modular Multi-Horizon V16.1 Engine (Top 40 Assets x 9 Charts)...")
+        print(f"[SCANNER DAEMON 🚀] Launching Modular Multi-Horizon V16.1 Engine (Top {top_n} Assets x 9 Charts)...")
         from run_modular_daemon import main as run_modular_main
         run_modular_main()
         return
