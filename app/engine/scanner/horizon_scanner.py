@@ -18,8 +18,9 @@ class MultiHorizonScanner:
     - Computes real-time BTC Market Beta Shield.
     """
 
-    def __init__(self, max_asset_workers: int = 12):
+    def __init__(self, max_asset_workers: int = 12, top_n: Optional[int] = None):
         self.max_asset_workers = max_asset_workers
+        self.top_n = top_n or TOP_N_UNIVERSE
         self.loader = MultiHorizonDataLoader()
         self.btc_shield = BtcPredictiveMarketShield()
         self.last_universe: List[Dict[str, Any]] = []
@@ -32,10 +33,10 @@ class MultiHorizonScanner:
             dict containing btc_shield, scanned_assets (each with 9 timeframes), and universe metadata.
         """
         t0 = time.time()
-        print(f"[SCANNER 🛰️] Discovering Top {TOP_N_UNIVERSE} High-Volume Non-Meme Universe...")
+        print(f"[SCANNER 🛰️] Discovering Top {self.top_n} High-Volume Non-Meme Universe...")
 
-        # 1. Discover Top 40 clean institutional pairs
-        universe_assets = UniverseFilter.get_top_40_universe(self.loader.session)
+        # 1. Discover Top clean institutional pairs
+        universe_assets = UniverseFilter.get_top_40_universe(self.loader.session, top_n=self.top_n)
         self.last_universe = universe_assets
 
         # 2. Preload bulk tickers & funding rates in 1 single call

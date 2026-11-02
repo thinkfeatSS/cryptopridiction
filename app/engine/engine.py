@@ -23,12 +23,12 @@ class UnifiedCryptoEngine:
     3. PaperTradingBot: Independent 24/7 Tick Daemon & Multi-Desk Risk Parity
     """
 
-    def __init__(self, export_dir: str = None):
+    def __init__(self, export_dir: str = None, top_n: Optional[int] = None):
         self.export_dir = export_dir or EXPORT_DIR
         os.makedirs(self.export_dir, exist_ok=True)
 
         print("[ENGINE 🚀] Initializing Unified 9-Horizon Quantitative Engine...")
-        self.scanner = MultiHorizonScanner()
+        self.scanner = MultiHorizonScanner(top_n=top_n)
         self.data_loader = self.scanner.loader
         self.signal_system = SignalGenerationSystem()
         self.paper_bot = PaperTradingBot(ledger_file=os.path.join(self.export_dir, "paper_trading_ledger.json"))

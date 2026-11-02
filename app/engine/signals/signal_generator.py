@@ -238,25 +238,8 @@ class SignalGenerationSystem:
         # 1. Macro No Trade Zone Check
         is_macro_ntz, macro_ntz_reason = self.is_macro_no_trade_zone(btc_shield_state)
 
-        # 2. Asset-Level No Trade Zone Check on active timeframe
-        df_active = dfs_9.get(tf_key) if dfs_9 else None
-        ntz_eval = no_trade_zone_engine.evaluate_asset_ntz(
-            df=df_active,
-            current_price=current_price,
-            anchor_tf=tf_key,
-            btc_shield_info=btc_shield_state,
-            alignment_score=float(alignment_score),
-            meta_win_prob=float(horizon_prediction.get("consensus_probability", 0.55)) if horizon_prediction else 0.55,
-            direction=direction,
-            decision=direction
-        )
-        is_asset_ntz = ntz_eval.get("is_ntz", False)
-        is_ntz_active = is_macro_ntz or is_asset_ntz
-        ntz_reason = macro_ntz_reason if is_macro_ntz else (
-            ntz_eval.get("reasons", ["Asset in No Trade Zone"])[0] if ntz_eval.get("reasons") else "Asset in No Trade Zone"
-        )
-
         # Dynamic ATR for this specific horizon
+        df_active = dfs_9.get(tf_key) if dfs_9 else None
         if df_active is not None and len(df_active) >= 14:
             active_atr = float(np.mean(np.maximum(
                 df_active["high"].values[-14:] - df_active["low"].values[-14:], 1e-10
@@ -295,6 +278,26 @@ class SignalGenerationSystem:
         is_shadow_eligible, shadow_reason = (False, None)
         if not is_strat_allowed and hasattr(self.strategy_registry, "is_strategy_shadow_eligible"):
             is_shadow_eligible, shadow_reason = self.strategy_registry.is_strategy_shadow_eligible(canonical_strategy, current_regime=active_market_regime)
+
+        # ---------------------------------------------------------------------
+        # 2b. Asset-Level No Trade Zone Check on active timeframe with strategy context
+        # ---------------------------------------------------------------------
+        ntz_eval = no_trade_zone_engine.evaluate_asset_ntz(
+            df=df_active,
+            current_price=current_price,
+            anchor_tf=tf_key,
+            btc_shield_info=btc_shield_state,
+            ob_setup=order_block_setup,
+            alignment_score=float(alignment_score),
+            meta_win_prob=float(horizon_prediction.get("consensus_probability", 0.55)) if horizon_prediction else 0.55,
+            direction=direction,
+            decision=canonical_strategy
+        )
+        is_asset_ntz = ntz_eval.get("is_ntz", False)
+        is_ntz_active = is_macro_ntz or is_asset_ntz
+        ntz_reason = macro_ntz_reason if is_macro_ntz else (
+            ntz_eval.get("reasons", ["Asset in No Trade Zone"])[0] if ntz_eval.get("reasons") else "Asset in No Trade Zone"
+        )
 
         # ---------------------------------------------------------------------
         # 3. Determine optimal entry limit and execution entry price
@@ -961,7 +964,7 @@ class SignalGenerationSystem:
         is_middle_chop_veto = bool(
             matrix_eval.get("strategy") == "CAPITAL_PRESERVATION_MIDDLE_CHOP_VETO"
         )
-        matrix_trade_permitted = bool(matrix_eval.get("trade_permitted", True)) and not is_middle_chop_veto
+        matrix_trade_permitted = bool(matrix_eval.get("trade_permitted", True))
 
         # -----------------------------------------------------------------
         # 1. 15M Scalp Gate (Empirical accumulation required: 15M [3.75h] & 5M [1.25h])
@@ -1005,12 +1008,12 @@ class SignalGenerationSystem:
         )
 
         has_valid_institutional_trigger_15m = bool(
-            (has_ob_15m and ob_setup_15m.get("zeiierman_rank", 99) <= 2) or has_smc_15m
+            (has_ob_15m and ob_setup_15m.get("zeiierman_rank", 99) <= 3) or has_smc_15m
         )
 
         q_15m_qualified = bool(
             not cold_start_tfs_15m and (
-                (not is_middle_chop_veto and matrix_trade_permitted and (
+                ((not is_middle_chop_veto or (desk_bull_cnt_15m >= 2 or desk_bear_cnt_15m >= 2)) and matrix_trade_permitted and (
                     is_15m_bull or is_15m_bear or is_coiling_breakout or is_range_rotation or is_breakout_expansion
                 )) or has_valid_institutional_trigger_15m
             )
@@ -1093,12 +1096,12 @@ class SignalGenerationSystem:
         )
 
         has_valid_institutional_trigger_1h = bool(
-            (has_ob_1h and ob_setup_1h.get("zeiierman_rank", 99) <= 2) or has_smc_1h
+            (has_ob_1h and ob_setup_1h.get("zeiierman_rank", 99) <= 3) or has_smc_1h
         )
 
         q_1h_qualified = bool(
             not cold_start_tfs_1h and (
-                (not is_middle_chop_veto and matrix_trade_permitted and (
+                ((not is_middle_chop_veto or (desk_bull_cnt_1h >= 2 or desk_bear_cnt_1h >= 2)) and matrix_trade_permitted and (
                     is_1h_bull or is_1h_bear or is_coiling_breakout or is_breakout_expansion or (is_range_rotation and matrix_eval.get("dominant_direction") in ["LONG", "SHORT"])
                 )) or has_valid_institutional_trigger_1h
             )
@@ -1165,7 +1168,7 @@ class SignalGenerationSystem:
         )
 
         has_valid_institutional_trigger_24h = bool(
-            (has_ob_24h and ob_setup_24h.get("zeiierman_rank", 99) <= 2) or has_smc_24h
+            (has_ob_24h and ob_setup_24h.get("zeiierman_rank", 99) <= 3) or has_smc_24h
         )
 
         q_24h_qualified = bool(

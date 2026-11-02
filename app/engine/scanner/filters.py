@@ -91,13 +91,14 @@ class UniverseFilter:
         return True
 
     @classmethod
-    def get_top_40_universe(cls, session: Optional[requests.Session] = None) -> List[Dict[str, Any]]:
+    def get_top_40_universe(cls, session: Optional[requests.Session] = None, top_n: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Queries live Binance 24h market stats and returns the Top 40 high-volume
+        Queries live Binance 24h market stats and returns the Top high-volume
         institutional crypto pairs with meme, synthetic, and delisted assets strictly excluded.
         Guarantees pairs are actively trading on Binance.
         """
         s = session or requests.Session()
+        limit = int(top_n) if top_n is not None else TOP_N_UNIVERSE
 
         # 0. Query Binance ExchangeInfo to verify actively trading spot symbols
         active_spot_symbols = set()
@@ -241,7 +242,7 @@ class UniverseFilter:
                 "JUP/USDT", "ONDO/USDT", "HBAR/USDT", "ENA/USDT", "PENDLE/USDT", "ALGO/USDT",
                 "QNT/USDT", "IMX/USDT", "KAS/USDT", "ZEC/USDT"
             ]
-            return [{"symbol": sym, "quote_volume_usd": 1e8, "price": 0.0} for sym in fallback[:TOP_N_UNIVERSE]]
+            return [{"symbol": sym, "quote_volume_usd": 1e8, "price": 0.0} for sym in fallback[:limit]]
 
         tier1_assets = []
         tier2_assets = []
@@ -303,4 +304,4 @@ class UniverseFilter:
         # Dynamic volume backfill: If market consolidation causes < 40 pairs to meet $10M,
         # seamlessly backfill remaining slots from top Tier-2 clean pairs to guarantee exactly 40 assets
         combined = tier1_assets + tier2_assets
-        return combined[:TOP_N_UNIVERSE]
+        return combined[:limit]

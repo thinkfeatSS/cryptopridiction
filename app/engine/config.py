@@ -38,7 +38,7 @@ TIMEFRAME_META = {
 }
 
 # Universe & Filtering Specifications
-TOP_N_UNIVERSE = int(os.getenv("TOP_N_UNIVERSE", "40")) # Exactly 40 top high-volume pairs
+TOP_N_UNIVERSE = int(os.getenv("TOP_N_UNIVERSE", os.getenv("SCANNER_TOP_N", "40"))) # Dynamically configured universe size
 MIN_24H_VOLUME_USD = float(os.getenv("MIN_24H_VOLUME_USD", "10000000.0")) # $10M min 24h institutional volume
 
 # Strict Meme & Shitcoin Registry (Zero Memes for Predictions)

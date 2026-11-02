@@ -253,8 +253,25 @@ class NoTradeZoneEngine:
         is_severe_chop = (chop >= chop_severe_thresh and adx < adx_severe_thresh)
         # Condition B: High Chop + weak ADX + tight BBW squeeze
         is_coiled_squeeze = (chop >= chop_squeeze_thresh and adx < adx_squeeze_thresh and bbw < bbw_squeeze_thresh)
-        # Condition C: Middle 50% Range Box Chop (25% < range_pos < 75%) with non-trending ADX
-        is_middle_chop = (25.0 < range_pos < 75.0) and (adx < adx_severe_thresh or chop >= chop_squeeze_thresh) and (not any(k in str(decision).upper() for k in ["BREAKOUT", "EXPANSION"]))
+
+        # Institutional Exemption: Order block touches, Range rotations, Liquidity sweeps, FVG retests, and VWAP bounces
+        # actively trade structural reaction levels with positive edge and should not be suppressed as generic chop.
+        has_fresh_ob = bool(ob_setup and ob_setup.get("setup_detected"))
+        exempt_strategies = [
+            "BREAKOUT", "EXPANSION", "ORDER_BLOCK", "BREAKER",
+            "RANGE_BOUNCE", "RANGE_ROTATION", "RANGE_SUPPORT", "RANGE_RESISTANCE",
+            "SUB_RANGE", "MEAN_REVERSION", "SWEEP", "RECLAIM", "FVG", "VWAP",
+            "DIP_BUY", "RALLY_FADE"
+        ]
+        decision_str = str(decision).upper() if decision else ""
+        is_exempt_strategy = has_fresh_ob or any(k in decision_str for k in exempt_strategies)
+
+        # Condition C: Middle 50% Range Box Chop (25% < range_pos < 75%) with non-trending ADX (exempting institutional setups)
+        is_middle_chop = (
+            (not is_exempt_strategy)
+            and (25.0 < range_pos < 75.0)
+            and (adx < adx_severe_thresh or chop >= chop_squeeze_thresh)
+        )
 
         if is_severe_chop:
             reasons.append(f"Severe Chop on {tf_label} (CHOP: {chop:.1f} >= {chop_severe_thresh}, ADX: {adx:.1f} < {adx_severe_thresh})")
@@ -326,7 +343,7 @@ class NoTradeZoneEngine:
         # Exception: don't block if there is a verified institutional Order Block retest at the current price
         has_fresh_ob = bool(ob_setup and ob_setup.get("setup_detected"))
 
-        if is_range_regime and is_mid_range and not has_fresh_ob:
+        if is_range_regime and is_mid_range and not is_exempt_strategy:
             reasons.append(f"Dead Mid-Range Position ({range_pos:.1f}% inside Bollinger Band)")
             if primary_code == NoTradeZoneReason.CLEAR:
                 primary_code = NoTradeZoneReason.MID_RANGE_CHOP
