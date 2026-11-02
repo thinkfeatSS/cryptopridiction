@@ -1735,6 +1735,8 @@ class FundamentalIntelligenceService:
         # Robust symbol extraction: cleans 'BTC/USDT', 'BTC/USDT:USDT', 'BTCUSDT'
         raw_part = symbol.split("/")[0].split(":")[0].strip().upper()
         clean_base = raw_part.replace("USDT", "")
+        if clean_base.startswith("1000") and len(clean_base) > 4:
+            clean_base = clean_base[4:]
 
         # 1. Macro Sentiment (Fear & Greed)
         fg = self.fetch_fear_and_greed()
@@ -1798,6 +1800,10 @@ class FundamentalIntelligenceService:
             # Check if any article triggers high-severity black swan alerts (hack, exploit, lawsuit, delist)
             has_severe_negative_news = any(
                 n.get("is_high_severity") or (n.get("sentiment_score", 0.0) <= -0.40)
+                for n in relevant_news
+            )
+            has_severe_positive_news = any(
+                (float(n.get("sentiment_score", 0.0)) >= 0.50)
                 for n in relevant_news
             )
 
@@ -1907,6 +1913,7 @@ class FundamentalIntelligenceService:
             "conviction_delta": conviction_delta,
             "sizing_multiplier": sizing_multiplier,
             "has_severe_negative_news": has_severe_negative_news,
+            "has_severe_positive_news": bool(locals().get("has_severe_positive_news", False)),
             "fear_and_greed": {
                 "score": fg_score,
                 "classification": fg.get("classification", "Neutral"),

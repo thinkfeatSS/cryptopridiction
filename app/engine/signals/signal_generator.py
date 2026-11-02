@@ -232,7 +232,8 @@ class SignalGenerationSystem:
             direction = ob_dir
 
         alt_longs_allowed = btc_shield_state.get("altcoin_longs_allowed", True)
-        is_vetoed = (direction == "LONG" and not alt_longs_allowed)
+        alt_shorts_allowed = btc_shield_state.get("altcoin_shorts_allowed", True)
+        is_vetoed = (direction == "LONG" and not alt_longs_allowed) or (direction == "SHORT" and not alt_shorts_allowed)
 
         # 1. Macro No Trade Zone Check
         is_macro_ntz, macro_ntz_reason = self.is_macro_no_trade_zone(btc_shield_state)
@@ -393,19 +394,26 @@ class SignalGenerationSystem:
             cand_rr = f"1:{actual_rr:.1f}"
 
         if arch_type == InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value:
-            # Cap TP1, TP2, and TP3 at the HTF Range Extreme to prevent running into iron wall
+            # Cap TP1, TP2, and TP3 dynamically within the HTF Range Extreme to prevent running into iron wall
+            # while preserving strictly monotonic target spacing: entry < TP1 < TP2 < TP3 <= htf_high
             if direction == "LONG" and archetype_info.get("htf_range_high"):
                 htf_high = float(archetype_info["htf_range_high"])
                 if htf_high > exec_entry_price:
-                    cand_tp1 = min(cand_tp1, format_dynamic_precision(htf_high))
-                    cand_tp2 = min(cand_tp2, format_dynamic_precision(htf_high))
+                    avail_span = htf_high - exec_entry_price
                     cand_tp3 = min(cand_tp3, format_dynamic_precision(htf_high))
+                    cand_tp2 = min(cand_tp2, format_dynamic_precision(exec_entry_price + (avail_span * 0.85)))
+                    cand_tp1 = min(cand_tp1, format_dynamic_precision(exec_entry_price + (avail_span * 0.60)))
+                    actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
+                    cand_rr = f"1:{actual_rr:.1f}"
             elif direction == "SHORT" and archetype_info.get("htf_range_low"):
                 htf_low = float(archetype_info["htf_range_low"])
                 if htf_low < exec_entry_price:
-                    cand_tp1 = max(cand_tp1, format_dynamic_precision(htf_low))
-                    cand_tp2 = max(cand_tp2, format_dynamic_precision(htf_low))
+                    avail_span = exec_entry_price - htf_low
                     cand_tp3 = max(cand_tp3, format_dynamic_precision(htf_low))
+                    cand_tp2 = max(cand_tp2, format_dynamic_precision(exec_entry_price - (avail_span * 0.85)))
+                    cand_tp1 = max(cand_tp1, format_dynamic_precision(exec_entry_price - (avail_span * 0.60)))
+                    actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
+                    cand_rr = f"1:{actual_rr:.1f}"
 
         # Evaluate setup against this coin's dedicated Meta-Labeler
         cand_meta_payload = {
@@ -498,6 +506,7 @@ class SignalGenerationSystem:
             news_sent = fund_matrix.get("news_sentiment", {})
             macro_ev = fund_matrix.get("macro_economic_event", {})
             has_severe_negative_news = bool(fund_matrix.get("has_severe_negative_news", False) or news_sent.get("has_severe_negative_news", False))
+            has_severe_positive_news = bool(fund_matrix.get("has_severe_positive_news", False) or (float(news_sent.get("score", 0.0)) >= 0.50))
             is_sell_the_news = bool(cat_ev.get("is_sell_the_news_danger_zone", False))
             is_pre_event = bool(cat_ev.get("is_pre_event_runup", False))
             news_score = float(news_sent.get("score", 0.0))
@@ -522,6 +531,14 @@ class SignalGenerationSystem:
                 # If within 12h of catalyst execution, sell-the-news danger is high
                 is_news_vetoed = True
                 news_veto_reason = f"⚠️ Sell-The-News Danger Zone: <12h to {cat_title[:50]}"
+        elif direction == "SHORT":
+            if has_severe_positive_news or news_score >= 0.50:
+                is_news_vetoed = True
+                news_veto_reason = f"🚨 Hyper-Bullish News Sentinel ({news_label}): {news_headline[:60]}"
+            elif is_pre_event:
+                # If in pre-event catalyst accumulation window, shorting is dangerous
+                is_news_vetoed = True
+                news_veto_reason = f"⚠️ Pre-Catalyst Accumulation Runup: <10d to {cat_title[:50]}"
 
         if is_ntz_active:
             status = "HOLD_VETOED_BY_NO_TRADE_ZONE"

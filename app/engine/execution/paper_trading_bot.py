@@ -326,6 +326,22 @@ class PaperTradingBot:
             if active_desk_count >= max_slots:
                 return False
 
+            # Cross-Desk Archetype Concentration Guard (Fix 5.1): Max 2 concurrent positions per archetype family
+            strat_key = str(signal.get("canonical_strategy") or signal.get("strategy") or "").upper()
+            archetype_family = "OTHER"
+            for fam in ["BREAKOUT", "BREAKDOWN", "MOMENTUM", "ORDER_BLOCK", "BREAKER", "RANGE_BOUNCE", "DIP_BUY", "RALLY_FADE", "LIQUIDITY"]:
+                if fam in strat_key:
+                    archetype_family = fam
+                    break
+
+            if archetype_family != "OTHER":
+                same_fam_count = sum(
+                    1 for p in self.data.get("open_positions", [])
+                    if archetype_family in str(p.get("strategy", "") or p.get("canonical_strategy", "")).upper()
+                )
+                if same_fam_count >= 2:
+                    return False
+
             # 5. Price Invariants Validation
             entry_p = float(signal.get("entry_price", signal.get("current_price", 0.0)))
             tp1_p = float(signal.get("tp1_price", 0.0))
@@ -988,7 +1004,12 @@ class PaperTradingBot:
                             exit_reason = "STOP_LOSS_BREAKEVEN"
                         else:
                             exit_reason = "STOP_LOSS_BREAKEVEN" if pos.get("is_breakeven_locked") else "STOP_LOSS"
-                        exit_p = pos["sl_price"]
+                        # Account for physical candle gap penetration / gap slippage:
+                        sl_target = float(pos["sl_price"])
+                        if direction == "LONG":
+                            exit_p = min(sl_target, float(curr_p))
+                        else:
+                            exit_p = max(sl_target, float(curr_p))
                     else:
                         exit_reason = f"HORIZON_EXPIRY ({dur_str})"
                         exit_p = curr_p

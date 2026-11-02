@@ -22,6 +22,7 @@ class BtcPredictiveMarketShield:
             "regime_label": "🟢 MARKET STABLE / OPPORTUNITY NORMAL",
             "reason": "Bitcoin trading cleanly above key structural moving averages.",
             "altcoin_longs_allowed": True,
+            "altcoin_shorts_allowed": True,
             "btc_price": 0.0,
             "predicted_trend": "CONSOLIDATION",
             "trend_probability": 65.0,
@@ -201,6 +202,7 @@ class BtcPredictiveMarketShield:
             regime_label = "🔴 BEAR TREND (SHORT ALPHA AUTHORIZED)"
             reason = f"BTC confirmed macro bear trend below 1H EMA20/50 (ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}). Short strategies authorized with Section 29 1.00x risk multiplier."
             alt_longs = False
+            alt_shorts = True
             alt_posture = "BEAR_TREND_SHORT_ALPHA"
             shield_active = False
             is_ntz_active = False
@@ -213,6 +215,7 @@ class BtcPredictiveMarketShield:
             regime_label = "🟢 BULL TREND (BULLISH ALPHA ACTIVE)"
             reason = f"BTC confirmed macro bull trend above 1H EMA20/50 (ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}). Long continuation setups active."
             alt_longs = True
+            alt_shorts = False
             alt_posture = "AGGRESSIVE_MOMENTUM_LONGS"
             shield_active = False
             is_ntz_active = False
@@ -226,6 +229,7 @@ class BtcPredictiveMarketShield:
             regime_label = "🚀 MOMENTUM BREAKOUT ACTIVE" if is_bull else "🔻 BREAKDOWN EXPANSION ACTIVE"
             reason = f"BTC high-momentum breakout detected (ADX: {adx_val:.1f})."
             alt_longs = is_bull
+            alt_shorts = not is_bull
             alt_posture = "AGGRESSIVE_BREAKOUT" if is_bull else "BREAKDOWN_SHORT_BIAS"
             shield_active = False
             is_ntz_active = False
@@ -283,6 +287,7 @@ class BtcPredictiveMarketShield:
             "regime_label": regime_label,
             "reason": reason,
             "altcoin_longs_allowed": alt_longs,
+            "altcoin_shorts_allowed": locals().get("alt_shorts", True),
             "is_ntz_active": is_ntz_active,
             "btc_price": c_now,
             "btc_15m_change_pct": round(ret_15m * 100.0, 2),

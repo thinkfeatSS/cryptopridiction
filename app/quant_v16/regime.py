@@ -469,6 +469,7 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
     if v16_reg == "BEAR_TREND":
         shield["regime_label"] = "🔴 BEAR TREND (SHORT ALPHA AUTHORIZED)"
         shield["altcoin_longs_allowed"] = False
+        shield["altcoin_shorts_allowed"] = True
         shield["altcoin_posture"] = "BEAR_TREND_SHORT_ALPHA"
         shield["reason"] = f"BTC confirmed macro bear trend below 1H EMA20/50 (ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}). Short strategies authorized with Section 29 {shield['sizing_multiplier']:.2f}x risk multiplier."
         shield["is_ntz_active"] = False
@@ -477,6 +478,7 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
     elif v16_reg == "BULL_TREND":
         shield["regime_label"] = "🟢 BULL TREND (BULLISH ALPHA ACTIVE)"
         shield["altcoin_longs_allowed"] = True
+        shield["altcoin_shorts_allowed"] = False
         shield["altcoin_posture"] = "AGGRESSIVE_MOMENTUM_LONGS"
         shield["reason"] = f"BTC confirmed macro bull trend above 1H EMA20/50 (ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}). Long continuation setups active with Section 29 {shield['sizing_multiplier']:.2f}x sizing."
         shield["is_ntz_active"] = False

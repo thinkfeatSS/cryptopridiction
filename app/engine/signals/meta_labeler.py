@@ -280,8 +280,10 @@ class CoinSpecificMetaLabeler:
         except Exception:
             rank_val = 1.0
 
+        from app.engine.config import MEME_AND_SHITCOIN_BASES
         sym_str = str(symbol or "").upper()
-        is_meme = 1.0 if any(m in sym_str for m in ["SHIB", "PEPE", "BONK", "DOGE", "FLOKI", "MEME", "WIF", "BOME"]) else 0.0
+        clean_base_sym = sym_str.split("/")[0].split(":")[0].replace("1000", "").strip()
+        is_meme = 1.0 if (clean_base_sym in MEME_AND_SHITCOIN_BASES or any(m in clean_base_sym for m in ["SHIB", "PEPE", "BONK", "DOGE", "FLOKI", "MEME", "WIF", "BOME"])) else 0.0
 
         feat_dict = {
             'conviction_pct': conviction,

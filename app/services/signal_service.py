@@ -2118,7 +2118,7 @@ class SignalService:
             pass
         return _get_or_compute_high_markup_signals()
 
-HORIZON_ORDER_LIST = ["15M", "30M", "1H", "4H", "24H", "4D", "7D", "15D", "30D"]
+HORIZON_ORDER_LIST = ["5M", "15M", "1H", "4H", "12H", "24H", "7D", "15D", "1M", "30D", "30M", "4D"]
 
 def _compute_dominant_signals_per_coin(signals_list: list) -> list:
     """Groups all signals by coin symbol and selects the single highest-conviction dominant signal per coin with lower-horizon leading flow."""
@@ -2134,8 +2134,9 @@ def _compute_dominant_signals_per_coin(signals_list: list) -> list:
 
     dominant_list = []
     horizon_exec_weights = {
-        "15M": 1.10, "30M": 1.15, "1H": 1.35, "4H": 1.30,
-        "24H": 1.25, "4D": 1.10, "7D": 1.05, "15D": 1.0, "30D": 0.95
+        "5M": 1.05, "15M": 1.10, "1H": 1.35, "4H": 1.30, "12H": 1.28,
+        "24H": 1.25, "7D": 1.05, "15D": 1.0, "1M": 0.95, "30D": 0.95,
+        "30M": 1.15, "4D": 1.10
     }
 
     for sym, sigs in by_coin.items():
@@ -2243,7 +2244,7 @@ def _compute_dominant_signals_per_coin(signals_list: list) -> list:
             is_s_long = s_dir in ['LONG', 'BULLISH']
             is_fav_long = favored_dir in ['LONG', 'BULLISH']
             h_idx = HORIZON_ORDER_LIST.index(ht) if ht in HORIZON_ORDER_LIST else 0
-            is_lower_leading = (h_idx <= win_idx) or (ht in ['15M', '30M', '1H'])
+            is_lower_leading = (h_idx <= win_idx) or (ht in ['5M', '15M', '30M', '1H'])
 
             prob = float(s.get('meta_win_prob', s.get('meta_probability', 0.70)))
             conv = float(s.get('conviction', 60.0))
@@ -2380,7 +2381,7 @@ def _evaluate_signal_favorability(sig: dict, live_p: float, coin_forecast_data: 
                 "status_badge": flow_badge,
                 "probability": round(prob, 2),
                 "conviction": round(conv, 1),
-                "is_lower_leading": h_tag in ['15M', '30M', '1H']
+                "is_lower_leading": h_tag in ['5M', '15M', '30M', '1H']
             })
 
     pnl_pct = float(sig.get('live_pnl_pct', 0.0))

@@ -92,7 +92,7 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
             
             # Horizon encoding aligned with institutional market structure (15M=Scalp, 1H/4H=Swing/Intraday, 24H+=Macro)
             horizon_str = str(row.get('horizon', '')).lower()
-            is_scalp = 1.0 if any(k in horizon_str for k in ["scalp", "15m", "30m"]) else 0.0
+            is_scalp = 1.0 if any(k in horizon_str for k in ["scalp", "5m", "15m", "30m"]) else 0.0
             is_swing = 1.0 if any(k in horizon_str for k in ["swing", "intraday", "1h", "4h", "12h"]) else 0.0
             is_macro = 1.0 if any(k in horizon_str for k in ["macro", "24h", "1d", "2d", "3d", "4d", "7d", "15d", "30d", "week", "month", "48h", "72h"]) else 0.0
             
@@ -144,8 +144,10 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
 
             clean_rr = float(np.clip(round(tp_pct / max(0.05, sl_pct), 2), 0.1, 50.0))
 
+            from app.engine.config import MEME_AND_SHITCOIN_BASES
             sym_str = str(row.get('symbol', '')).upper()
-            is_meme = 1.0 if any(m in sym_str for m in ["SHIB", "PEPE", "BONK", "DOGE", "FLOKI", "MEME", "WIF", "BOME"]) else 0.0
+            clean_base_sym = sym_str.split("/")[0].split(":")[0].replace("1000", "").strip()
+            is_meme = 1.0 if (clean_base_sym in MEME_AND_SHITCOIN_BASES or any(m in clean_base_sym for m in ["SHIB", "PEPE", "BONK", "DOGE", "FLOKI", "MEME", "WIF", "BOME"])) else 0.0
 
             feat_dict = {
                 'conviction_pct': conviction,

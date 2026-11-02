@@ -483,8 +483,10 @@ class EntryConfirmationEngine:
         # Distance from optimal entry limit
         dist_pct = (abs(current_price - optimal_limit) / current_price) * 100.0
 
-        # Volatility-scaled dynamic chase tolerance (bounded between 0.35% and 1.25%)
-        dynamic_chase_pct = max(float(chase_threshold_pct or 0.40), min(1.25, (active_atr / max(1e-8, current_price)) * 100.0 * 0.30))
+        # Volatility-scaled dynamic chase tolerance (bounded between 0.20% and 1.25%)
+        atr_pct = (active_atr / max(1e-8, current_price)) * 100.0 if active_atr > 0 else 0.50
+        base_chase = float(chase_threshold_pct) if chase_threshold_pct is not None else 0.40
+        dynamic_chase_pct = float(np.clip(max(0.20, min(base_chase, atr_pct * 0.35)), 0.20, 1.25))
 
         # Check if price has run away beyond chase threshold
         is_chasing = False

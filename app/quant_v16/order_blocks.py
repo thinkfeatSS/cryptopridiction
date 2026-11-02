@@ -1064,6 +1064,7 @@ class InstitutionalOrderBlockEngine:
         htf_tfs = ["4h", "12h", "1d", "1w", "15d", "1M"]
         ltf_tfs = ["5m", "15m", "1h"]
 
+        upgraded_tfs = set()
         for ltf in ltf_tfs:
             for l_ob in horizon_blocks.get(ltf, []):
                 for htf in htf_tfs:
@@ -1078,16 +1079,20 @@ class InstitutionalOrderBlockEngine:
                                 l_ob.zeiierman_rank_label = f"💎 ZEIIERMAN RANK 1 NESTED SMC [{htf.upper()} POI + {ltf.upper()} TRIGGER]"
                                 l_ob.confluence_score = min(0.99, l_ob.confluence_score + 0.15)
 
-                                # If setup was generated for this timeframe, upgrade it
-                                if ltf in horizon_setups and horizon_setups[ltf].get("setup_detected"):
+                                # If setup was generated for this timeframe, upgrade it once (deduplicated against compounding)
+                                if ltf in horizon_setups and horizon_setups[ltf].get("setup_detected") and ltf not in upgraded_tfs:
                                     s = horizon_setups[ltf]
                                     s["is_nested_smc"] = True
                                     s["htf_poi_tf"] = htf
                                     s["zeiierman_rank"] = 1
                                     s["zeiierman_rank_label"] = l_ob.zeiierman_rank_label
                                     s["decision"] = f"🎯 ZEIIERMAN RANK 1 NESTED SMC ORDER-BLOCK ({'LONG' if l_ob.block_type == OrderBlockType.BULLISH else 'SHORT'})"
-                                    s["conviction"] = min(98.5, max(90.0, float(s.get("conviction", 84.0)) + 6.0))
-                                    s["meta_win_prob"] = min(0.95, max(0.86, float(s.get("meta_win_prob", 0.76)) + 0.10))
+                                    s["conviction"] = min(95.0, float(s.get("conviction", 84.0)) + 6.0)
+                                    s["meta_win_prob"] = min(0.88, float(s.get("meta_win_prob", 0.76)) + 0.08)
+                                    upgraded_tfs.add(ltf)
+                                break
+                    if l_ob.is_nested:
+                        break
 
         # 3. Identify Nearest Demand, Supply, and Breaker levels
         nearest_demand_lvl = None
