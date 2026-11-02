@@ -185,28 +185,27 @@ class TestNewsAnalysisAndSignals(unittest.TestCase):
         }
 
         btc_shield = {"altcoin_longs_allowed": True, "status_code": "NORMAL", "is_ntz_active": False, "v16_regime": "BULL_TREND"}
-        from unittest.mock import MagicMock
-        sig_gen.meta_labeler.evaluate_signal = MagicMock(return_value={
+        from unittest.mock import patch
+        with patch.object(sig_gen.meta_labeler, "evaluate_signal", return_value={
             "passed_meta_gate": True,
             "win_probability": 0.85,
             "win_probability_pct": 85.0,
             "meta_verdict": "APPROVED",
             "model_type": "PER_COIN_DEDICATED",
             "sample_size": 100
-        })
-
-        sig = sig_gen._build_single_horizon_signal(
-            symbol="ETH/USDT",
-            horizon_label="15M",
-            tf_key="15m",
-            direction="LONG",
-            current_price=2650.0,
-            dfs_9=dfs_9,
-            horizon_prediction={"predicted_change_pct": 2.5, "predicted_target_price": 2700.0, "consensus_probability": 0.70},
-            btc_shield_state=btc_shield,
-            aligned_horizons=["5m", "15m", "1h", "4h", "12h", "1d"],
-            fundamental_matrix=good_fund_matrix
-        )
+        }):
+            sig = sig_gen._build_single_horizon_signal(
+                symbol="ETH/USDT",
+                horizon_label="15M",
+                tf_key="15m",
+                direction="LONG",
+                current_price=2650.0,
+                dfs_9=dfs_9,
+                horizon_prediction={"predicted_change_pct": 2.5, "predicted_target_price": 2700.0, "consensus_probability": 0.70},
+                btc_shield_state=btc_shield,
+                aligned_horizons=["5m", "15m", "1h", "4h", "12h", "1d"],
+                fundamental_matrix=good_fund_matrix
+            )
 
         self.assertTrue(sig["is_trade_active"])
         self.assertGreaterEqual(sig["conviction"], 90.0, "Catalyst drift must boost conviction!")

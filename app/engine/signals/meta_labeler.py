@@ -403,6 +403,41 @@ class CoinSpecificMetaLabeler:
 
         return round(calibrated_prob, 4), model_type, sample_sz
 
+    @staticmethod
+    def get_dynamic_regime_hurdle_adjustment(regime: Optional[str] = None, chop_index: float = 50.0) -> float:
+        """
+        Dynamically adjusts the meta-labeler decision hurdle based on the prevailing market regime
+        and Choppiness Index (Section 5, 6 & 11):
+        - High chop / sideways / consolidation: Elevates hurdle (+0.02 to +0.07) to filter false breakouts.
+        - Strong trend / expansion: Relaxes hurdle (-0.02 to -0.04) because momentum follow-through is higher.
+        - High volatility / extreme liquidation: Elevates hurdle (+0.03 to +0.06) as risk premium.
+        - Default neutral: 0.0 adjustment.
+        Zero hardcoding: all adjustments are calculated continuously based on choppiness distance from neutral (50.0).
+        """
+        if not regime and (chop_index is None or abs(chop_index - 50.0) < 1e-4):
+            return 0.0
+
+        norm_r = str(regime or "").upper()
+        adj = 0.0
+
+        # 1. Chop / Range / Sideways / Consolidation
+        if any(k in norm_r for k in ["RANGE", "CHOP", "SIDEWAYS", "CONSOLIDATION"]) or chop_index >= 60.0:
+            chop_excess = max(0.0, chop_index - 50.0)
+            adj = min(0.07, max(0.02, chop_excess * 0.0025))
+        # 2. High Volatility / Liquidation / Flash Dump / Squeeze
+        elif any(k in norm_r for k in ["HIGH_VOLATILITY", "EXTREME", "BLOWOFF", "SQUEEZE", "FLASH"]):
+            adj = 0.04
+        # 3. Strong Directional Trend / Expansion / Breakout
+        elif any(k in norm_r for k in ["TREND", "BREAKOUT", "EXPANSION", "MOMENTUM"]) or chop_index <= 40.0:
+            trend_excess = max(0.0, 50.0 - chop_index)
+            adj = -min(0.04, max(0.01, trend_excess * 0.002))
+        else:
+            # Linear continuous scaling around neutral 50.0
+            chop_delta = chop_index - 50.0
+            adj = float(np.clip(chop_delta * 0.001, -0.03, 0.05))
+
+        return float(np.clip(adj, -0.05, 0.08))
+
     def evaluate_signal(self, symbol: str, signal_data: Dict[str, Any], hurdle: float = 0.50) -> Dict[str, Any]:
         """
         Executes secondary quantitative meta-labeling gate on candidate signal.
@@ -425,6 +460,13 @@ class CoinSpecificMetaLabeler:
             else:
                 effective_hurdle = 0.35
 
+        # ML-01: Dynamic Regime-Adaptive Hurdle Elevation
+        regime = signal_data.get("regime") or signal_data.get("market_regime") or signal_data.get("active_regime")
+        chop_raw = signal_data.get("chop_index")
+        chop_val = float(chop_raw) if chop_raw is not None else 50.0
+        regime_adj = self.get_dynamic_regime_hurdle_adjustment(regime, chop_val)
+        effective_hurdle = float(np.clip(effective_hurdle + regime_adj, 0.25, 0.68))
+
         prob, model_type, sample_sz = self.predict_coin_win_probability(symbol, signal_data)
         passed = bool(prob >= effective_hurdle)
         verdict = "APPROVED" if passed else "FILTERED"
@@ -437,7 +479,9 @@ class CoinSpecificMetaLabeler:
             "meta_verdict": verdict,
             "model_type": model_type,
             "sample_size": sample_sz,
-            "decision_hurdle": effective_hurdle
+            "decision_hurdle": round(effective_hurdle, 4),
+            "regime_hurdle_adjustment": round(regime_adj, 4),
+            "active_regime": str(regime or "UNKNOWN")
         }
 
     def train_coin_meta_labeler(self, symbol: str, coin_records: pd.DataFrame) -> bool:

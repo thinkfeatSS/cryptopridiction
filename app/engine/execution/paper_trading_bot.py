@@ -595,7 +595,28 @@ class PaperTradingBot:
                         self._archive_cancelled_order(canc_rec, pos.get("desk"))
                         continue
 
-                    # E. Clean Limit Fill (Touched limit within the safe bracket)
+                    # E. Multi-Touch Zone Invalidation (Support/Resistance Depletion)
+                    # When price enters the optimal entry zone without filling the limit order,
+                    # multiple subsequent retests indicate liquidity exhaustion rather than fresh institutional absorption.
+                    zone_min = float(pos.get("entry_zone_min", limit_p * 0.998))
+                    zone_max = float(pos.get("entry_zone_max", limit_p * 1.002))
+                    is_in_zone = (zone_min <= curr_p <= zone_max)
+                    prev_in_zone = bool(pos.get("_in_zone_last_tick", False))
+
+                    if is_in_zone and not prev_in_zone:
+                        pos["bracket_touch_count"] = int(pos.get("bracket_touch_count", 0)) + 1
+                    pos["_in_zone_last_tick"] = is_in_zone
+
+                    if int(pos.get("bracket_touch_count", 0)) >= 3 and not is_in_zone:
+                        canc_rec = self._create_cancellation_record(
+                            pos,
+                            "CANCELLED_MULTI_TOUCH_DEPLETION",
+                            f"Zone depleted after {pos.get('bracket_touch_count')} re-tests without fill"
+                        )
+                        self._archive_cancelled_order(canc_rec, pos.get("desk"))
+                        continue
+
+                    # F. Clean Limit Fill (Touched limit within the safe bracket)
                     if (direction == "LONG" and curr_p <= limit_p) or (direction == "SHORT" and curr_p >= limit_p):
                         pos["status"] = "OPEN"
                         pos["is_limit_resting"] = False
@@ -1221,6 +1242,24 @@ class PaperTradingBot:
                         with open(tmp_im, "w", encoding="utf-8") as imf:
                             json.dump(imm_data, imf, indent=2)
                         os.replace(tmp_im, imm_path)
+            except Exception:
+                pass
+
+            # 4. Synchronize trade outcome to StrategyRegistry for dynamic Bayesian prior calibration
+            try:
+                from app.quant_v16.strategies import StrategyRegistry
+                # Invariant: breakeven is NEVER counted as a win!
+                is_win = bool(audit_status.startswith("WON_") and not any(b in audit_status for b in ["BREAKEVEN", "TIER0_BE", "STOP_LOSS_BREAKEVEN"]))
+                strat_name = closed_record.get("strategy") or closed_record.get("canonical_strategy")
+                regime_name = closed_record.get("regime") or closed_record.get("market_regime")
+                if strat_name:
+                    strat_reg = StrategyRegistry()
+                    strat_reg.record_trade_outcome(
+                        strategy_id=str(strat_name),
+                        is_win=is_win,
+                        net_return_pct=ret_pct,
+                        regime=str(regime_name) if regime_name else None
+                    )
             except Exception:
                 pass
         except Exception as err:

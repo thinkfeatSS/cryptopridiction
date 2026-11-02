@@ -461,8 +461,11 @@ class EntryConfirmationEngine:
         elif is_momentum_breakout:
             optimal_limit = current_price
         else:
-            # Gentle pullback anchor: 0.10x ATR (not exceeding 0.25% of price)
-            pullback_offset = min(current_price * 0.0025, 0.10 * active_atr)
+            # Dynamic volatility-scaled pullback anchor (Zero hardcoding):
+            # Scales pullback depth proportional to active ATR volatility, bounded between 0.15% and 0.80% of current price.
+            atr_pct = active_atr / max(1e-8, current_price)
+            offset_ratio = float(np.clip(0.15 * atr_pct, 0.0015, 0.0080))
+            pullback_offset = current_price * offset_ratio
             optimal_limit = (current_price - pullback_offset) if is_long else (current_price + pullback_offset)
 
         # Sanity bounds on optimal limit

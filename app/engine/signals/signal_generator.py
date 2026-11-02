@@ -372,7 +372,11 @@ class SignalGenerationSystem:
             "sl_price": cand_sl,
             "conviction": 95.0 if horizon_label == "24H" else (90.0 if horizon_label == "1H" else 85.0),
             "expected_return_pct": abs(horizon_prediction["predicted_change_pct"]) if horizon_prediction else 0.0,
-            "quality_grade": "Grade A+"
+            "quality_grade": "Grade A+",
+            "regime": active_market_regime,
+            "market_regime": active_market_regime,
+            "canonical_strategy": canonical_strategy,
+            "chop_index": float(candle_metrics.get("chop_index", 50.0) if candle_metrics else 50.0)
         }
         # Meta-labeler hurdle raised (Fix RC-6): 0.50→0.58 for scalp/intraday, 0.55 for swing
         # Minimum win probability for positive expectancy at 2.0x R:R after fees

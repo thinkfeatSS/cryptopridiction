@@ -1000,6 +1000,29 @@ class SignalService:
             if updated:
                 db.commit()
                 self._sync_updates_to_tracker_csv(pending)
+
+                # Synchronize resolved terminal outcomes to StrategyRegistry
+                try:
+                    from app.quant_v16.strategies import StrategyRegistry
+                    strat_reg = StrategyRegistry()
+                    for s in pending:
+                        st = str(getattr(s, 'status', '')).upper()
+                        # Only record terminal resolved statuses
+                        if st.startswith('WON_') or st.startswith('LOST_') or 'BREAKEVEN' in st or 'EXPIRED' in st:
+                            # Invariant: breakeven is NEVER counted as a win!
+                            is_win = bool(st.startswith('WON_') and not any(b in st for b in ['BREAKEVEN', 'BE', 'TIER0']))
+                            strat_id = getattr(s, 'canonical_strategy', None) or getattr(s, 'strategy', None)
+                            ret_val = float(getattr(s, 'realized_return_pct', 0.0) or 0.0)
+                            regime_val = getattr(s, 'regime', None) or getattr(s, 'market_regime', None)
+                            if strat_id:
+                                strat_reg.record_trade_outcome(
+                                    strategy_id=str(strat_id),
+                                    is_win=is_win,
+                                    net_return_pct=ret_val,
+                                    regime=str(regime_val) if regime_val else None
+                                )
+                except Exception:
+                    pass
         except Exception:
             db.rollback()
 

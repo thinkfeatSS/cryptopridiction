@@ -10,7 +10,10 @@ Specifications:
 from enum import Enum
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
+import os
+import json
 import time
+import threading
 
 class StrategyArchetype(str, Enum):
     MOMENTUM_LONG = "MOMENTUM_LONG"
@@ -67,6 +70,44 @@ class StrategyPerformance:
     regime_status: Dict[str, StrategyStatus] = field(default_factory=dict)
     last_updated_ts: float = field(default_factory=time.time)
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "strategy_id": self.strategy_id,
+            "sample_count": self.sample_count,
+            "resolved_count": self.resolved_count,
+            "win_rate": round(float(self.win_rate), 4),
+            "profit_factor": round(float(self.profit_factor), 4),
+            "rolling_50_pf": round(float(self.rolling_50_pf), 4),
+            "expectancy_net_pct": round(float(self.expectancy_net_pct), 4),
+            "max_drawdown_pct": round(float(self.max_drawdown_pct), 4),
+            "status": self.status.value,
+            "regime_status": {k: (v.value if hasattr(v, "value") else str(v)) for k, v in self.regime_status.items()},
+            "last_updated_ts": float(self.last_updated_ts)
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "StrategyPerformance":
+        st_val = StrategyStatus(d.get("status", "ACTIVE")) if d.get("status") in [s.value for s in StrategyStatus] else StrategyStatus.ACTIVE
+        regime_st = {}
+        for r_k, r_v in d.get("regime_status", {}).items():
+            if r_v in [s.value for s in StrategyStatus]:
+                regime_st[r_k] = StrategyStatus(r_v)
+            else:
+                regime_st[r_k] = StrategyStatus.ACTIVE
+        return cls(
+            strategy_id=d.get("strategy_id", ""),
+            sample_count=int(d.get("sample_count", 0)),
+            resolved_count=int(d.get("resolved_count", 0)),
+            win_rate=float(d.get("win_rate", 0.50)),
+            profit_factor=float(d.get("profit_factor", 1.25)),
+            rolling_50_pf=float(d.get("rolling_50_pf", 1.20)),
+            expectancy_net_pct=float(d.get("expectancy_net_pct", 0.45)),
+            max_drawdown_pct=float(d.get("max_drawdown_pct", 4.5)),
+            status=st_val,
+            regime_status=regime_st,
+            last_updated_ts=float(d.get("last_updated_ts", time.time()))
+        )
+
 def normalize_regime_key(regime: Any) -> str:
     """Normalizes raw market regime labels and composite strings into canonical regime keys."""
     if not regime:
@@ -91,9 +132,109 @@ class StrategyRegistry:
     Maintains historical performance records and automated kill switches for all strategy archetypes.
     """
 
-    def __init__(self):
+    def __init__(self, persistence_file: Optional[str] = None):
+        self._lock = threading.Lock()
         self.strategies: Dict[str, StrategyPerformance] = {}
+        export_dir = os.getenv("EXPORT_DIR", "./export_app_data")
+        self.persistence_file = persistence_file or os.path.join(export_dir, "v16_strategy_priors.json")
         self._init_defaults()
+        self.load_from_disk()
+
+    def save_to_disk(self, file_path: Optional[str] = None) -> bool:
+        """Atomically persists current strategy performance priors and kill switch states to disk."""
+        path = file_path or self.persistence_file
+        with self._lock:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+                data = {
+                    "version": "16.1",
+                    "last_updated_utc": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+                    "strategies": {k: v.to_dict() for k, v in self.strategies.items()}
+                }
+                tmp_p = f"{path}.tmp.{threading.get_ident()}.{time.time_ns()}"
+                with open(tmp_p, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                os.replace(tmp_p, path)
+                return True
+            except Exception:
+                return False
+
+    def load_from_disk(self, file_path: Optional[str] = None) -> bool:
+        """Loads persisted strategy performance priors from disk and updates in-memory registry."""
+        path = file_path or self.persistence_file
+        if not os.path.exists(path):
+            return False
+        with self._lock:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                loaded_strats = data.get("strategies", {})
+                for k, v_dict in loaded_strats.items():
+                    self.strategies[k] = StrategyPerformance.from_dict(v_dict)
+                return True
+            except Exception:
+                return False
+
+    def record_trade_outcome(
+        self,
+        strategy_id: str,
+        is_win: bool,
+        net_return_pct: float,
+        regime: Optional[str] = None
+    ):
+        """
+        Updates live performance records upon trade resolution:
+        1. Recalculates win rate using Bayesian smoothing.
+        2. Recalculates rolling profit factor and net expectancy.
+        3. Enforces Section 31 automated kill switch (Warning / Pause / Disable).
+        4. Persists updated priors atomically to disk.
+        """
+        strat_key = strategy_id.upper().strip() if strategy_id else ""
+        perf = self.strategies.get(strat_key)
+        if not perf:
+            return
+
+        with self._lock:
+            perf.sample_count += 1
+            perf.resolved_count += 1
+            n = max(1, perf.resolved_count)
+
+            # Bayesian update on win rate: prior weight = 10 trades
+            prior_wr = 0.50
+            prior_weight = 10.0
+            actual_wins = (perf.win_rate * (n - 1)) + (1.0 if is_win else 0.0)
+            perf.win_rate = round(float((actual_wins + (prior_wr * prior_weight)) / (n + prior_weight)), 4)
+
+            # Rolling profit factor update
+            ret_factor = max(0.1, 1.0 + (net_return_pct / 100.0)) if is_win else max(0.1, 1.0 - (abs(net_return_pct) / 100.0))
+            if is_win:
+                perf.rolling_50_pf = round(min(3.0, (perf.rolling_50_pf * 0.96) + (ret_factor * 0.04)), 4)
+            else:
+                perf.rolling_50_pf = round(max(0.4, (perf.rolling_50_pf * 0.96) - ((1.0 / ret_factor) * 0.04)), 4)
+
+            # Update rolling net expectancy
+            perf.expectancy_net_pct = round(float((perf.expectancy_net_pct * 0.95) + (net_return_pct * 0.05)), 4)
+            perf.last_updated_ts = time.time()
+
+            # Section 31 Automated Kill Switch Gating:
+            if perf.expectancy_net_pct < -0.20 or perf.rolling_50_pf < 0.70:
+                perf.status = StrategyStatus.DISABLED
+            elif perf.rolling_50_pf < 0.85:
+                perf.status = StrategyStatus.PAUSED
+            elif perf.rolling_50_pf < 1.00:
+                perf.status = StrategyStatus.WARNING
+            else:
+                perf.status = StrategyStatus.ACTIVE
+
+            # Section 32 Regime-Specific Status
+            if regime:
+                norm_r = normalize_regime_key(regime)
+                if not is_win and perf.rolling_50_pf < 0.90:
+                    perf.regime_status[norm_r] = StrategyStatus.PAUSED
+                elif is_win and perf.rolling_50_pf >= 1.05:
+                    perf.regime_status.pop(norm_r, None)
+
+        self.save_to_disk()
 
     def _init_defaults(self):
         """Populate initial baseline priors from V15 empirical audit for all 32 StrategyArchetype members."""
