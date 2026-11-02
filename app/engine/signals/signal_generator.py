@@ -614,6 +614,16 @@ class SignalGenerationSystem:
         else:
             decision_str = f"🟢 BUY {horizon_label}" if direction == "LONG" else f"🔴 SELL {horizon_label}"
 
+        # TRD-01: Idiosyncratic Coin Beta & Volatility Parity Sizing (Section 29)
+        coin_atr_pct = (active_atr / max(1e-8, current_price)) * 100.0 if current_price > 0 else 1.5
+        btc_atr_pct = float(btc_shield_state.get("atr_pct") or btc_shield_state.get("btc_atr_pct") or 1.8)
+        coin_beta = round(float(np.clip(coin_atr_pct / max(0.20, btc_atr_pct), 0.40, 3.50)), 2)
+        beta_sizing_mult = float(np.clip(1.0 / coin_beta, 0.40, 1.25))
+
+        base_fund_sizing = float((fund_matrix.get("sizing_multiplier") if fund_matrix else 1.0) or 1.0)
+        shield_sizing = float(btc_shield_state.get("sizing_multiplier", 1.0) or 1.0)
+        effective_sizing = round(float(np.clip(base_fund_sizing * shield_sizing * beta_sizing_mult, 0.20, 1.30)), 2)
+
         return {
             "symbol": symbol,
             "horizon": horizon_label,
@@ -715,7 +725,9 @@ class SignalGenerationSystem:
             "fundamental_matrix": fund_matrix,
             "news_sentiment": fund_matrix.get("news_sentiment") if fund_matrix else None,
             "catalyst_event": fund_matrix.get("catalyst_event") if fund_matrix else None,
-            "sizing_multiplier": fund_matrix.get("sizing_multiplier", 1.0) if fund_matrix else 1.0,
+            "active_atr": active_atr,
+            "coin_beta": coin_beta,
+            "sizing_multiplier": effective_sizing,
             "composite_fundamental_score": fund_matrix.get("composite_fundamental_score", 0.0) if fund_matrix else 0.0,
             "wait_reason": news_veto_reason if is_news_vetoed else (strat_veto_reason if not is_strat_allowed else (candle_trigger_reason if not is_candle_confirmed else (ev_result.decision_reason if not ev_result.passes_ev_hurdle else None)))
         }
@@ -1700,6 +1712,8 @@ class SignalGenerationSystem:
             "fundamental_matrix": fund_matrix,
             "news_sentiment": fund_matrix.get("news_sentiment") if fund_matrix else None,
             "catalyst_event": fund_matrix.get("catalyst_event") if fund_matrix else None,
-            "sizing_multiplier": fund_matrix.get("sizing_multiplier", 1.0) if fund_matrix else 1.0,
+            "sizing_multiplier": dom_sig.get("sizing_multiplier", fund_matrix.get("sizing_multiplier", 1.0) if fund_matrix else 1.0) if dom_sig else (fund_matrix.get("sizing_multiplier", 1.0) if fund_matrix else 1.0),
+            "coin_beta": dom_sig.get("coin_beta", 1.0) if dom_sig else 1.0,
+            "active_atr": dom_sig.get("active_atr", 0.0) if dom_sig else 0.0,
             "composite_fundamental_score": fund_matrix.get("composite_fundamental_score", 0.0) if fund_matrix else 0.0
         }

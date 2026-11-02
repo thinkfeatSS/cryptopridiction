@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Optional
 
 from app.engine.config import EXPORT_DIR
 from app.engine.scanner.filters import UniverseFilter
+from app.quant_v16.entry_confirmation import format_dynamic_precision
 
 class PaperTradingBot:
     """
@@ -371,6 +372,12 @@ class PaperTradingBot:
                 "tp2_price": tp2_p if tp2_p > 0 else tp1_p,
                 "tp3_price": tp3_p if tp3_p > 0 else tp1_p,
                 "sl_price": sl_p,
+                "initial_sl_price": sl_p,
+                "active_atr": float(signal.get("active_atr") or abs(entry_p - sl_p) / 1.5),
+                "coin_beta": float(signal.get("coin_beta", 1.0)),
+                "sizing_multiplier": sizing_mult,
+                "peak_price_seen": optimal_limit if is_limit_pending else entry_p,
+                "trough_price_seen": optimal_limit if is_limit_pending else entry_p,
                 "scaling_policy": signal.get("scaling_policy", "MULTI_TRANCHE_SCALE"),
                 "tp1_hit": False,
                 "tp2_hit": False,
@@ -651,12 +658,44 @@ class PaperTradingBot:
                     is_tp1 = curr_p >= tp1_p if tp1_p > 0 else False
                     is_tp2 = curr_p >= tp2_p if tp2_p > 0 else False
                     is_tp3 = curr_p >= tp3_p if tp3_p > 0 else False
+                    pos["peak_price_seen"] = max(float(pos.get("peak_price_seen") or curr_p), curr_p)
+
+                    # EXT-01: Parabolic Trailing Ratchet for Runners (Section 20 & 24)
+                    if pos.get("tp2_hit"):
+                        active_atr = float(pos.get("active_atr") or abs(entry_p - float(pos.get("initial_sl_price") or (entry_p * 0.98))) / 1.5)
+                        risk_r = max(1e-6, abs(entry_p - float(pos.get("initial_sl_price") or (entry_p * 0.98))))
+                        peak_p = pos["peak_price_seen"]
+                        r_mult = abs(peak_p - entry_p) / risk_r
+                        is_parabolic = (r_mult >= 3.0)
+                        trail_dist = (0.80 * active_atr) if is_parabolic else (1.50 * active_atr)
+                        cand_sl = peak_p - trail_dist
+                        new_sl = max(float(pos.get("sl_price", tp1_p)), float(tp1_p), cand_sl)
+                        if new_sl > float(pos["sl_price"]) and new_sl < curr_p:
+                            pos["sl_price"] = format_dynamic_precision(new_sl)
+                            pos["is_parabolic_trail_active"] = is_parabolic
+
                     hit_sl = curr_p <= pos["sl_price"]
                 else:
                     gain_pct = ((entry_p - curr_p) / entry_p) * 100.0
                     is_tp1 = curr_p <= tp1_p if tp1_p > 0 else False
                     is_tp2 = curr_p <= tp2_p if tp2_p > 0 else False
                     is_tp3 = curr_p <= tp3_p if tp3_p > 0 else False
+                    pos["trough_price_seen"] = min(float(pos.get("trough_price_seen") or curr_p), curr_p)
+
+                    # EXT-01: Parabolic Trailing Ratchet for Runners (Section 20 & 24)
+                    if pos.get("tp2_hit"):
+                        active_atr = float(pos.get("active_atr") or abs(float(pos.get("initial_sl_price") or (entry_p * 1.02)) - entry_p) / 1.5)
+                        risk_r = max(1e-6, abs(float(pos.get("initial_sl_price") or (entry_p * 1.02)) - entry_p))
+                        trough_p = pos["trough_price_seen"]
+                        r_mult = abs(entry_p - trough_p) / risk_r
+                        is_parabolic = (r_mult >= 3.0)
+                        trail_dist = (0.80 * active_atr) if is_parabolic else (1.50 * active_atr)
+                        cand_sl = trough_p + trail_dist
+                        new_sl = min(float(pos.get("sl_price", tp1_p)), float(tp1_p), cand_sl)
+                        if new_sl < float(pos["sl_price"]) and new_sl > curr_p:
+                            pos["sl_price"] = format_dynamic_precision(new_sl)
+                            pos["is_parabolic_trail_active"] = is_parabolic
+
                     hit_sl = curr_p >= pos["sl_price"]
 
                 pos["unrealized_pnl_pct"] = gain_pct * leverage
@@ -707,10 +746,13 @@ class PaperTradingBot:
                 else:
                     tp1_proximity_reached = (tp1_p_pos < entry_p and curr_p <= (entry_p - (entry_p - tp1_p_pos) * 0.90))
 
-                if not pos.get("is_breakeven_locked") and tp1_proximity_reached and pos["peak_gain_pct"] >= pos.get("tier0_threshold_pct", 2.50):
+                if not pos.get("is_breakeven_locked") and not pos.get("tp1_hit") and not pos.get("tp2_hit") and tp1_proximity_reached and pos["peak_gain_pct"] >= pos.get("tier0_threshold_pct", 2.50):
                     pos["is_breakeven_locked"] = True
                     pos["sl_price"] = entry_p * (1.0005 if direction == "LONG" else 0.9995)
-                    print(f"[PAPER BOT 🛡️] Tier-0 Breakeven Ratchet Activated for {sym}! Stop-loss locked at Entry.")
+                    try:
+                        print(f"[PAPER BOT 🛡️] Tier-0 Breakeven Ratchet Activated for {sym}! Stop-loss locked at Entry.")
+                    except Exception:
+                        pass
 
                 # Multi-Tranche Scale Check 1: TP1 Hit (Realize 50%, lock Breakeven, hold 50% for TP2)
                 if policy == "MULTI_TRANCHE_SCALE" and has_multi_tp and is_tp1 and not pos.get("tp1_hit"):

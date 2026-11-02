@@ -626,6 +626,17 @@ class InstitutionalOrderBlockEngine:
             has_not_broken_sl = live_low >= (best_ob.ob_low - 0.05 * atr)
 
             if in_bull_zone and has_not_broken_sl:
+                # SMC-01: Order Block Mitigation Degradation
+                # Blocks with >= 3 retests are fully depleted of institutional resting liquidity
+                if best_ob.retest_count >= 3:
+                    return {
+                        "setup_detected": False,
+                        "reason": f"Order block depleted after {best_ob.retest_count} touches",
+                        "retest_count": best_ob.retest_count,
+                        "mitigation_factor": 0.40,
+                        "order_block_zone": [round(best_ob.ob_low, 6), round(best_ob.ob_high, 6)],
+                    }
+
                 entry_p = live_p
                 sl_p = best_ob.ob_low - (0.20 * atr)
                 # Enforce strict price invariant: entry must be comfortably above stop loss
@@ -640,7 +651,13 @@ class InstitutionalOrderBlockEngine:
                     rr_ratio = round((tp1_p - entry_p) / risk_amt, 2)
                     rank_boosts = {1: 8.0, 2: 5.0, 3: 7.0, 4: 3.0, 5: 0.0}
                     base_conv = 80.0 if best_ob.zeiierman_rank <= 2 else 74.0
-                    conviction = min(98.5, base_conv + (best_ob.confluence_score * 12.0) + rank_boosts.get(best_ob.zeiierman_rank, 0.0))
+                    raw_conviction = min(98.5, base_conv + (best_ob.confluence_score * 12.0) + rank_boosts.get(best_ob.zeiierman_rank, 0.0))
+
+                    # Mitigation degradation: 15% discount per prior touch
+                    mitigation_factor = max(0.50, 1.0 - (0.15 * float(best_ob.retest_count)))
+                    conviction = max(60.0, raw_conviction - (float(best_ob.retest_count) * 6.0))
+                    raw_prob = 0.72 + (best_ob.confluence_score * 0.18)
+                    meta_win_prob = round(max(0.48, min(0.95, raw_prob - (float(best_ob.retest_count) * 0.04))), 2)
 
                 return {
                     "setup_detected": True,
@@ -662,7 +679,9 @@ class InstitutionalOrderBlockEngine:
                     "tp3_price": tp3_p,
                     "risk_reward_ratio": rr_ratio,
                     "conviction": conviction,
-                    "meta_win_prob": round(min(0.95, 0.72 + (best_ob.confluence_score * 0.18)), 2),
+                    "meta_win_prob": meta_win_prob,
+                    "retest_count": best_ob.retest_count,
+                    "mitigation_factor": round(mitigation_factor, 2),
                     "active_block": best_ob.to_dict(),
                     "in_order_block_zone": True,
                     "is_touching": best_ob.is_touching,
@@ -693,6 +712,17 @@ class InstitutionalOrderBlockEngine:
             has_not_broken_sl = live_high <= (best_ob.ob_high + 0.05 * atr)
 
             if in_bear_zone and has_not_broken_sl:
+                # SMC-01: Order Block Mitigation Degradation
+                # Blocks with >= 3 retests are fully depleted of institutional resting liquidity
+                if best_ob.retest_count >= 3:
+                    return {
+                        "setup_detected": False,
+                        "reason": f"Order block depleted after {best_ob.retest_count} touches",
+                        "retest_count": best_ob.retest_count,
+                        "mitigation_factor": 0.40,
+                        "order_block_zone": [round(best_ob.ob_low, 6), round(best_ob.ob_high, 6)],
+                    }
+
                 entry_p = live_p
                 sl_p = best_ob.ob_high + (0.20 * atr)
                 # Enforce strict price invariant: entry must be comfortably below stop loss
@@ -707,7 +737,13 @@ class InstitutionalOrderBlockEngine:
                     rr_ratio = round((entry_p - tp1_p) / risk_amt, 2)
                     rank_boosts = {1: 8.0, 2: 5.0, 3: 7.0, 4: 3.0, 5: 0.0}
                     base_conv = 80.0 if best_ob.zeiierman_rank <= 2 else 74.0
-                    conviction = min(98.5, base_conv + (best_ob.confluence_score * 12.0) + rank_boosts.get(best_ob.zeiierman_rank, 0.0))
+                    raw_conviction = min(98.5, base_conv + (best_ob.confluence_score * 12.0) + rank_boosts.get(best_ob.zeiierman_rank, 0.0))
+
+                    # Mitigation degradation: 15% discount per prior touch
+                    mitigation_factor = max(0.50, 1.0 - (0.15 * float(best_ob.retest_count)))
+                    conviction = max(60.0, raw_conviction - (float(best_ob.retest_count) * 6.0))
+                    raw_prob = 0.70 + (best_ob.confluence_score * 0.20)
+                    meta_win_prob = round(max(0.48, min(0.95, raw_prob - (float(best_ob.retest_count) * 0.04))), 2)
 
                 return {
                     "setup_detected": True,
@@ -729,7 +765,9 @@ class InstitutionalOrderBlockEngine:
                     "tp3_price": tp3_p,
                     "risk_reward_ratio": rr_ratio,
                     "conviction": conviction,
-                    "meta_win_prob": round(min(0.95, 0.70 + (best_ob.confluence_score * 0.20)), 2),
+                    "meta_win_prob": meta_win_prob,
+                    "retest_count": best_ob.retest_count,
+                    "mitigation_factor": round(mitigation_factor, 2),
                     "active_block": best_ob.to_dict(),
                     "in_order_block_zone": True,
                     "is_touching": best_ob.is_touching,
