@@ -1151,14 +1151,35 @@ class SignalService:
             SignalAudit.outcome_label,
             SignalAudit.status,
             SignalAudit.grade_tier,
-            SignalAudit.realized_return_pct
+            SignalAudit.realized_return_pct,
+            SignalAudit.horizon,
+            SignalAudit.meta_win_prob,
+            SignalAudit.conviction_pct
         ).filter(
             SignalAudit.date_utc.like("202%"),
             SignalAudit.symbol.like("%/%")
         ).all()
 
+        default_calibration = {
+            "overall": {"brier_score": 0.25, "sample_count": 0, "mean_forecast_prob": 0.50, "realized_win_rate_pct": 50.0, "reliability_gap": 0.0},
+            "by_horizon": {
+                "15M": {"brier_score": 0.25, "sample_count": 0, "mean_forecast_prob": 0.50, "realized_win_rate_pct": 50.0, "reliability_gap": 0.0},
+                "1H": {"brier_score": 0.25, "sample_count": 0, "mean_forecast_prob": 0.50, "realized_win_rate_pct": 50.0, "reliability_gap": 0.0},
+                "24H": {"brier_score": 0.25, "sample_count": 0, "mean_forecast_prob": 0.50, "realized_win_rate_pct": 50.0, "reliability_gap": 0.0}
+            },
+            "last_updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        }
+
         total_signals = len(signals)
         if total_signals == 0:
+            try:
+                calib_path = os.path.join(settings.EXPORT_DIR, "v16_calibration_metrics.json")
+                if not os.path.exists(calib_path):
+                    with open(calib_path, "w", encoding="utf-8") as f:
+                        json.dump(default_calibration, f, indent=2)
+            except Exception:
+                pass
+
             return {
                 "last_updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "total_trader_signals": 0,
@@ -1174,6 +1195,7 @@ class SignalService:
                 "grade_a_win_rate_pct": 0.0,
                 "average_return_pct": 0.0,
                 "cumulative_return_pct": 0.0,
+                "calibration_metrics": default_calibration,
             }
 
         won = 0
@@ -1187,7 +1209,10 @@ class SignalService:
         a_lost = 0
         returns = []
 
-        for out_label, status, grade_tier, ret_pct in signals:
+        calibration_all = []
+        calibration_by_h = {"15M": [], "1H": [], "24H": []}
+
+        for out_label, status, grade_tier, ret_pct, sig_horizon, meta_p, conv in signals:
             cat = classify_signal_outcome(status, out_label, ret_pct)
 
             if cat == "PENDING":
@@ -1215,6 +1240,18 @@ class SignalService:
             if ret_pct is not None and not (math.isnan(ret_pct) or math.isinf(ret_pct)):
                 returns.append(ret_pct)
 
+            # Feature 5.3: Horizon-Specific Brier Calibration Tracking
+            if cat in ["WON", "LOST"]:
+                outcome = 1.0 if cat == "WON" else 0.0
+                f_p = float(meta_p) if (meta_p is not None and 0.0 < float(meta_p) < 1.0) else (float(conv or 50.0) / 100.0)
+                f_p = min(0.99, max(0.01, f_p))
+                calibration_all.append((f_p, outcome))
+
+                h_str = str(sig_horizon or "1H").upper()
+                norm_h = "15M" if "15" in h_str else ("24H" if any(x in h_str for x in ["24", "1D"]) else "1H")
+                if norm_h in calibration_by_h:
+                    calibration_by_h[norm_h].append((f_p, outcome))
+
         decisive = won + lost
         decisive_wr = round((won / max(1, decisive)) * 100.0, 2) if decisive > 0 else 0.0
 
@@ -1229,6 +1266,38 @@ class SignalService:
 
         avg_ret = round(float(np.mean(returns)), 2) if returns else 0.0
         total_ret = round(float(np.sum(returns)), 2) if returns else 0.0
+
+        def _calc_brier(pairs):
+            if not pairs:
+                return {"brier_score": 0.25, "sample_count": 0, "mean_forecast_prob": 0.50, "realized_win_rate_pct": 50.0, "reliability_gap": 0.0}
+            f_arr = np.array([p[0] for p in pairs])
+            y_arr = np.array([p[1] for p in pairs])
+            bs = float(np.mean((f_arr - y_arr) ** 2))
+            mean_f = float(np.mean(f_arr))
+            mean_y = float(np.mean(y_arr))
+            gap = abs(mean_f - mean_y)
+            return {
+                "brier_score": round(bs, 4),
+                "sample_count": len(pairs),
+                "mean_forecast_prob": round(mean_f, 4),
+                "realized_win_rate_pct": round(mean_y * 100.0, 2),
+                "reliability_gap": round(gap, 4)
+            }
+
+        calibration_metrics = {
+            "overall": _calc_brier(calibration_all),
+            "by_horizon": {h: _calc_brier(p_list) for h, p_list in calibration_by_h.items()},
+            "last_updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        }
+
+        try:
+            calib_path = os.path.join(settings.EXPORT_DIR, "v16_calibration_metrics.json")
+            tmp_p = f"{calib_path}.{threading.get_ident()}.{time.time_ns()}.tmp"
+            with open(tmp_p, "w", encoding="utf-8") as f:
+                json.dump(calibration_metrics, f, indent=2)
+            os.replace(tmp_p, calib_path)
+        except Exception:
+            pass
 
         return {
             "last_updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -1245,6 +1314,7 @@ class SignalService:
             "grade_a_win_rate_pct": a_wr,
             "average_return_pct": avg_ret,
             "cumulative_return_pct": total_ret,
+            "calibration_metrics": calibration_metrics,
         }
 
     def get_signals_list(

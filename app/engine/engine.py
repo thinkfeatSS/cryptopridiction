@@ -192,6 +192,11 @@ class UnifiedCryptoEngine:
             # Prune expired cooldown entries to prevent memory growth
             self._signal_cooldown_registry = {k: v for k, v in self._signal_cooldown_registry.items() if (now_ts - v) < 86400}
 
+            # Feature 5.1: Bridge candidate signals whose strategy was vetoed by Section 31/32 into Shadow Tracking
+            for s in generated_signals:
+                if s.get("is_shadow_eligible") and not s.get("is_trade_active", False):
+                    self.paper_bot.admit_shadow_signal(s, btc_shield_state=btc_shield)
+
         elapsed = round(time.time() - t0, 2)
         print(f"[ENGINE ✅] Cycle Finished in {elapsed}s: Evaluated {len(generated_signals)} assets ({len(active_trade_signals)} active signals, {admitted_count} admitted to Paper Bot).")
 

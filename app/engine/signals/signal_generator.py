@@ -291,6 +291,9 @@ class SignalGenerationSystem:
         )
         active_market_regime = str(btc_shield_state.get("v16_regime") or btc_shield_state.get("regime") or "RANGE").upper()
         is_strat_allowed, strat_veto_reason = self.strategy_registry.is_strategy_allowed(canonical_strategy, current_regime=active_market_regime)
+        is_shadow_eligible, shadow_reason = (False, None)
+        if not is_strat_allowed and hasattr(self.strategy_registry, "is_strategy_shadow_eligible"):
+            is_shadow_eligible, shadow_reason = self.strategy_registry.is_strategy_shadow_eligible(canonical_strategy, current_regime=active_market_regime)
 
         # ---------------------------------------------------------------------
         # 3. Determine optimal entry limit and execution entry price
@@ -769,6 +772,8 @@ class SignalGenerationSystem:
             "raw_strategy": arch_strategy,
             "is_strategy_allowed": is_strat_allowed,
             "strategy_veto_reason": strat_veto_reason if not is_strat_allowed else None,
+            "is_shadow_eligible": is_shadow_eligible,
+            "shadow_veto_reason": shadow_reason,
             "active_regime": active_market_regime,
             "allocation_pct": arch_alloc,
             "headroom_pct": arch_headroom,

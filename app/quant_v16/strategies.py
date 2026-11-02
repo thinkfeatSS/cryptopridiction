@@ -69,6 +69,9 @@ class StrategyPerformance:
     status: StrategyStatus = StrategyStatus.ACTIVE
     regime_status: Dict[str, StrategyStatus] = field(default_factory=dict)
     last_updated_ts: float = field(default_factory=time.time)
+    shadow_sample_count: int = 0
+    shadow_resolved_count: int = 0
+    shadow_wins: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -82,7 +85,10 @@ class StrategyPerformance:
             "max_drawdown_pct": round(float(self.max_drawdown_pct), 4),
             "status": self.status.value,
             "regime_status": {k: (v.value if hasattr(v, "value") else str(v)) for k, v in self.regime_status.items()},
-            "last_updated_ts": float(self.last_updated_ts)
+            "last_updated_ts": float(self.last_updated_ts),
+            "shadow_sample_count": int(self.shadow_sample_count),
+            "shadow_resolved_count": int(self.shadow_resolved_count),
+            "shadow_wins": int(self.shadow_wins)
         }
 
     @classmethod
@@ -105,7 +111,10 @@ class StrategyPerformance:
             max_drawdown_pct=float(d.get("max_drawdown_pct", 4.5)),
             status=st_val,
             regime_status=regime_st,
-            last_updated_ts=float(d.get("last_updated_ts", time.time()))
+            last_updated_ts=float(d.get("last_updated_ts", time.time())),
+            shadow_sample_count=int(d.get("shadow_sample_count", 0)),
+            shadow_resolved_count=int(d.get("shadow_resolved_count", 0)),
+            shadow_wins=int(d.get("shadow_wins", 0))
         )
 
 def normalize_regime_key(regime: Any) -> str:
@@ -466,6 +475,91 @@ class StrategyRegistry:
             return False, f"Strategy {strategy_id} is {regime_st.value} specifically in {norm_regime} regime"
 
         return True, "Eligible"
+
+    def is_strategy_shadow_eligible(self, strategy_id: str, current_regime: str) -> Tuple[bool, str]:
+        """
+        Feature 5.1: Evaluates whether a strategy vetoed by Section 31/32 kill switch
+        is eligible for shadow tracking simulation (i.e. is PAUSED, not DISABLED).
+        """
+        strat_key = strategy_id.upper().strip() if strategy_id else ""
+        perf = self.strategies.get(strat_key)
+        if not perf:
+            return False, "Strategy not registered"
+        if perf.status == StrategyStatus.DISABLED:
+            return False, f"Strategy {strategy_id} is permanently DISABLED (Expectancy < -0.20)"
+        if perf.status == StrategyStatus.PAUSED:
+            return True, f"Strategy {strategy_id} is globally PAUSED - eligible for shadow simulation"
+        norm_regime = normalize_regime_key(current_regime)
+        raw_regime = str(getattr(current_regime, "value", current_regime)).strip().upper() if current_regime else "RANGE"
+        regime_st = perf.regime_status.get(norm_regime) or perf.regime_status.get(raw_regime)
+        if regime_st == StrategyStatus.PAUSED:
+            return True, f"Strategy {strategy_id} is PAUSED in {norm_regime} - eligible for shadow simulation"
+        return False, f"Strategy {strategy_id} is not in paused state"
+
+    def record_shadow_outcome(
+        self,
+        strategy_id: str,
+        is_win: bool,
+        net_return_pct: float,
+        regime: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Feature 5.1: Records the outcome of a simulated shadow paper trade for a PAUSED strategy.
+        Updates Bayesian performance priors and automatically unpauses the strategy
+        when rolling PF recovers above the dynamic recovery hurdle.
+        """
+        strat_key = strategy_id.upper().strip() if strategy_id else ""
+        perf = self.strategies.get(strat_key)
+        if not perf:
+            return {"unpaused": False, "status": "UNKNOWN"}
+
+        with self._lock:
+            perf.shadow_sample_count += 1
+            perf.shadow_resolved_count += 1
+            if is_win:
+                perf.shadow_wins += 1
+
+            # Update rolling profit factor using same Bayesian smoothing
+            ret_factor = max(0.1, 1.0 + (net_return_pct / 100.0)) if is_win else max(0.1, 1.0 - (abs(net_return_pct) / 100.0))
+            if is_win:
+                perf.rolling_50_pf = round(min(3.0, (perf.rolling_50_pf * 0.96) + (ret_factor * 0.04)), 4)
+            else:
+                perf.rolling_50_pf = round(max(0.4, (perf.rolling_50_pf * 0.96) - ((1.0 / ret_factor) * 0.04)), 4)
+
+            # Update rolling net expectancy
+            perf.expectancy_net_pct = round(float((perf.expectancy_net_pct * 0.95) + (net_return_pct * 0.05)), 4)
+            perf.last_updated_ts = time.time()
+
+            # Dynamic unpause recovery hurdle:
+            # Scale dynamically with sample count (more samples required for faster unpausing)
+            tot_n = perf.resolved_count + perf.shadow_resolved_count
+            recovery_hurdle = max(1.02, 1.05 - (min(tot_n, 50) / 1000.0))
+
+            was_paused = (perf.status == StrategyStatus.PAUSED)
+            unpaused = False
+
+            if perf.status == StrategyStatus.PAUSED and perf.rolling_50_pf >= recovery_hurdle and perf.expectancy_net_pct > 0.0:
+                perf.status = StrategyStatus.ACTIVE
+                unpaused = True
+
+            # Regime-specific unpausing
+            if regime:
+                norm_r = normalize_regime_key(regime)
+                if norm_r in perf.regime_status and perf.regime_status[norm_r] == StrategyStatus.PAUSED:
+                    if is_win and perf.rolling_50_pf >= recovery_hurdle:
+                        perf.regime_status.pop(norm_r, None)
+                        unpaused = True
+
+            res = {
+                "unpaused": (perf.status == StrategyStatus.ACTIVE),
+                "strategy_id": strat_key,
+                "status": perf.status.value,
+                "rolling_50_pf": perf.rolling_50_pf,
+                "recovery_hurdle": round(recovery_hurdle, 4)
+            }
+
+        self.save_to_disk()
+        return res
 
     def get_edge_multiplier(self, strategy_id: str) -> float:
         """Returns strategy performance weighting multiplier for probability adjustment."""

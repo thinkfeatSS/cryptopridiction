@@ -1,3 +1,4 @@
+import math
 import os
 import json
 import time
@@ -134,6 +135,7 @@ class PaperTradingBot:
 
                     loaded["closed_trades"] = normalized_trades
                     loaded["closed_trades_history"] = normalized_trades
+                    loaded.setdefault("shadow_positions", [])
                     return loaded
             except Exception:
                 pass
@@ -155,6 +157,7 @@ class PaperTradingBot:
                 "swing": {"name": "🌊 Swing Desk", "allocated_usd": 250.0, "max_slots": 1, "active_slots": 0, "leverage": 2}
             },
             "open_positions": [],
+            "shadow_positions": [],
             "closed_trades": [],
             "closed_trades_history": [],
             "last_updated_utc": datetime.now(timezone.utc).isoformat()
@@ -466,6 +469,91 @@ class PaperTradingBot:
                     print(f"[PAPER BOT [EXEC] TRADE] Executed Signal Trade: {symbol} ({direction} {norm_horizon}) on {safe_desk} | Size: ${position_size_usd:,.2f} | Entry: ${entry_p:,.4f} | TP1: ${tp1_p:,.4f} | SL: ${sl_p:,.4f}")
             return True
 
+    def admit_shadow_signal(self, signal: Dict[str, Any], btc_shield_state: Optional[Dict[str, Any]] = None) -> bool:
+        """
+        Feature 5.1: Admits candidate signal whose strategy was vetoed because the strategy is PAUSED.
+        Tracks position in shadow simulation mode without capital risk or desk slot consumption.
+        """
+        with self._lock:
+            if not signal:
+                return False
+            
+            if btc_shield_state and (btc_shield_state.get("is_partition_stale") or btc_shield_state.get("is_global_outage")):
+                return False
+
+            symbol = signal.get("symbol")
+            if not symbol:
+                return False
+
+            entry_p = float(signal.get("entry_price", signal.get("current_price", 0.0)))
+            if not UniverseFilter.is_valid_crypto_pair(symbol, price=entry_p) or entry_p <= 0:
+                return False
+
+            direction = signal.get("direction") or signal.get("dominant_direction")
+            if direction not in ["LONG", "SHORT"]:
+                return False
+
+            horizon_raw = str(signal.get("horizon") or signal.get("active_signal_horizon") or signal.get("dominant_timeframe") or "").upper()
+            if not any(h in horizon_raw for h in ["15M", "1H", "24H", "1D"]):
+                return False
+
+            norm_horizon = "15M" if "15M" in horizon_raw else ("24H" if any(x in horizon_raw for x in ["24H", "1D"]) else "1H")
+
+            for pos in self.data.get("open_positions", []):
+                if pos.get("symbol") == symbol:
+                    return False
+            for pos in self.data.get("shadow_positions", []):
+                if pos.get("symbol") == symbol:
+                    return False
+
+            tp1_p = float(signal.get("tp1_price", 0.0))
+            tp2_p = float(signal.get("tp2_price", 0.0))
+            tp3_p = float(signal.get("tp3_price", 0.0))
+            sl_p = float(signal.get("sl_price", 0.0))
+
+            if entry_p <= 0 or sl_p <= 0 or tp1_p <= 0:
+                return False
+
+            if direction == "LONG" and not (sl_p < entry_p < tp1_p):
+                return False
+            if direction == "SHORT" and not (sl_p > entry_p > tp1_p):
+                return False
+
+            strategy = signal.get("canonical_strategy") or signal.get("strategy", "MOMENTUM_LONG")
+            regime = signal.get("active_regime") or signal.get("regime") or (btc_shield_state.get("v16_regime") if btc_shield_state else "RANGE")
+
+            shadow_rec = {
+                "trade_id": f"SHADOW_{symbol.replace('/', '_')}_{norm_horizon}_{int(time.time()*1000)}",
+                "signal_id": signal.get("signal_id") or signal.get("trade_id"),
+                "symbol": symbol,
+                "desk": "shadow",
+                "is_shadow": True,
+                "strategy": strategy,
+                "canonical_strategy": strategy,
+                "regime": regime,
+                "direction": direction,
+                "horizon": norm_horizon,
+                "signal_horizon": norm_horizon,
+                "entry_price": entry_p,
+                "current_price": entry_p,
+                "tp1_price": tp1_p,
+                "tp2_price": tp2_p if tp2_p > 0 else tp1_p,
+                "tp3_price": tp3_p if tp3_p > 0 else tp1_p,
+                "sl_price": sl_p,
+                "peak_gain_pct": 0.0,
+                "opened_at": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat(),
+                "status": "SHADOW_OPEN"
+            }
+
+            self.data.setdefault("shadow_positions", []).append(shadow_rec)
+            self.save_ledger()
+            try:
+                print(f"[PAPER BOT 👻 SHADOW ADMIT] Admitted Shadow Simulation Trade: {symbol} ({direction} {norm_horizon}) for PAUSED strategy '{strategy}' | Entry: ${entry_p:,.4f} | TP1: ${tp1_p:,.4f} | SL: ${sl_p:,.4f}")
+            except Exception:
+                pass
+            return True
+
     def _create_cancellation_record(self, pos: Dict[str, Any], reason: str, detail: str) -> Dict[str, Any]:
         """Creates a standardized cancellation record for resting limit orders."""
         now_utc = datetime.now(timezone.utc)
@@ -751,6 +839,38 @@ class PaperTradingBot:
                 max_hold_secs = 7200 if "15M" in norm_h else (172800 if any(x in norm_h for x in ["24H", "1D", "SWING", "MACRO"]) else 21600)
                 hit_expiry = elapsed_secs >= max_hold_secs
 
+                # -------------------------------------------------------------
+                # Feature 5.2: Dynamic Time-Decay TP Compaction (Section 20 & Phase 5)
+                # -------------------------------------------------------------
+                if elapsed_secs >= (0.80 * max_hold_secs) and not pos.get("tp1_hit") and tp1_p > 0:
+                    final_window = max(1.0, 0.20 * max_hold_secs)
+                    elapsed_in_window = min(final_window, max(0.0, elapsed_secs - (0.80 * max_hold_secs)))
+                    decay_lambda = math.exp(-2.5 * (elapsed_in_window / final_window))
+
+                    if "original_tp1_price" not in pos:
+                        pos["original_tp1_price"] = tp1_p
+
+                    orig_tp1 = float(pos["original_tp1_price"])
+                    # Compact towards entry, retaining at least 35% of original profit target
+                    cand_compacted = entry_p + (orig_tp1 - entry_p) * (0.35 + 0.65 * decay_lambda)
+
+                    # Ensure minimal profit hurdle to cover friction (at least 15 bps beyond entry)
+                    min_friction_buffer = 0.0015 * entry_p
+                    if direction == "LONG" and cand_compacted > (entry_p + min_friction_buffer):
+                        cand_p = format_dynamic_precision(cand_compacted)
+                        if cand_p < tp1_p:
+                            pos["tp1_price"] = cand_p
+                            pos["is_tp_compacted"] = True
+                            tp1_p = cand_p
+                            is_tp1 = curr_p >= tp1_p
+                    elif direction == "SHORT" and cand_compacted < (entry_p - min_friction_buffer):
+                        cand_p = format_dynamic_precision(cand_compacted)
+                        if cand_p > tp1_p:
+                            pos["tp1_price"] = cand_p
+                            pos["is_tp_compacted"] = True
+                            tp1_p = cand_p
+                            is_tp1 = curr_p <= tp1_p
+
                 # Tier-0 Breakeven Ratchet: Tied to TP1 proximity (90% of TP1 range touched)
                 tp1_p_pos = float(pos.get("tp1_price", 0.0))
                 if direction == "LONG":
@@ -1001,6 +1121,72 @@ class PaperTradingBot:
             desks = self.data.get("desks", {})
             for d_key, d_val in desks.items():
                 d_val["active_slots"] = sum(1 for p in remaining_positions if p.get("desk") == d_key)
+
+            # -----------------------------------------------------------------
+            # 3. EVALUATE SHADOW TRACKING POSITIONS FOR PAUSED STRATEGIES (Feature 5.1)
+            # -----------------------------------------------------------------
+            remaining_shadow = []
+            shadow_positions = self.data.get("shadow_positions", [])
+            if shadow_positions:
+                from app.quant_v16.strategies import StrategyRegistry
+                strat_reg = StrategyRegistry()
+
+                for spos in shadow_positions:
+                    sym = spos.get("symbol")
+                    curr_p = live_prices.get(sym) or live_prices.get(sym.replace("/", "").replace(":USDT", ""))
+                    if not curr_p or curr_p <= 0:
+                        remaining_shadow.append(spos)
+                        continue
+
+                    spos["current_price"] = curr_p
+                    e_p = spos["entry_price"]
+                    s_dir = spos["direction"]
+                    s_hz = spos.get("signal_horizon") or spos.get("horizon", "1H")
+
+                    s_opened = datetime.fromisoformat(spos["opened_at_utc"].replace("Z", "+00:00")) if spos.get("opened_at_utc") else datetime.now(timezone.utc)
+                    s_elapsed = (datetime.now(timezone.utc) - s_opened).total_seconds()
+                    s_max_hold = 7200 if "15M" in s_hz else (172800 if any(x in s_hz for x in ["24H", "1D", "SWING", "MACRO"]) else 21600)
+
+                    s_gain = ((curr_p - e_p) / e_p) * 100.0 if s_dir == "LONG" else ((e_p - curr_p) / e_p) * 100.0
+                    spos["peak_gain_pct"] = max(spos.get("peak_gain_pct", 0.0), s_gain)
+
+                    # Dynamic time decay on shadow TP1 if >80% TTL elapsed
+                    s_tp1 = spos["tp1_price"]
+                    if s_elapsed >= 0.80 * s_max_hold and not spos.get("tp1_hit"):
+                        decay_w = max(1.0, 0.20 * s_max_hold)
+                        decay_t = min(decay_w, max(0.0, s_elapsed - 0.80 * s_max_hold))
+                        decay_l = math.exp(-2.5 * (decay_t / decay_w))
+                        s_orig_tp1 = float(spos.get("original_tp1_price", s_tp1))
+                        spos["original_tp1_price"] = s_orig_tp1
+                        cand_s_tp1 = e_p + (s_orig_tp1 - e_p) * (0.35 + 0.65 * decay_l)
+                        min_buf = 0.0015 * e_p
+                        if s_dir == "LONG" and cand_s_tp1 > (e_p + min_buf) and cand_s_tp1 < s_tp1:
+                            spos["tp1_price"] = format_dynamic_precision(cand_s_tp1)
+                            s_tp1 = spos["tp1_price"]
+                        elif s_dir == "SHORT" and cand_s_tp1 < (e_p - min_buf) and cand_s_tp1 > s_tp1:
+                            spos["tp1_price"] = format_dynamic_precision(cand_s_tp1)
+                            s_tp1 = spos["tp1_price"]
+
+                    s_hit_tp1 = (curr_p >= s_tp1) if s_dir == "LONG" else (curr_p <= s_tp1)
+                    s_hit_sl = (curr_p <= spos["sl_price"]) if s_dir == "LONG" else (curr_p >= spos["sl_price"])
+                    s_hit_expiry = s_elapsed >= s_max_hold
+
+                    if s_hit_tp1 or s_hit_sl or s_hit_expiry:
+                        is_win = s_hit_tp1 or (s_hit_expiry and s_gain > 0.05)
+                        net_ret = s_gain - (self.taker_fee_rate * 200.0 + 0.04 + 0.03)
+                        strat_id = spos.get("canonical_strategy") or spos.get("strategy")
+                        regime = spos.get("regime")
+                        unpause_info = strat_reg.record_shadow_outcome(strat_id, is_win=is_win, net_return_pct=net_ret, regime=regime)
+                        try:
+                            print(f"[PAPER BOT 👻 SHADOW RESOLVED] Shadow trade {sym} ({s_dir}) resolved: Win={is_win}, NetRet={net_ret:+.2f}%. Strategy '{strat_id}' status: {unpause_info.get('status')} (Unpaused: {unpause_info.get('unpaused')}, Rolling PF: {unpause_info.get('rolling_50_pf')})")
+                        except Exception:
+                            pass
+                        continue
+
+                    remaining_shadow.append(spos)
+
+                self.data["shadow_positions"] = remaining_shadow
+
             self.save_ledger()
 
     def _sync_paper_partial_tp_to_audit(self, pos: Dict[str, Any], tp_stage: str, tp_price: float, gain_pct: float):

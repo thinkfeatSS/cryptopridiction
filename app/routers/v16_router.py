@@ -9,7 +9,8 @@ Provides endpoints for:
 - /api/v16/status & /api/v16/audit/status: Engine telemetry & live health
 """
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Depends
+from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
 import os
 import json
@@ -18,6 +19,7 @@ import time
 from datetime import datetime, timezone
 
 from app.config import settings
+from app.database import get_db
 from app.engine.scanner.filters import UniverseFilter
 
 v16_router = APIRouter(prefix="/api/v16", tags=["Quant Edge V16 Intelligence"])
@@ -999,4 +1001,26 @@ def get_v16_validation_report() -> Dict[str, Any]:
     return {
         "status": "success",
         "report": asdict(report)
+    }
+
+@v16_router.get("/calibration")
+def get_v16_calibration(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """
+    Feature 5.3: Returns live horizon-specific Brier scores, reliability gaps,
+    and forecast probability calibration metrics.
+    """
+    from app.services.signal_service import signal_service
+    kpis = signal_service.get_kpi_summary(db)
+    calib = kpis.get("calibration_metrics")
+    if not calib:
+        calib_path = os.path.join(settings.EXPORT_DIR, "v16_calibration_metrics.json")
+        if os.path.exists(calib_path):
+            try:
+                with open(calib_path, "r", encoding="utf-8") as f:
+                    calib = json.load(f)
+            except Exception:
+                calib = {}
+    return {
+        "status": "success",
+        "calibration_metrics": calib or {}
     }
