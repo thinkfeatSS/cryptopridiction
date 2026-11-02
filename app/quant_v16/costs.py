@@ -3,11 +3,13 @@ QUANT EDGE V16: Execution Cost Engine
 Specifications:
 - Section 20: Cost Engine (Maker/Taker fees, Spread bps, Slippage bps, Funding rates)
 - Execution Scenarios: OPTIMISTIC, BASE, CONSERVATIVE, STRESS
+- EXT-02: Non-Linear Liquidity Slippage Model (Square-root market impact)
 """
 
 from enum import Enum
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
+import math
 
 class ExecutionAssumption(str, Enum):
     OPTIMISTIC = "OPTIMISTIC"
@@ -23,6 +25,7 @@ class CostBreakdown:
     funding_pct: float         # Accrued 8h funding drag if holding across funding intervals
     total_cost_pct: float      # Sum of all execution drags
     assumption: ExecutionAssumption
+    liquidity_impact_mult: float = 1.0  # EXT-02 non-linear liquidity market impact scalar
 
 class ExecutionCostEngine:
     """
@@ -51,10 +54,14 @@ class ExecutionCostEngine:
         historical_slippage_bps: Optional[float] = None,
         est_holding_hours: float = 1.0,
         current_funding_rate: float = 0.0001, # 0.01% per 8h
-        assumption: ExecutionAssumption = ExecutionAssumption.BASE
+        assumption: ExecutionAssumption = ExecutionAssumption.BASE,
+        position_size_usd: Optional[float] = None,
+        volume_24h_usd: Optional[float] = None,
     ) -> CostBreakdown:
         """
         Estimates total roundtrip costs under specified scenario.
+        Includes EXT-02 non-linear square-root market impact slippage when position size
+        and 24h volume are provided.
         """
         is_futures = market_type.lower() in ["futures", "perp", "swap"]
         
@@ -74,6 +81,15 @@ class ExecutionCostEngine:
         
         # 3. Slippage (bps to %)
         slip_bps = historical_slippage_bps if historical_slippage_bps is not None else self.default_slippage_bps
+
+        # EXT-02: Non-Linear Liquidity Slippage Model
+        # Large orders relative to available top-of-book depth experience square-root market impact
+        liq_mult = 1.0
+        if position_size_usd is not None and volume_24h_usd is not None and float(volume_24h_usd) > 0:
+            depth_proxy = max(10000.0, float(volume_24h_usd) * 0.001)  # 0.1% daily volume top-of-book proxy
+            impact_ratio = math.sqrt(max(0.0, float(position_size_usd)) / depth_proxy)
+            liq_mult = float(max(0.70, min(3.00, impact_ratio)))
+            slip_bps = slip_bps * liq_mult
 
         # Multipliers by execution assumption
         if assumption == ExecutionAssumption.OPTIMISTIC:
@@ -104,13 +120,18 @@ class ExecutionCostEngine:
             funding_cycles = est_holding_hours / 8.0
             calc_funding = abs(current_funding_rate * 100.0) * funding_cycles
 
-        total_cost = round(calc_fee + calc_spread + calc_slippage + calc_funding, 4)
+        fee_pct = round(calc_fee, 4)
+        spread_pct = round(calc_spread, 4)
+        slippage_pct = round(calc_slippage, 4)
+        funding_pct = round(calc_funding, 4)
+        total_cost = round(fee_pct + spread_pct + slippage_pct + funding_pct, 4)
 
         return CostBreakdown(
-            fee_pct=round(calc_fee, 4),
-            spread_pct=round(calc_spread, 4),
-            slippage_pct=round(calc_slippage, 4),
-            funding_pct=round(calc_funding, 4),
+            fee_pct=fee_pct,
+            spread_pct=spread_pct,
+            slippage_pct=slippage_pct,
+            funding_pct=funding_pct,
             total_cost_pct=total_cost,
-            assumption=assumption
+            assumption=assumption,
+            liquidity_impact_mult=round(liq_mult, 2)
         )

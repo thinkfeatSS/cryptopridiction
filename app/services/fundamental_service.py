@@ -862,6 +862,94 @@ class FundamentalIntelligenceService:
             })
         return dynamic_events
 
+    def get_macro_economic_calendar(self, now_utc: Optional[datetime] = None) -> Dict[str, Any]:
+        """
+        NWS-01: Macro Economic Calendar and High-Impact Volatility Blackout Filter.
+        Dynamically computes scheduled major US macroeconomic releases:
+        1. US Non-Farm Payrolls (NFP): First Friday of each month at 12:30 UTC.
+        2. US CPI Release: Second Wednesday of each month at 12:30 UTC.
+        3. FOMC Interest Rate Decision: Federal Reserve cycle Wednesdays at 18:00 UTC.
+
+        Evaluates proximity to current timestamp:
+        - Blackout Window: [-30 min, +15 min] from scheduled release.
+        - During Blackout Window, 'is_volatility_pause_active' is True to protect
+          open capital from extreme spread expansion, slippage spikes, and dual-direction stop-runs.
+        """
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+
+        candidate_events = []
+        for month_offset in [-1, 0, 1]:
+            m_raw = now_utc.month + month_offset
+            y = now_utc.year + (m_raw - 1) // 12
+            m = ((m_raw - 1) % 12) + 1
+
+            # 1. NFP: First Friday of month at 12:30 UTC
+            for d in range(1, 8):
+                dt = datetime(y, m, d, 12, 30, tzinfo=timezone.utc)
+                if dt.weekday() == 4:  # Friday
+                    candidate_events.append({
+                        "name": "US Non-Farm Payrolls (NFP) and Unemployment",
+                        "impact": "HIGH",
+                        "time_utc": dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        "datetime": dt
+                    })
+                    break
+
+            # 2. US CPI: Second Wednesday of month at 12:30 UTC
+            for d in range(8, 15):
+                dt = datetime(y, m, d, 12, 30, tzinfo=timezone.utc)
+                if dt.weekday() == 2:  # Wednesday
+                    candidate_events.append({
+                        "name": "US Consumer Price Index (CPI) Inflation",
+                        "impact": "HIGH",
+                        "time_utc": dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        "datetime": dt
+                    })
+                    break
+
+            # 3. FOMC Rate Decision: FOMC schedule months
+            if m in [1, 3, 5, 6, 7, 9, 11, 12]:
+                for d in range(15, 22):
+                    dt = datetime(y, m, d, 18, 0, tzinfo=timezone.utc)
+                    if dt.weekday() == 2:  # Wednesday
+                        candidate_events.append({
+                            "name": "FOMC Interest Rate Decision and Press Conference",
+                            "impact": "CRITICAL",
+                            "time_utc": dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                            "datetime": dt
+                        })
+                        break
+
+        nearest_event = None
+        min_abs_diff_min = float("inf")
+        nearest_diff_min = 0.0
+
+        for ev in candidate_events:
+            diff_min = (ev["datetime"] - now_utc).total_seconds() / 60.0
+            if abs(diff_min) < min_abs_diff_min:
+                min_abs_diff_min = abs(diff_min)
+                nearest_diff_min = diff_min
+                nearest_event = ev
+
+        is_volatility_pause_active = False
+        pause_reason = ""
+        if nearest_event and (-30.0 <= nearest_diff_min <= 15.0):
+            is_volatility_pause_active = True
+            time_desc = f"{abs(round(nearest_diff_min, 1))}m {'until' if nearest_diff_min > 0 else 'since'} release"
+            pause_reason = f"US Macro Volatility Blackout: {nearest_event['name']} ({time_desc})"
+
+        return {
+            "has_macro_event": nearest_event is not None,
+            "has_upcoming_event": nearest_event is not None,
+            "event_name": nearest_event["name"] if nearest_event else None,
+            "impact": nearest_event["impact"] if nearest_event else None,
+            "event_time_utc": nearest_event["time_utc"] if nearest_event else None,
+            "minutes_until_event": round(nearest_diff_min, 1) if nearest_event else None,
+            "is_volatility_pause_active": is_volatility_pause_active,
+            "pause_reason": pause_reason if is_volatility_pause_active else None
+        }
+
     # -------------------------------------------------------------------------
     # 1. ALTERNATIVE.ME FEAR & GREED INDEX (100% Free Public REST API)
     # -------------------------------------------------------------------------
@@ -1686,6 +1774,9 @@ class FundamentalIntelligenceService:
                         is_pre_event_runup = True
                 break
 
+        # 2b. Macro Economic Calendar (NWS-01)
+        macro_ev = self.get_macro_economic_calendar(now_utc)
+
         # 3. Sector & Trending Status
         cg = self.fetch_coingecko_intelligence()
         trending_list = cg.get("trending_coins", [])
@@ -1797,6 +1888,13 @@ class FundamentalIntelligenceService:
                 sizing_multiplier *= 0.75
                 flags.append("🚨 Negative News Sentinel Alert")
 
+        # F. Macro Economic Release Blackout Window (NWS-01)
+        if macro_ev.get("is_volatility_pause_active"):
+            composite_score -= 40.0
+            conviction_delta -= 15.0
+            sizing_multiplier *= 0.50
+            flags.append(f"⚠️ {macro_ev.get('pause_reason', 'US Macroeconomic Release Volatility Blackout')}")
+
         composite_score = max(-100.0, min(100.0, round(composite_score, 1)))
         conviction_delta = max(-20.0, min(20.0, round(conviction_delta, 1)))
         sizing_multiplier = max(0.40, min(1.30, round(sizing_multiplier, 2)))
@@ -1833,6 +1931,7 @@ class FundamentalIntelligenceService:
                 "top_headline": top_headline,
                 "articles_count": len(relevant_news)
             },
+            "macro_economic_event": macro_ev,
             "flags": flags,
             "generated_at_utc": now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
         }

@@ -254,6 +254,18 @@ class PaperTradingBot:
                 print(f"[PAPER BOT 🛑 NTZ REJECT] Rejected trade entry for {sym}: Asset No Trade Zone is active ({signal.get('ntz_reason', 'NTZ Filter')}).")
                 return False
 
+            # 0c. Reject if Macro Economic Blackout or Volatility Pause is active (NWS-01)
+            fund_matrix = signal.get("fundamental_matrix") or {}
+            macro_ev = fund_matrix.get("macro_economic_event") or signal.get("macro_economic_event") or {}
+            if signal.get("is_macro_blackout") or macro_ev.get("is_volatility_pause_active"):
+                sym = signal.get("symbol", "UNKNOWN")
+                ev_name = macro_ev.get("event_name", "US Macro Event")
+                try:
+                    print(f"[PAPER BOT [MACRO REJECT]] Rejected trade entry for {sym}: High-impact macroeconomic release in progress ({ev_name}).")
+                except Exception:
+                    pass
+                return False
+
             sig_status = str(signal.get("signal_status", ""))
             if "NO_TRADE_ZONE" in sig_status or "VETO" in sig_status or "WAITING" in sig_status:
                 sym = signal.get("symbol", "UNKNOWN")

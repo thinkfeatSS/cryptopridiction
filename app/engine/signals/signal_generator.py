@@ -181,7 +181,7 @@ class SignalGenerationSystem:
             return True, btc_shield_state.get("reason", "BTC Flash Dump: Defensive Cash Only Posture")
         return False, ""
 
-    def _get_timeframe_ttl(self, tf: str) -> float:
+    def _get_timeframe_ttl(self, tf: str, active_atr_pct: Optional[float] = None) -> float:
         ttls = {
             "5m": 90.0,     # 1.5 min
             "15m": 240.0,   # 4 min
@@ -193,7 +193,12 @@ class SignalGenerationSystem:
             "15d": 43200.0, # 12 hours
             "1M": 86400.0   # 24 hours
         }
-        return ttls.get(tf, 120.0)
+        base_ttl = ttls.get(tf, 120.0)
+        # SIG-02: Volatility-conditioned dynamic timeframe TTL
+        if active_atr_pct is not None and active_atr_pct > 0:
+            vol_multiplier = float(np.clip(1.50 / max(0.50, active_atr_pct), 0.40, 1.25))
+            return round(base_ttl * vol_multiplier, 1)
+        return base_ttl
 
     def _build_single_horizon_signal(
         self,
@@ -403,12 +408,21 @@ class SignalGenerationSystem:
         )
 
         holding_hours = 0.25 if horizon_label == "15M" else (1.0 if horizon_label == "1H" else 24.0)
+
+        # EXT-02: Non-Linear Liquidity Market Impact Slippage
+        vol_24h_usd = None
+        if "1d" in dfs_9 and not dfs_9["1d"].empty and "volume" in dfs_9["1d"].columns:
+            last_vol = float(dfs_9["1d"]["volume"].iloc[-1])
+            vol_24h_usd = last_vol * current_price if current_price > 0 else None
+
         cost_breakdown = self.cost_engine.estimate_costs(
             market_type="futures",
             observed_spread_bps=spread_bps,
             est_holding_hours=holding_hours,
             current_funding_rate=0.0001,
-            assumption=ExecutionAssumption.BASE
+            assumption=ExecutionAssumption.BASE,
+            position_size_usd=1000.0,
+            volume_24h_usd=vol_24h_usd
         )
 
         ev_result = self.expectancy_engine.evaluate(
@@ -434,9 +448,12 @@ class SignalGenerationSystem:
         news_headline = ""
         cat_title = ""
 
+        is_macro_blackout = False
+        macro_blackout_reason = ""
         if fund_matrix:
             cat_ev = fund_matrix.get("catalyst_event", {})
             news_sent = fund_matrix.get("news_sentiment", {})
+            macro_ev = fund_matrix.get("macro_economic_event", {})
             has_severe_negative_news = bool(fund_matrix.get("has_severe_negative_news", False) or news_sent.get("has_severe_negative_news", False))
             is_sell_the_news = bool(cat_ev.get("is_sell_the_news_danger_zone", False))
             is_pre_event = bool(cat_ev.get("is_pre_event_runup", False))
@@ -444,11 +461,17 @@ class SignalGenerationSystem:
             news_label = news_sent.get("label", "⚪ NEUTRAL")
             news_headline = news_sent.get("top_headline") or (news_sent.get("recent_headlines", ["Negative News"])[0] if news_sent.get("recent_headlines") else "Negative News Alert")
             cat_title = cat_ev.get("title", "Catalyst Event")
+            is_macro_blackout = bool(macro_ev.get("is_volatility_pause_active", False))
+            macro_blackout_reason = macro_ev.get("pause_reason", "US Macro Release Blackout Active")
 
-        # News & Event Gating for Long setups (Black Swan Sentinel)
+        # News & Event Gating (Black Swan Sentinel & NWS-01 Macro Blackout)
         is_news_vetoed = False
         news_veto_reason = ""
-        if direction == "LONG":
+        if is_macro_blackout:
+            # Blackout halts both LONG and SHORT setups during high-impact US macro release
+            is_news_vetoed = True
+            news_veto_reason = f"🚨 {macro_blackout_reason}"
+        elif direction == "LONG":
             if has_severe_negative_news or news_score <= -0.40:
                 is_news_vetoed = True
                 news_veto_reason = f"🚨 Black Swan / Negative News Sentinel ({news_label}): {news_headline[:60]}"
@@ -635,6 +658,8 @@ class SignalGenerationSystem:
             "decision": decision_str,
             "is_trade_active": trade_active,
             "signal_status": status,
+            "is_macro_blackout": is_macro_blackout,
+            "macro_economic_event": fund_matrix.get("macro_economic_event") if fund_matrix else None,
             "is_ntz_active": is_ntz_active,
             "ntz_reason": ntz_reason if is_ntz_active else None,
             "ntz_badge": ntz_eval.get("badge", "NO TRADE ZONE") if is_ntz_active else "TRADE ZONE APPROVED",
@@ -1139,7 +1164,13 @@ class SignalGenerationSystem:
 
             last_candle_ts = int(df_tf["timestamp"].iloc[-1]) if "timestamp" in df_tf.columns else 0
             cache_key = f"{symbol}_{tf}"
-            ttl = self._get_timeframe_ttl(tf)
+            # SIG-02: Volatility-conditioned dynamic timeframe TTL
+            c_close = float(df_tf["close"].iloc[-1]) if len(df_tf) > 0 else 1.0
+            high_s = df_tf["high"] if "high" in df_tf.columns else df_tf["close"]
+            low_s = df_tf["low"] if "low" in df_tf.columns else df_tf["close"]
+            tr_proxy = float((high_s.iloc[-1] - low_s.iloc[-1])) if len(df_tf) > 0 else (c_close * 0.015)
+            tf_atr_pct = (tr_proxy / max(1e-8, c_close)) * 100.0
+            ttl = self._get_timeframe_ttl(tf, active_atr_pct=tf_atr_pct)
 
             # 1. Extract Candle Dynamics Features
             feats = self.feature_extractor.extract_features(df_tf, prefix=tf)
@@ -1712,6 +1743,8 @@ class SignalGenerationSystem:
             "fundamental_matrix": fund_matrix,
             "news_sentiment": fund_matrix.get("news_sentiment") if fund_matrix else None,
             "catalyst_event": fund_matrix.get("catalyst_event") if fund_matrix else None,
+            "macro_economic_event": fund_matrix.get("macro_economic_event") if fund_matrix else None,
+            "is_macro_blackout": dom_sig.get("is_macro_blackout", False) if dom_sig else False,
             "sizing_multiplier": dom_sig.get("sizing_multiplier", fund_matrix.get("sizing_multiplier", 1.0) if fund_matrix else 1.0) if dom_sig else (fund_matrix.get("sizing_multiplier", 1.0) if fund_matrix else 1.0),
             "coin_beta": dom_sig.get("coin_beta", 1.0) if dom_sig else 1.0,
             "active_atr": dom_sig.get("active_atr", 0.0) if dom_sig else 0.0,
