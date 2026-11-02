@@ -21,6 +21,7 @@ Specifications:
 """
 
 import math
+import os
 from enum import Enum
 from typing import Dict, Any, Tuple, Optional
 from dataclasses import dataclass, field
@@ -198,6 +199,7 @@ class NetExpectancyEngine:
         WATCH: Expected Net Return > 0.00%
         NO TRADE: Expected Net Return <= 0.00%
         """
+        min_ev_hurdle = float(os.getenv("MIN_NET_EV_HURDLE", "0.10"))
         if risk_reward < 1.2:
             return "NO_TRADE", False, f"Unfavorable Risk:Reward ({risk_reward:.2f} < 1.2 minimum threshold)"
 
@@ -207,10 +209,10 @@ class NetExpectancyEngine:
             return "A", True, f"Grade A Expectancy ({expected_net_return_pct:+.2f}% net return)"
         elif expected_net_return_pct >= 0.25:
             return "B", True, f"Grade B Expectancy ({expected_net_return_pct:+.2f}% net return)"
+        elif expected_net_return_pct >= min_ev_hurdle and expected_net_return_pct > 0.00:
+            return "B", True, f"Grade B Expectancy ({expected_net_return_pct:+.2f}% net return)"
         elif expected_net_return_pct > 0.00:
-            # WATCH-grade now blocked (Fix RC-7): Marginal EV (0–0.25%) produces BE outcomes after friction
-            # Require at least Grade B (>=0.25% net) for signal emission
-            return "WATCH", False, f"Blocked: Marginal Net Expectancy ({expected_net_return_pct:+.2f}% < 0.25% minimum Grade B threshold)"
+            return "WATCH", False, f"Blocked: Marginal Net Expectancy ({expected_net_return_pct:+.2f}% < {min_ev_hurdle:.2f}% threshold)"
         else:
             return "NO_TRADE", False, f"Negative/Zero Net Expectancy ({expected_net_return_pct:+.2f}% after costs)"
 
