@@ -56,6 +56,10 @@ export default function AutoScanWatcher() {
       queryClient.invalidateQueries({ queryKey: ["dailySummary"] });
       queryClient.invalidateQueries({ queryKey: ["portfolio"] });
       queryClient.invalidateQueries({ queryKey: ["coinSignals"] });
+      queryClient.invalidateQueries({ queryKey: ["v16-signals"] });
+      queryClient.invalidateQueries({ queryKey: ["v16-theses"] });
+      queryClient.invalidateQueries({ queryKey: ["v16-events"] });
+      queryClient.invalidateQueries({ queryKey: ["v16-regime"] });
 
       if (cooldownElapsed) {
         lastAlertTimeRef.current = now;
@@ -89,6 +93,9 @@ export default function AutoScanWatcher() {
       queryClient.invalidateQueries({ queryKey: ["portfolio"] });
       queryClient.invalidateQueries({ queryKey: ["signals"] });
       queryClient.invalidateQueries({ queryKey: ["kpi"] });
+      queryClient.invalidateQueries({ queryKey: ["v16-signals"] });
+      queryClient.invalidateQueries({ queryKey: ["v16-theses"] });
+      queryClient.invalidateQueries({ queryKey: ["v16-events"] });
     }
   }, [status?.full_scan_version, status?.scan_version, status?.portfolio_version, status?.last_scan_timestamp, queryClient]);
 

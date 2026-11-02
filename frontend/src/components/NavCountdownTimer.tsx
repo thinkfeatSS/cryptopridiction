@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { useStatusQuery } from "@/hooks/useCryptoData";
 import { formatTimeRemaining } from "@/lib/utils";
-import { Radio, Loader2 } from "lucide-react";
+import { Zap, Loader2 } from "lucide-react";
 
 export default React.memo(function NavCountdownTimer() {
   const { data: status } = useStatusQuery();
@@ -19,13 +19,10 @@ export default React.memo(function NavCountdownTimer() {
     if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan > 0) {
       return status.seconds_to_next_scan;
     }
-    const now = new Date();
-    const mins = 15 - (now.getUTCMinutes() % 15);
-    const secs = (mins * 60) - now.getUTCSeconds();
-    return Math.max(1, secs);
+    return 60;
   }, [status?.next_scan_timestamp, status?.seconds_to_next_scan]);
 
-  const [localSeconds, setLocalSeconds] = useState<number>(900);
+  const [localSeconds, setLocalSeconds] = useState<number>(60);
 
   useEffect(() => {
     setMounted(true);
@@ -43,30 +40,30 @@ export default React.memo(function NavCountdownTimer() {
 
   return (
     <div
-      title={status?.next_scan_utc ? `Authoritative Engine Target: ${status.next_scan_utc}` : "Targeting next 15M candle boundary"}
+      title={status?.next_scan_utc ? `Candle Boundary Sync Target: ${status.next_scan_utc} UTC (Fresh Retrained Models)` : "Candle-Synchronized 15M Retraining Active"}
       className={`hidden lg:flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs shadow-sm transition-all ${
         isScanning
           ? "border-cyan-500/60 bg-cyan-950/60 text-cyan-300 shadow-cyan-500/20 animate-pulse"
-          : "border-indigo-500/30 bg-indigo-950/40 text-indigo-300 shadow-indigo-500/10"
+          : "border-emerald-500/40 bg-emerald-950/30 text-emerald-300 shadow-emerald-500/10"
       }`}
     >
       {isScanning ? (
         <Loader2 className="h-3.5 w-3.5 animate-spin text-cyan-400 shrink-0" />
       ) : (
-        <Radio className="h-3.5 w-3.5 animate-pulse text-indigo-400 shrink-0" />
+        <Zap className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
       )}
       <div className="flex flex-col">
         <span
           className={`text-[9px] uppercase tracking-wider font-bold ${
-            isScanning ? "text-cyan-300" : "text-indigo-300/80"
+            isScanning ? "text-cyan-300" : "text-emerald-400/90"
           }`}
         >
-          {isScanning ? "AI Engine Status" : "Next 15M Scan In"}
+          {isScanning ? "AI Retraining Models" : "⚡ 15M Candle Retrain"}
         </span>
         <span className="font-mono text-xs font-bold text-white" suppressHydrationWarning>
           {isScanning
-            ? (status?.scanned_assets_count ? `⚡ Streaming: ${status.scanned_assets_count}/100 Coins...` : "⚡ Streaming Active Universe...")
-            : (!mounted ? "15:00" : formatTimeRemaining(localSeconds))}
+            ? (status?.scanned_assets_count ? `Retraining: ${status.scanned_assets_count}/${status?.total_assets_count || 110} Coins...` : "Retraining Models...")
+            : (!mounted ? "Candle Sync (60s)" : `Sync in ${formatTimeRemaining(localSeconds)}`)}
         </span>
       </div>
     </div>

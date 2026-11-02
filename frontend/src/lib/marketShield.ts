@@ -93,8 +93,17 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
     };
   }
 
-  // 5. BULL_MOMENTUM / PREDICTED BULLISH EXPANSION
-  if (code === "BULL_MOMENTUM" || regime === "BULLISH" || reason.toUpperCase().includes("BULLISH") || shield?.predicted_trend === "BULLISH") {
+  // 5. BULL_TREND / BULL_MOMENTUM / PREDICTED BULLISH EXPANSION
+  if (
+    code === "BULL_TREND" ||
+    code === "BULL_MOMENTUM" ||
+    regime === "BULL_TREND" ||
+    regime === "BULLISH" ||
+    reason.toUpperCase().includes("BULL TREND") ||
+    reason.toUpperCase().includes("BULLISH") ||
+    shield?.predicted_trend === "BULL_TREND" ||
+    shield?.predicted_trend === "BULLISH"
+  ) {
     return {
       border: "border-emerald-500/60 bg-emerald-950/40 text-emerald-300 shadow-emerald-500/25",
       iconColor: "text-emerald-400",
@@ -105,32 +114,74 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
       glowBg: "bg-emerald-500/20",
       headline: "🚀 Predicted Bullish Market Expansion",
       subline: "BTC momentum is accelerating upwards above key EMAs. Long continuation and breakout setups active.",
-      label: "BULLISH EXPANSION",
-      regimeBadge: "BULLISH REGIME",
-      statusTitle: reason || "BULLISH EXPANSION",
+      label: "BULL TREND",
+      regimeBadge: "BULL TREND",
+      statusTitle: reason || "BULL TREND (Longs Active)",
     };
   }
 
-  // 6. BEAR_MOMENTUM / PREDICTED BEARISH BREAKDOWN
-  if (code === "BEAR_MOMENTUM" || regime === "BEARISH" || reason.toUpperCase().includes("BEARISH") || shield?.predicted_trend === "BEARISH") {
+  // 5b. BREAKOUT / MOMENTUM EXPANSION
+  if (
+    code === "BREAKOUT" ||
+    regime === "BREAKOUT" ||
+    reason.toUpperCase().includes("BREAKOUT") ||
+    shield?.predicted_trend === "BREAKOUT" ||
+    shield?.predicted_trend === "BREAKOUT_EXPANSION"
+  ) {
     return {
-      border: "border-orange-500/60 bg-orange-950/40 text-orange-300 shadow-orange-500/20",
-      iconColor: "text-orange-400",
-      dotColor: "bg-orange-500",
-      pingColor: "bg-orange-400",
+      border: "border-sky-500/60 bg-sky-950/40 text-sky-300 shadow-sky-500/25",
+      iconColor: "text-sky-400",
+      dotColor: "bg-sky-500",
+      pingColor: "bg-sky-400",
       isAlert: false,
-      badgeBg: "bg-orange-500/20 text-orange-300 border-orange-500/50 shadow-sm shadow-orange-500/15",
-      glowBg: "bg-orange-500/20",
-      headline: "🐻 Predicted Bearish Breakdown & Selling Pressure",
-      subline: "BTC trading below key EMAs with negative drift. Altcoin longs filtered; short setups prioritized.",
-      label: "BEARISH DRIFT",
-      regimeBadge: "BEARISH REGIME",
-      statusTitle: reason || "BEARISH BREAKDOWN",
+      badgeBg: "bg-sky-500/20 text-sky-300 border-sky-500/50 shadow-sm shadow-sky-500/15",
+      glowBg: "bg-sky-500/20",
+      headline: "🚀 High-Momentum Market Breakout Active",
+      subline: "BTC momentum breakout expansion active. High-beta directional setups authorized.",
+      label: "MOMENTUM BREAKOUT",
+      regimeBadge: "BREAKOUT",
+      statusTitle: reason || "MOMENTUM BREAKOUT",
     };
   }
 
-  // 7. CONSOLIDATION / VOLATILITY COIL SQUEEZE
-  if (code === "CONSOLIDATION" || regime === "CONSOLIDATION" || reason.toUpperCase().includes("RANGE") || reason.toUpperCase().includes("CONSOLIDAT") || reason.toUpperCase().includes("SQUEEZE") || shield?.predicted_trend === "CONSOLIDATION") {
+  // 6. BEAR_TREND / BEAR_MOMENTUM / PREDICTED BEARISH BREAKDOWN
+  if (
+    code === "BEAR_TREND" ||
+    code === "BEAR_MOMENTUM" ||
+    regime === "BEAR_TREND" ||
+    regime === "BEARISH" ||
+    reason.toUpperCase().includes("BEAR TREND") ||
+    reason.toUpperCase().includes("BEARISH") ||
+    shield?.predicted_trend === "BEAR_TREND" ||
+    shield?.predicted_trend === "BEARISH"
+  ) {
+    return {
+      border: "border-rose-500/60 bg-rose-950/40 text-rose-300 shadow-rose-500/20",
+      iconColor: "text-rose-400",
+      dotColor: "bg-rose-500",
+      pingColor: "bg-rose-400",
+      isAlert: false,
+      badgeBg: "bg-rose-500/20 text-rose-300 border-rose-500/50 shadow-sm shadow-rose-500/15",
+      glowBg: "bg-rose-500/20",
+      headline: "🐻 Confirmed Bearish Macro Trend & Selling Pressure",
+      subline: "BTC confirmed macro bear trend below 1H EMA20/50. Short alpha authorized with Section 29 1.00x risk multiplier.",
+      label: "BEAR TREND",
+      regimeBadge: "BEAR TREND",
+      statusTitle: reason || "BEAR TREND (Shorts Authorized)",
+    };
+  }
+
+  // 7. CONSOLIDATION / VOLATILITY COIL SQUEEZE / RANGE BOUND
+  if (
+    code === "RANGE" ||
+    regime === "RANGE" ||
+    code === "CONSOLIDATION" ||
+    regime === "CONSOLIDATION" ||
+    reason.toUpperCase().includes("RANGE") ||
+    reason.toUpperCase().includes("CONSOLIDAT") ||
+    reason.toUpperCase().includes("SQUEEZE") ||
+    shield?.predicted_trend === "CONSOLIDATION"
+  ) {
     return {
       border: "border-indigo-500/50 bg-indigo-950/40 text-indigo-300 shadow-indigo-500/20",
       iconColor: "text-indigo-400",

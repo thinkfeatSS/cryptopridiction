@@ -1,17 +1,22 @@
 import os
+import sys
 import time
 import json
 import logging
 import threading
 import queue
 import requests
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Set
 from datetime import datetime, timezone
 
 from app.config import settings
 
 logger = logging.getLogger("whatsapp_service")
 logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _sh = logging.StreamHandler(sys.stdout)
+    _sh.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s"))
+    logger.addHandler(_sh)
 
 # Optional Redis connection for atomic cluster-wide deduplication
 try:
@@ -55,6 +60,8 @@ class WhatsAppService:
         self._worker_thread: Optional[threading.Thread] = None
         self._running: bool = True
         self._lock = threading.Lock()
+        self._broadcasted_signals: Set[str] = set()
+        self._enabled_override: Optional[bool] = None
         
         # Start async consumer worker
         self._start_worker()
@@ -68,6 +75,85 @@ class WhatsAppService:
                 daemon=True
             )
             self._worker_thread.start()
+
+    def _get_setting(self, name: str, default: Any = None) -> Any:
+        val = getattr(settings, name, None)
+        if val is None or val == "":
+            val = os.getenv(name, default)
+        return val
+
+    @property
+    def enabled(self) -> bool:
+        if self._enabled_override is not None:
+            return self._enabled_override
+        v = self._get_setting("WHATSAPP_ENABLED", "true")
+        if isinstance(v, bool):
+            return v
+        return str(v).lower() in ("true", "1", "yes")
+
+    @enabled.setter
+    def enabled(self, val: Optional[bool]):
+        self._enabled_override = val
+
+    @property
+    def gateway_type(self) -> str:
+        return str(self._get_setting("WHATSAPP_GATEWAY_TYPE", "evolution_api")).lower()
+
+    @property
+    def api_url(self) -> str:
+        return str(self._get_setting("WHATSAPP_API_URL", "http://whatsapp:8080")).rstrip('/')
+
+    @property
+    def api_key(self) -> str:
+        return str(self._get_setting("WHATSAPP_API_KEY", "crypto_quant_secret_2026"))
+
+    @property
+    def instance_name(self) -> str:
+        return str(self._get_setting("WHATSAPP_INSTANCE_NAME", "crypto_bot"))
+
+    @property
+    def group_id(self) -> str:
+        return str(self._get_setting("WHATSAPP_GROUP_ID", "120363431167900107@g.us"))
+
+    @property
+    def channel_id(self) -> str:
+        cid = str(self._get_setting("WHATSAPP_CHANNEL_ID", "") or "").strip()
+        if "@newsletter" in cid:
+            return ""
+        return cid
+
+    @property
+    def min_grade(self) -> str:
+        return str(self._get_setting("WHATSAPP_MIN_GRADE", "ALL"))
+
+    @property
+    def min_win_prob(self) -> float:
+        try:
+            return float(self._get_setting("WHATSAPP_MIN_WIN_PROB", 0.0))
+        except Exception:
+            return 0.0
+
+    @property
+    def send_tp_updates(self) -> bool:
+        v = self._get_setting("WHATSAPP_SEND_TP_UPDATES", "true")
+        return v is True or str(v).lower() in ("true", "1", "yes")
+
+    @property
+    def send_sl_updates(self) -> bool:
+        v = self._get_setting("WHATSAPP_SEND_SL_UPDATES", "true")
+        return v is True or str(v).lower() in ("true", "1", "yes")
+
+    @property
+    def send_regime_alerts(self) -> bool:
+        v = self._get_setting("WHATSAPP_SEND_REGIME_ALERTS", "true")
+        return v is True or str(v).lower() in ("true", "1", "yes")
+
+    @property
+    def rate_limit_seconds(self) -> float:
+        try:
+            return float(self._get_setting("WHATSAPP_RATE_LIMIT_SECONDS", 2.0))
+        except Exception:
+            return 2.0
 
     # =========================================================================
     # DEDUPLICATION & IDEMPOTENCY
@@ -108,27 +194,56 @@ class WhatsAppService:
     def passes_quality_gate(self, sig: Dict[str, Any], is_channel: bool = False) -> bool:
         """
         Determines whether a signal qualifies for automated broadcast.
-        - Group: Grade A or Grade A+, ML Win Prob >= settings.WHATSAPP_MIN_WIN_PROB
-        - Channel: Grade A+ only, or Meta-Win Prob >= 75%
+        - Group: Sends signals admitted by SignalAuditTracker according to WHATSAPP_MIN_GRADE and WHATSAPP_MIN_WIN_PROB.
+        - Channel: Grade A+, Grade A, or Meta-Win Prob >= 60%
         """
-        grade = str(sig.get("quality_grade") or sig.get("grade") or "").upper()
-        grade_tier = sig.get("grade_tier", 3)
+        raw_grade = str(sig.get("quality_grade") or sig.get("grade") or "").upper()
+        try:
+            grade_tier = int(sig.get("grade_tier", 2))
+        except (ValueError, TypeError):
+            grade_tier = 2
         win_prob = float(sig.get("meta_win_prob_pct") or (float(sig.get("meta_win_prob", 0.5)) * 100.0 if float(sig.get("meta_win_prob", 0.5)) <= 1.0 else sig.get("meta_win_prob", 50.0)))
         conviction = float(sig.get("conviction_pct") or sig.get("conviction") or 50.0)
 
-        # Baseline: Grade must be A or A+
-        is_grade_a = ("GRADE A" in grade) or (grade_tier <= 2)
-        if not is_grade_a and "GRADE A+" not in grade:
+        min_grade_setting = str(self.min_grade).upper()
+
+        # Check grade classification flexibly (e.g. "A+", "A (INSTITUTIONAL)", "B (HIGH CONVICTION)")
+        has_grade_a_plus = "A+" in raw_grade or "GRADE A+" in raw_grade
+        has_grade_a = has_grade_a_plus or raw_grade.startswith("A ") or "GRADE A" in raw_grade or "A (" in raw_grade or (grade_tier <= 2)
+        has_grade_b = has_grade_a or "GRADE B" in raw_grade or raw_grade.startswith("B ") or "B (" in raw_grade or (grade_tier <= 3)
+
+        # Baseline: Grade C (or tier 4+) is strictly Watchlist / Defensive noise, never broadcast to traders
+        if (grade_tier >= 4) or ("GRADE C" in raw_grade):
             return False
 
-        # Channel requires higher hurdle (Grade A+ or >= 75% win probability)
-        if is_channel:
-            if "GRADE A+" not in grade and win_prob < 75.0 and conviction < 75.0:
+        # Strict NTZ & Consolidation Gate: NEVER broadcast any signal marked as No Trade Zone
+        dec = str(sig.get("decision", "")).upper()
+        if (
+            sig.get("is_ntz_blocked")
+            or sig.get("is_ntz_active")
+            or any(k in dec for k in ["NO TRADE ZONE", "CONSOLIDATION", "RANGE SQUEEZE", "COILED SQUEEZE", "LOW VOL", "CHOP"])
+        ):
+            return False
+
+        # If user sets "ALL", send all created signals of at least Grade B
+        if min_grade_setting == "ALL":
+            pass
+        elif "GRADE B" in min_grade_setting or "B" in min_grade_setting:
+            if not has_grade_b:
+                return False
+        else:
+            # Baseline default: Grade must be A or A+
+            if not has_grade_a:
                 return False
 
-        # ML Win Probability gate
-        min_prob = settings.WHATSAPP_MIN_WIN_PROB * 100.0 if settings.WHATSAPP_MIN_WIN_PROB <= 1.0 else settings.WHATSAPP_MIN_WIN_PROB
-        if win_prob < min_prob and conviction < min_prob:
+        # Channel gate (higher hurdle for public channel)
+        if is_channel:
+            if not has_grade_a and win_prob < 60.0 and conviction < 70.0:
+                return False
+
+        # ML Win Probability gate (for public channel only or when strictly configured)
+        min_prob = self.min_win_prob * 100.0 if self.min_win_prob <= 1.0 else self.min_win_prob
+        if is_channel and min_prob > 0 and win_prob < min_prob and conviction < min_prob:
             return False
 
         return True
@@ -144,24 +259,128 @@ class WhatsAppService:
                 return f"${f:,.2f}"
             elif f >= 1:
                 return f"${f:.4f}"
-            elif f >= 0.001:
+            elif f >= 0.01:
                 return f"${f:.6f}"
-            else:
+            elif f >= 0.0001:
                 return f"${f:.8f}"
+            else:
+                # Dynamic precision for micro assets (PEPE, SHIB, etc.)
+                s = f"{f:.10f}".rstrip('0')
+                return f"${s}"
         except Exception:
             return f"${val}"
+
+    @staticmethod
+    def _extract_path_probabilities(sig: Dict[str, Any], base_win_prob: float) -> Dict[str, float]:
+        """
+        Extracts or calculates calibrated path probabilities for TP1, TP2, TP3, and SL.
+        Returns percentage values (e.g., 78.5 for 78.5%).
+        """
+        def _to_pct(val: Any) -> Optional[float]:
+            if val is None or val == "":
+                return None
+            try:
+                f = float(val)
+                return f * 100.0 if 0.0 < f <= 1.0 else f
+            except Exception:
+                return None
+
+        # Base TP1 probability
+        p_tp1 = _to_pct(sig.get("p_tp1")) or _to_pct(sig.get("p_tp1_pct")) or _to_pct(sig.get("prob_tp1")) or base_win_prob
+        p_tp1 = max(15.0, min(95.0, p_tp1))
+
+        # SL probability: P(SL before TP1) = 1.0 - P(TP1)
+        p_sl = _to_pct(sig.get("p_sl")) or _to_pct(sig.get("p_sl_pct")) or _to_pct(sig.get("prob_sl")) or max(5.0, round(100.0 - p_tp1, 1))
+
+        # TP2 probability: P(TP2) = P(TP1) * P(TP2 | TP1) (typically ~65% conditional)
+        p_tp2 = _to_pct(sig.get("p_tp2")) or _to_pct(sig.get("p_tp2_pct")) or _to_pct(sig.get("prob_tp2")) or round(p_tp1 * 0.65, 1)
+
+        # TP3 probability: P(TP3) = P(TP2) * P(TP3 | TP2) (typically ~55% conditional)
+        p_tp3 = _to_pct(sig.get("p_tp3")) or _to_pct(sig.get("p_tp3_pct")) or _to_pct(sig.get("prob_tp3")) or round(p_tp2 * 0.55, 1)
+
+        return {
+            "tp1": round(p_tp1, 1),
+            "tp2": round(p_tp2, 1),
+            "tp3": round(p_tp3, 1),
+            "sl": round(p_sl, 1)
+        }
+
+    def _format_horizon_display(self, sig: Dict[str, Any]) -> str:
+        h = sig.get("horizon_name") or sig.get("horizon") or sig.get("duration_label") or sig.get("horizon_tag") or sig.get("horizon_key") or "⏳ Day Trade (1H)"
+        h_str = str(h).strip()
+        h_upper = h_str.upper()
+
+        # Multi-Day Macro Horizons
+        if "30D" in h_upper or "MONTHLY" in h_upper:
+            return "🚀 Macro Trend (30D)"
+        if "15D" in h_upper or "BIWEEKLY" in h_upper:
+            return "🚀 Macro Trend (15D)"
+        if "7D" in h_upper or "WEEKLY" in h_upper:
+            return "🚀 Macro Trend (7D)"
+        if "4D" in h_upper:
+            return "🚀 Macro Trend (4D)"
+
+        # Swing Trade Horizons (24H / 1D)
+        if "24H" in h_upper or "1D" in h_upper or "MACRO" in h_upper or "DAILY" in h_upper:
+            return "🌊 Swing Trade (1D)"
+
+        # Day Trade Horizons (1H / 4H)
+        if "4H" in h_upper:
+            return "⏳ Day Trade (4H)"
+        if "1H" in h_upper or "INTRADAY" in h_upper:
+            return "⏳ Day Trade (1H)"
+
+        # Scalp Horizons (15M / 30M)
+        if "30M" in h_upper or "30" in h_upper:
+            return "⚡ Scalp (30M)"
+        if "15M" in h_upper or "15" in h_upper or "5M" in h_upper or "SCALP" in h_upper:
+            return "⚡ Scalp (15M)"
+
+        if "SWING" in h_upper:
+            return "🌊 Swing Trade (1D)"
+
+        return h_str
 
     def format_new_signal(self, sig: Dict[str, Any]) -> str:
         sym = sig.get("symbol", "BTC/USDT")
         direction = str(sig.get("direction", "LONG")).upper()
         is_long = direction in ["LONG", "BULLISH", "BUY"]
         dir_emoji = "🟢 *LONG BUY*" if is_long else "🔴 *SHORT SELL*"
-        horizon = sig.get("horizon", "1H Swing")
-        grade = sig.get("quality_grade") or sig.get("grade") or "Grade A+"
+        horizon = self._format_horizon_display(sig)
+        grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
+        thesis_id = sig.get("trade_thesis_id") or sig.get("thesis_id") or "N/A"
         
+        # Strategy Archetype / Execution Setup (Order Blocks, Breakdowns, Reversals, Sweeps)
+        decision = (
+            sig.get("decision")
+            or sig.get("setup")
+            or sig.get("setup_label")
+            or sig.get("strategy_archetype")
+            or (sig.get("order_block_setup") or {}).get("setup_label")
+            or ("🎯 INSTITUTIONAL ORDER-BLOCK RETEST (LONG)" if is_long else "🎯 ELITE BREAKDOWN EXECUTE (SHORT)")
+        )
+        decision_str = str(decision).strip()
+        if not any(decision_str.startswith(icon) for icon in ["🎯", "🛑", "🚀", "✅", "⚪", "💎", "⚡"]):
+            decision_display = f"🎯 {decision_str}"
+        else:
+            decision_display = decision_str
+
         conviction = float(sig.get("conviction_pct") or sig.get("conviction") or 75.0)
-        win_prob = float(sig.get("meta_win_prob_pct") or (float(sig.get("meta_win_prob", 0.75)) * 100.0 if float(sig.get("meta_win_prob", 0.75)) <= 1.0 else sig.get("meta_win_prob", 75.0)))
+        win_prob = float(sig.get("meta_win_prob_pct") or (float(sig.get("meta_win_prob", 0.70)) * 100.0 if float(sig.get("meta_win_prob", 0.70)) <= 1.0 else sig.get("meta_win_prob", 70.0)))
         
+        # Calibrated path probabilities for targets and invalidation
+        probs = self._extract_path_probabilities(sig, win_prob)
+
+        # Predicted candle timeframe / resolution window
+        pred_window = sig.get("predicted_window") or sig.get("predicted_window_str") or ""
+        pred_close_utc = sig.get("predicted_close_utc") or sig.get("trade_close_str") or ""
+        
+        candle_time_str = ""
+        if pred_close_utc and pred_close_utc != "N/A":
+            candle_time_str = f"⏳ *Candle Close (UTC):* `{pred_close_utc}`"
+        elif pred_window and pred_window != "N/A":
+            candle_time_str = f"⏳ *Horizon Window:* `{pred_window}`"
+
         entry = self._format_price(sig.get("entry_price", 0.0))
         tp1 = self._format_price(sig.get("tp1_price", 0.0))
         tp2 = self._format_price(sig.get("tp2_price", 0.0))
@@ -171,32 +390,117 @@ class WhatsAppService:
         rr = sig.get("risk_reward_ratio", "1:2.0")
         exp_ret = float(sig.get("expected_return_pct") or (float(sig.get("exp_return", 0.035)) * 100.0 if float(sig.get("exp_return", 0.035)) <= 1.0 else sig.get("exp_return", 3.5)))
         
-        market_shield = sig.get("market_shield", "CONSOLIDATION")
+        market_shield = sig.get("market_shield", "BALANCED VOLATILITY")
+
+        candle_line = f"{candle_time_str}\n" if candle_time_str else ""
+
+        is_limit_pending = bool(sig.get("is_limit_pending") or "AWAIT PULLBACK" in decision_display or "AWAIT BOUNCE" in decision_display)
+        entry_val = sig.get("optimal_entry_price") or sig.get("entry_price", 0.0)
+        curr_val = sig.get("current_price") or entry_val
+        zone_min = sig.get("entry_zone_min")
+        zone_max = sig.get("entry_zone_max")
+
+        if is_limit_pending:
+            if zone_min and zone_max and str(zone_min) != str(zone_max):
+                zone_str = f"{self._format_price(zone_min)} – {self._format_price(zone_max)}"
+            else:
+                zone_str = self._format_price(entry_val)
+            live_label = "Peak" if is_long else "Trough"
+            action_warn = "DO NOT MARKET-BUY AT PEAK (Wait for Retest)" if is_long else "DO NOT MARKET-SHORT LOW (Wait for Bounce)"
+            chase_note = f"• ⚠️ *Metric:* {sig.get('chase_warning')}\n" if sig.get('chase_warning') else ""
+            anti_chase_block = (
+                f"⚠️ *ANTI-CHASE POLICY ACTIVE*:\n"
+                f"• Live {live_label}: *{self._format_price(curr_val)}*\n"
+                f"{chase_note}"
+                f"• 🛑 *{action_warn}*\n"
+                f"• 🎯 *Resting Limit Zone:* *{zone_str}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+            )
+            entry_line = f"📍 *Optimal Limit {'Bid' if is_long else 'Ask'}:* {self._format_price(entry_val)}\n"
+        else:
+            anti_chase_block = ""
+            entry_line = f"📍 *Entry Zone:* {entry}\n"
+
+        # Fundamental & News Catalyst Intelligence
+        fund_line = ""
+        news_sent = sig.get("news_sentiment") or {}
+        cat_ev = sig.get("catalyst_event") or {}
+
+        # If passed as JSON string (from CSV)
+        if isinstance(sig.get("fundamental_matrix"), str) and sig["fundamental_matrix"]:
+            try:
+                fm = json.loads(sig["fundamental_matrix"])
+                news_sent = fm.get("news_sentiment") or news_sent
+                cat_ev = fm.get("catalyst_event") or cat_ev
+            except Exception:
+                pass
+
+        news_lbl = news_sent.get("label") or sig.get("news_sentiment")
+        news_sc = float(news_sent.get("score") or sig.get("news_score") or 0.0)
+        top_hl = news_sent.get("top_headline") or (news_sent.get("recent_headlines", [""])[0] if news_sent.get("recent_headlines") else "")
+
+        cat_title = cat_ev.get("title") or sig.get("catalyst_title")
+        days_ev = cat_ev.get("days_until")
+
+        fund_parts = []
+        if cat_title and cat_title != "None":
+            days_str = f" (~{days_ev}d)" if days_ev is not None else ""
+            fund_parts.append(f"🚀 *Catalyst:* {cat_title[:28]}{days_str}")
+        if news_lbl and "NEUTRAL" not in news_lbl:
+            fund_parts.append(f"📰 *News Flow:* {news_lbl} ({news_sc:+.2f})")
+        elif top_hl:
+            fund_parts.append(f"📰 *News Flow:* {top_hl[:32]}...")
+
+        if fund_parts:
+            fund_line = "\n".join(fund_parts) + "\n"
+
+        ev_net_val = sig.get("ev_net")
+        costs_val = sig.get("costs_total_pct")
+        if ev_net_val is not None and str(ev_net_val) != "":
+            try:
+                ev_line = f"📈 *Expected Net Value (EVnet):* *+{float(ev_net_val):.2f}%* (Costs: {float(costs_val or 0.145):.2f}%)\n"
+            except Exception:
+                ev_line = f"📈 *Expected Net Value (EVnet):* *+{abs(exp_ret):.2f}%* (Post-Fees)\n"
+        else:
+            ev_line = f"📈 *Expected Net Value (EVnet):* *+{abs(exp_ret):.2f}%* (Post-Fees)\n"
+
+        candle_trig_reason = sig.get("candle_trigger_reason")
+        candle_trig_line = f"🕯️ *Trigger Confirm:* `{candle_trig_reason}`\n" if candle_trig_reason else ""
 
         msg = (
-            f"⚡ *QUANT EDGE AI • NEW INSTITUTIONAL SIGNAL* ⚡\n"
+            f"⚡ *QUANT EDGE V16 • INSTITUTIONAL SIGNAL* ⚡\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🎯 *Pair:* #{sym.replace('/', '_')} ({horizon})\n"
             f"📊 *Direction:* {dir_emoji}\n"
-            f"💎 *Grade:* {grade} ({conviction:.1f}% AI Conviction)\n"
-            f"🧠 *ML Win Probability:* {win_prob:.1f}%\n"
+            f"🎯 *Setup:* *{decision_display}*\n"
+            f"💎 *Grade:* *{grade}*\n"
+            f"🧠 *Confidence Score:* *{win_prob:.1f}%* (Calibrated Win Rate)\n"
+            f"🎯 *AI Conviction:* *{conviction:.1f}%*\n"
+            f"{ev_line}"
+            f"{candle_trig_line}"
+            f"{candle_line}"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 *Entry Zone:* {entry}\n"
-            f"🎯 *Target 1 (TP1):* {tp1}\n"
-            f"🎯 *Target 2 (TP2):* {tp2}\n"
-            f"🎯 *Target 3 (TP3):* {tp3}\n"
-            f"🛑 *Invalidation (SL):* {sl}\n"
-            f"⚖️ *Risk:Reward:* {rr} | *Exp. Gain:* +{abs(exp_ret):.2f}%\n"
+            f"{anti_chase_block}"
+            f"{entry_line}"
+            f"🎯 *Target 1 (TP1):* {tp1} • *Prob: {probs['tp1']:.1f}%*\n"
+            f"🎯 *Target 2 (TP2):* {tp2} • *Prob: {probs['tp2']:.1f}%*\n"
+            f"🎯 *Target 3 (TP3):* {tp3} • *Prob: {probs['tp3']:.1f}%*\n"
+            f"🛑 *Invalidation (SL):* {sl} • *Risk Prob: {probs['sl']:.1f}%*\n"
+            f"⚖️ *Risk:Reward:* {rr}\n"
+            f"🏷️ *Trade Thesis:* `{thesis_id}`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🛡️ *BTC Shield:* {market_shield}\n"
+            f"{fund_line}"
+            f"🛡️ *Regime / Shield:* {market_shield}\n"
             f"🔗 *Live Terminal:* https://bullsandbears.binaryunit.tech"
         )
         return msg
 
     def format_tp_hit(self, sig: Dict[str, Any], level: str, current_price: float, gain_pct: float) -> str:
         sym = sig.get("symbol", "BTC/USDT")
-        horizon = sig.get("horizon", "1H Swing")
+        horizon = self._format_horizon_display(sig)
         f_price = self._format_price(current_price)
+        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
 
         if level == "TP1":
             action_text = (
@@ -219,11 +523,17 @@ class WhatsAppService:
             )
             title = "🚀 *MAX TARGET SMASHED (TP3 WON)!* 🏆"
 
+        grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
+        prob = sig.get("meta_win_prob_pct")
+        prob_str = f"🧠 P(TP1): *{float(prob):.1f}%* | " if prob is not None else ""
+
         msg = (
             f"{title}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Coin: *{sym}* ({horizon})\n"
-            f"Current Price: *{f_price}*\n"
+            f"{setup_line}"
+            f"💎 Grade: *{grade}*\n"
+            f"{prob_str}Current Price: *{f_price}*\n"
             f"{action_text}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🔗 Track live: https://bullsandbears.binaryunit.tech"
@@ -232,15 +542,94 @@ class WhatsAppService:
 
     def format_sl_hit(self, sig: Dict[str, Any], exit_price: float, loss_pct: float) -> str:
         sym = sig.get("symbol", "BTC/USDT")
-        horizon = sig.get("horizon", "1H Swing")
+        horizon = self._format_horizon_display(sig)
+        grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
+        prob = sig.get("meta_win_prob_pct")
+        prob_str = f"🧠 P(TP1): *{float(prob):.1f}%* | " if prob is not None else ""
+        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
         f_price = self._format_price(exit_price)
         msg = (
             f"🛑 *TRADE INVALIDATION / STOP-LOSS ALERT* ⚠️\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Coin: *{sym}* ({horizon})\n"
-            f"Exit Price: *{f_price}* (-{abs(loss_pct):.2f}%)\n"
+            f"{setup_line}"
+            f"💎 Grade: *{grade}*\n"
+            f"{prob_str}Exit Price: *{f_price}* (-{abs(loss_pct):.2f}%)\n"
             f"Status: *Closed under strict risk control*\n"
             f"Capital preservation rule executed. Waiting for next high-probability setup.\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 https://bullsandbears.binaryunit.tech"
+        )
+        return msg
+
+    def format_trail_or_be_hit(self, sig: Dict[str, Any], exit_price: float, ret_pct: float, label: str) -> str:
+        sym = sig.get("symbol", "BTC/USDT")
+        horizon = self._format_horizon_display(sig)
+        grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
+        prob = sig.get("meta_win_prob_pct")
+        prob_str = f"🧠 P(TP1): *{float(prob):.1f}%* | " if prob is not None else ""
+        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
+        f_price = self._format_price(exit_price)
+        msg = (
+            f"🛡️ *PROFIT LOCK / BREAK-EVEN EXIT* 🟢\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Coin: *{sym}* ({horizon})\n"
+            f"{setup_line}"
+            f"💎 Grade: *{grade}*\n"
+            f"{prob_str}Exit Price: *{f_price}* ({ret_pct:+.2f}%)\n"
+            f"Outcome: *{label}*\n"
+            f"Risk Guard executed perfectly — protected capital with profit secured.\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 https://bullsandbears.binaryunit.tech"
+        )
+        return msg
+
+    def format_expired(self, sig: Dict[str, Any], exit_price: float, ret_pct: float, label: str) -> str:
+        sym = sig.get("symbol", "BTC/USDT")
+        horizon = self._format_horizon_display(sig)
+        grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
+        prob = sig.get("meta_win_prob_pct")
+        prob_str = f"🧠 Probability Score: *{float(prob):.1f}%*\n" if prob is not None else ""
+        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
+        f_price = self._format_price(exit_price)
+        emoji = "🟢" if ret_pct > 0 else ("🔴" if ret_pct < -0.1 else "⚪")
+        msg = (
+            f"{emoji} *TIME HORIZON EXPIRED / TRADE RESOLVED* ⏳\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Coin: *{sym}* ({horizon})\n"
+            f"{setup_line}"
+            f"💎 Grade: *{grade}*\n"
+            f"{prob_str}Closing Price: *{f_price}* ({ret_pct:+.2f}%)\n"
+            f"Result: *{label}*\n"
+            f"Prediction cycle completed for this trading horizon.\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 https://bullsandbears.binaryunit.tech"
+        )
+        return msg
+
+    def format_limit_cancelled(self, sig: Dict[str, Any], exit_price: float, reason: str, detail: str = "") -> str:
+        sym = sig.get("symbol", "BTC/USDT")
+        horizon = self._format_horizon_display(sig)
+        grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
+        prob = sig.get("meta_win_prob_pct")
+        prob_str = f"🧠 Probability Score: *{float(prob):.1f}%*\n" if prob is not None else ""
+        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
+        f_price = self._format_price(exit_price)
+        detail_line = f"Context: *{detail}*\n" if detail else ""
+        msg = (
+            f"⏱️ *RESTING LIMIT ORDER CANCELLED / EXPIRED* 🛑\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Coin: *{sym}* ({horizon})\n"
+            f"{setup_line}"
+            f"💎 Grade: *{grade}*\n"
+            f"{prob_str}Reference Price: *{f_price}*\n"
+            f"Reason: *{reason}*\n"
+            f"{detail_line}"
+            f"Anti-Chase & Capital Protection: resting order stood down safely.\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🔗 https://bullsandbears.binaryunit.tech"
         )
@@ -251,6 +640,32 @@ class WhatsAppService:
         reason = shield_data.get("reason", "Dynamic Market Shift")
         cons_prob = shield_data.get("cons_prob", 50.0)
         posture = shield_data.get("posture", "NORMAL")
+        timeframe = shield_data.get("timeframe", "Multi-Timeframe (15M / 1H / 4H)")
+        btc_p = shield_data.get("btc_price")
+        bbw_val = shield_data.get("bbw_15m")
+
+        if regime in ["CONSOLIDATION", "RANGE_SQUEEZE", "NO_TRADE_ZONE"] or "NO_TRADE_ZONE" in posture:
+            btc_line = f"📉 Benchmark (BTC): *${btc_p:,.0f}*" if btc_p else ""
+            bbw_line = f" | Squeeze BBW: *{bbw_val:.2f}%*" if bbw_val is not None else ""
+            market_line = f"{btc_line}{bbw_line}\n" if (btc_line or bbw_line) else ""
+            msg = (
+                f"🛑 *MARKET REGIME ALERT: CONSOLIDATION / NO TRADE ZONE* 🛑\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 Market State: *CONSOLIDATION RANGE & LOW VOLUME*\n"
+                f"⏱️ Timeframe Scope: *{timeframe}*\n"
+                f"{market_line}"
+                f"💤 Consolidation Prob: *{cons_prob:.1f}%*\n"
+                f"📉 Context: {reason}\n"
+                f"🛡️ Posture: *CAPITAL PRESERVATION (NTZ ACTIVE)*\n"
+                f"\n"
+                f"⚠️ *Institutional Execution Policy*:\n"
+                f"• Signals: *PAUSED on Compressed Timeframes*\n"
+                f"• Paper Trading: *LOCKED (0 New Entries)*\n"
+                f"• Capital: *Held in Reserve to Avoid Chop Drag*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔗 https://bullsandbears.binaryunit.tech"
+            )
+            return msg
 
         msg = (
             f"🛡️ *INSTITUTIONAL BTC MARKET SHIELD ALERT* 🛡️\n"
@@ -264,11 +679,61 @@ class WhatsAppService:
         )
         return msg
 
+    def format_macro_ntz_start(self, reason: str, btc_shield: Dict[str, Any]) -> str:
+        regime = btc_shield.get("status_code") or btc_shield.get("regime") or "RANGE_SQUEEZE"
+        btc_p = btc_shield.get("btc_price") or btc_shield.get("current_price") or 0.0
+        btc_str = self._format_price(btc_p) if btc_p > 0 else "N/A"
+        adx_val = btc_shield.get("adx") or btc_shield.get("metrics", {}).get("adx", 20.0)
+        timeframe = btc_shield.get("timeframe", "Multi-Timeframe (15M / 1H / 4H)")
+
+        msg = (
+            f"🛑 *QUANT EDGE V16 — NO TRADE ZONE (NTZ) ACTIVATED* 🛑\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ *Trading Posture*: *CAPITAL PRESERVATION (LOCK ACTIVE)*\n"
+            f"📉 *Trigger*: {reason}\n"
+            f"📊 *Market Regime*: *{regime}*\n"
+            f"💵 *BTC Benchmark*: *{btc_str}* | ADX: *{float(adx_val):.1f}*\n"
+            f"⏱️ *Timeframe Scope*: *{timeframe}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🛡️ *Automated Institutional Execution Safeguards*:\n"
+            f"• ⛔ *New Trade Signals*: *HALTED* across all horizons (15M, 1H, 24H)\n"
+            f"• 🔒 *Paper Trading Bot*: *ADMISSIONS LOCKED* (0 new entries permitted)\n"
+            f"• 🛡️ *Running Positions*: *100% PROTECTED* (Active TP/SL & Trailing guards remain active 24/7)\n"
+            f"• 💼 *Capital Allocation*: Risk multiplier reduced to *0.0x* to prevent chop bleed\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 Live Terminal: https://bullsandbears.binaryunit.tech"
+        )
+        return msg
+
+    def format_macro_ntz_end(self, btc_shield: Dict[str, Any]) -> str:
+        regime = btc_shield.get("status_code") or btc_shield.get("regime") or "NORMAL"
+        btc_p = btc_shield.get("btc_price") or btc_shield.get("current_price") or 0.0
+        btc_str = self._format_price(btc_p) if btc_p > 0 else "N/A"
+        adx_val = btc_shield.get("adx") or btc_shield.get("metrics", {}).get("adx", 25.0)
+
+        msg = (
+            f"🟢 *QUANT EDGE V16 — NO TRADE ZONE (NTZ) LIFTED* 🟢\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ *Trading Posture*: *NORMAL TRADING OPERATIONS RESUMED*\n"
+            f"📈 *Market Assessment*: Macro volatility stabilized & directional clarity restored\n"
+            f"📊 *Market Regime*: *{regime}*\n"
+            f"💵 *BTC Benchmark*: *{btc_str}* | ADX: *{float(adx_val):.1f}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ *Operational Directives*:\n"
+            f"• 🟢 *New Trade Admissions*: *UNLOCKED* for Grade A/A+ institutional setups\n"
+            f"• 🤖 *Paper Trading Bot*: *SCANNING RESUMED* with sub-diffusive volatility scaling\n"
+            f"• 🎯 *Target Matrices*: Fully refreshed across 15M, 1H, and 24H horizons\n"
+            f"• 💼 *Capital Allocation*: Restored to standard institutional sizing\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 Live Terminal: https://bullsandbears.binaryunit.tech"
+        )
+        return msg
+
     # =========================================================================
     # DISPATCH QUEUE & WORKER
     # =========================================================================
     def _enqueue_message(self, target_jid: str, text: str, priority: int = 10):
-        if not target_jid:
+        if not self.enabled or not target_jid:
             return
         item = {
             "target": target_jid,
@@ -291,10 +756,10 @@ class WhatsAppService:
                 continue
 
             try:
-                # Anti-ban Pacing delay: Ensure at least WHATSAPP_RATE_LIMIT_SECONDS between messages
+                # Anti-ban Pacing delay: Ensure at least rate_limit_seconds between messages
                 now = time.time()
                 elapsed = now - self._last_dispatch_ts
-                required_delay = max(1.5, float(settings.WHATSAPP_RATE_LIMIT_SECONDS))
+                required_delay = max(1.5, self.rate_limit_seconds)
                 if elapsed < required_delay:
                     time.sleep(required_delay - elapsed)
 
@@ -310,94 +775,109 @@ class WhatsAppService:
         
         IMPORTANT: WhatsApp Channel/Newsletter JIDs (ending in @newsletter) require
         a DIFFERENT API endpoint than groups/DMs. This method auto-detects and routes
-        to the correct endpoint.
+        to the correct endpoint. Automatically falls back to localhost if running outside Docker.
         """
-        if not settings.WHATSAPP_ENABLED:
+        if not self.enabled:
             logger.debug(f"[WHATSAPP MOCK] (Disabled) Would send to {target_jid}:\n{text[:60]}...")
             return True
 
-        gateway_type = settings.WHATSAPP_GATEWAY_TYPE.lower()
-        api_url = settings.WHATSAPP_API_URL.rstrip('/')
-        api_key = settings.WHATSAPP_API_KEY
-        instance = settings.WHATSAPP_INSTANCE_NAME
+        gateway_type = self.gateway_type
+        base_api_url = self.api_url
+        api_key = self.api_key
+        instance = self.instance_name
         is_newsletter = "@newsletter" in target_jid
 
-        try:
-            if gateway_type == "evolution_api":
-                headers = {
-                    "apikey": api_key,
-                    "Content-Type": "application/json"
-                }
+        urls_to_try = [base_api_url]
+        if "://whatsapp:" in base_api_url or "://whatsapp/" in base_api_url or base_api_url.endswith("://whatsapp"):
+            urls_to_try.append(base_api_url.replace("://whatsapp", "://127.0.0.1"))
 
-                if is_newsletter:
-                    # -------------------------------------------------------
-                    # WhatsApp CHANNELS / NEWSLETTERS require a separate endpoint
-                    # Evolution API v2: POST /newsletter/send/{instance}
-                    # -------------------------------------------------------
-                    endpoint = f"{api_url}/newsletter/send/{instance}"
-                    payload = {
-                        "number": target_jid,
-                        "message": {"text": text}
+        last_error = None
+        for api_url in urls_to_try:
+            try:
+                if gateway_type == "evolution_api":
+                    headers = {
+                        "apikey": api_key,
+                        "Content-Type": "application/json"
                     }
-                    resp = requests.post(endpoint, json=payload, headers=headers, timeout=12.0)
-                    if resp.status_code in [200, 201]:
-                        logger.info(f"[WHATSAPP ✅] Channel message dispatched to {target_jid}")
-                        return True
-                    else:
-                        # Fallback: some Evolution API versions use sendText for all targets
-                        logger.warning(f"[WHATSAPP ⚠️] Newsletter endpoint HTTP {resp.status_code}: {resp.text[:200]}. Trying sendText fallback...")
-                        endpoint_fb = f"{api_url}/message/sendText/{instance}"
-                        payload_fb = {"number": target_jid, "text": text, "delay": 1200}
-                        resp_fb = requests.post(endpoint_fb, json=payload_fb, headers=headers, timeout=12.0)
-                        if resp_fb.status_code in [200, 201]:
-                            logger.info(f"[WHATSAPP ✅] Channel message dispatched via sendText fallback to {target_jid}")
+
+                    if is_newsletter:
+                        # -------------------------------------------------------
+                        # WhatsApp CHANNELS / NEWSLETTERS require a separate endpoint
+                        # Evolution API v2: POST /newsletter/send/{instance}
+                        # -------------------------------------------------------
+                        endpoint = f"{api_url}/newsletter/send/{instance}"
+                        payload = {
+                            "number": target_jid,
+                            "message": {"text": text}
+                        }
+                        resp = requests.post(endpoint, json=payload, headers=headers, timeout=12.0)
+                        if resp.status_code in [200, 201]:
+                            logger.info(f"[WHATSAPP ✅] Channel message dispatched to {target_jid}")
                             return True
-                        logger.error(f"[WHATSAPP ❌] Both channel endpoints failed. Last HTTP {resp_fb.status_code}: {resp_fb.text[:200]}")
-                        return False
-                else:
-                    # Standard Group / DM message
-                    endpoint = f"{api_url}/message/sendText/{instance}"
+                        else:
+                            # Fallback: some Evolution API versions use sendText for all targets
+                            logger.warning(f"[WHATSAPP ⚠️] Newsletter endpoint HTTP {resp.status_code}: {resp.text[:200]}. Trying sendText fallback...")
+                            endpoint_fb = f"{api_url}/message/sendText/{instance}"
+                            payload_fb = {"number": target_jid, "text": text, "delay": 1200}
+                            resp_fb = requests.post(endpoint_fb, json=payload_fb, headers=headers, timeout=12.0)
+                            if resp_fb.status_code in [200, 201]:
+                                logger.info(f"[WHATSAPP ✅] Channel message dispatched via sendText fallback to {target_jid}")
+                                return True
+                            logger.error(f"[WHATSAPP ❌] Both channel endpoints failed. Last HTTP {resp_fb.status_code}: {resp_fb.text[:200]}")
+                            return False
+                    else:
+                        # Standard Group / DM message
+                        endpoint = f"{api_url}/message/sendText/{instance}"
+                        payload = {
+                            "number": target_jid,
+                            "text": text,
+                            "delay": 1200
+                        }
+                        resp = requests.post(endpoint, json=payload, headers=headers, timeout=8.0)
+                        if resp.status_code in [200, 201]:
+                            logger.info(f"[WHATSAPP ✅] Successfully dispatched message to {target_jid}")
+                            print(f"[WHATSAPP ✅] Successfully dispatched message to {target_jid}", flush=True)
+                            return True
+                        else:
+                            logger.warning(f"[WHATSAPP ⚠️] Gateway returned HTTP {resp.status_code}: {resp.text[:200]}")
+                            print(f"[WHATSAPP ⚠️] Gateway returned HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+                            return False
+
+                elif gateway_type == "whapi":
+                    endpoint = f"{api_url}/messages/text"
+                    headers = {
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    }
                     payload = {
-                        "number": target_jid,
-                        "text": text,
-                        "delay": 1200
+                        "to": target_jid,
+                        "body": text
                     }
                     resp = requests.post(endpoint, json=payload, headers=headers, timeout=8.0)
-                    if resp.status_code in [200, 201]:
-                        logger.info(f"[WHATSAPP ✅] Successfully dispatched message to {target_jid}")
-                        return True
-                    else:
-                        logger.warning(f"[WHATSAPP ⚠️] Gateway returned HTTP {resp.status_code}: {resp.text[:200]}")
-                        return False
+                    return resp.status_code in [200, 201]
 
-            elif gateway_type == "whapi":
-                endpoint = f"{api_url}/messages/text"
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "to": target_jid,
-                    "body": text
-                }
-                resp = requests.post(endpoint, json=payload, headers=headers, timeout=8.0)
-                return resp.status_code in [200, 201]
+                elif gateway_type == "webhook":
+                    headers = {"Content-Type": "application/json"}
+                    if api_key:
+                        headers["Authorization"] = f"Bearer {api_key}"
+                    payload = {"target": target_jid, "text": text}
+                    resp = requests.post(api_url, json=payload, headers=headers, timeout=8.0)
+                    return resp.status_code in [200, 201]
 
-            elif gateway_type == "webhook":
-                headers = {"Content-Type": "application/json"}
-                if api_key:
-                    headers["Authorization"] = f"Bearer {api_key}"
-                payload = {"target": target_jid, "text": text}
-                resp = requests.post(api_url, json=payload, headers=headers, timeout=8.0)
-                return resp.status_code in [200, 201]
+                else:
+                    logger.error(f"[WHATSAPP ❌] Unknown gateway type: {gateway_type}")
+                    return False
 
-            else:
-                logger.error(f"[WHATSAPP ❌] Unknown gateway type: {gateway_type}")
+            except requests.exceptions.ConnectionError as ce:
+                last_error = ce
+                continue
+            except Exception as e:
+                logger.error(f"[WHATSAPP ❌] HTTP exception to gateway (target={target_jid}): {e}")
                 return False
 
-        except Exception as e:
-            logger.error(f"[WHATSAPP ❌] HTTP exception to gateway (target={target_jid}): {e}")
-            return False
+        if last_error:
+            logger.error(f"[WHATSAPP ❌] HTTP connection exception to gateway (target={target_jid}): {last_error}")
+        return False
 
     # =========================================================================
     # PUBLIC HIGH-LEVEL AUTOMATION HOOKS
@@ -407,40 +887,67 @@ class WhatsAppService:
         Called when a new signal is admitted into SignalAuditTracker.
         Automatically broadcasts to WhatsApp Group and/or Channel.
         """
-        sig_id = sig.get("signal_id") or f"{sig.get('symbol')}_{sig.get('horizon')}"
+        horizon_desc = sig.get("horizon_name") or sig.get("horizon_tag") or sig.get("horizon_key") or sig.get("horizon") or "1H"
+        sig_id = sig.get("signal_id") or f"{sig.get('symbol')}_{horizon_desc}"
         dedup_key = f"{sig_id}:SIGNAL_CREATED"
 
         if self.is_already_sent(dedup_key):
             return
 
         # Check Quality Gate for Group
-        group_jid = settings.WHATSAPP_GROUP_ID
+        group_jid = self.group_id
+        is_dispatched = False
         if group_jid and self.passes_quality_gate(sig, is_channel=False):
             text = self.format_new_signal(sig)
             self._enqueue_message(group_jid, text, priority=1)
+            is_dispatched = True
 
         # Check Quality Gate for Channel (higher hurdle)
-        channel_jid = settings.WHATSAPP_CHANNEL_ID
+        channel_jid = self.channel_id
         if channel_jid and self.passes_quality_gate(sig, is_channel=True):
             text = self.format_new_signal(sig)
             self._enqueue_message(channel_jid, text, priority=1)
+            is_dispatched = True
+
+        if is_dispatched:
+            self._broadcasted_signals.add(sig_id)
 
     def emit_signal_outcome(self, sig: Dict[str, Any], event_type: str, current_price: float, gain_pct: float):
         """
         Called on heartbeat evaluation when a TP or SL is touched.
-        event_type in: TP1_HIT, TP2_HIT, TP3_HIT, SL_HIT
+        event_type in: TP1_HIT, TP2_HIT, TP3_HIT, SL_HIT, BE_HIT, TRAIL_SL_HIT, EXPIRED
         """
-        sig_id = sig.get("signal_id") or f"{sig.get('symbol')}_{sig.get('horizon')}"
+        # STRICT CONSTRAINT: NEVER send message for Tier-0 breakeven events
+        status_upper = str(sig.get("status", "")).upper()
+        outcome_upper = str(sig.get("outcome_label", "")).upper()
+        event_upper = str(event_type or "").upper()
+        is_tier0_event = (
+            event_upper in ["TIER0_BE_HIT", "TIER0_PROTECTED_BREAKEVEN", "BE_TIER0"]
+            or "TIER0" in event_upper or "TIER-0" in event_upper
+            or (status_upper in ["WON_TIER0_BE", "TIER0_PROTECTED_BREAKEVEN", "BREAKEVEN_GUARD"] and not any(tp in event_upper for tp in ["TP1", "TP2", "TP3"]))
+        )
+        if is_tier0_event and not any(tp in event_upper for tp in ["TP1", "TP2", "TP3"]):
+            logger.info(f"[WHATSAPP 🛡️] Tier-0 Breakeven outcome suppressed per user preference for {sig.get('symbol')}")
+            return
+
+        horizon_desc = sig.get("horizon_name") or sig.get("horizon_tag") or sig.get("horizon_key") or sig.get("horizon") or "1H"
+        sig_id = sig.get("signal_id") or f"{sig.get('symbol')}_{horizon_desc}"
+
+        # 1. Quality Gate Check: Suppress outcome updates for Grade C / sub-hurdle setups
+        if not self.passes_quality_gate(sig, is_channel=False):
+            logger.info(f"[WHATSAPP 🛡️] Suppressed {event_type} for {sig.get('symbol')}: fails quality gate ({sig.get('grade')}).")
+            return
+
         dedup_key = f"{sig_id}:{event_type}"
 
         if self.is_already_sent(dedup_key):
             return
 
-        group_jid = settings.WHATSAPP_GROUP_ID
-        channel_jid = settings.WHATSAPP_CHANNEL_ID
+        group_jid = self.group_id
+        channel_jid = self.channel_id
 
         if event_type in ["TP1_HIT", "TP2_HIT", "TP3_HIT"]:
-            if not settings.WHATSAPP_SEND_TP_UPDATES:
+            if not self.send_tp_updates:
                 return
             level = "TP1" if event_type == "TP1_HIT" else ("TP2" if event_type == "TP2_HIT" else "TP3")
             text = self.format_tp_hit(sig, level, current_price, gain_pct)
@@ -454,18 +961,43 @@ class WhatsAppService:
                 self._enqueue_message(channel_jid, text, priority=2)
 
         elif event_type == "SL_HIT":
-            if not settings.WHATSAPP_SEND_SL_UPDATES:
+            if not self.send_sl_updates:
                 return
             text = self.format_sl_hit(sig, current_price, gain_pct)
             # Invalidation sent to Group
             if group_jid:
                 self._enqueue_message(group_jid, text, priority=3)
 
+        elif event_type in ["BE_HIT", "TRAIL_SL_HIT"]:
+            label = sig.get("outcome_label", "Break-Even Exit")
+            text = self.format_trail_or_be_hit(sig, current_price, gain_pct, label)
+            if group_jid:
+                self._enqueue_message(group_jid, text, priority=2)
+            if channel_jid:
+                self._enqueue_message(channel_jid, text, priority=2)
+
+        elif event_type in ["EXPIRED", "CANCELLED", "CANCELLED_CHASE_EXCEEDED", "LIMIT_CANCELLED"]:
+            if event_type in ["CANCELLED", "CANCELLED_CHASE_EXCEEDED", "LIMIT_CANCELLED"]:
+                sym_canc_key = f"LIMIT_CANC:{sig.get('symbol')}:{horizon_desc}"
+                if self.is_already_sent(sym_canc_key, ttl_seconds=1800):
+                    logger.info(f"[WHATSAPP 🛡️] Suppressed duplicate limit cancellation for {sig.get('symbol')} ({horizon_desc}) within 30m window.")
+                    return
+                reason = sig.get("cancellation_reason") or "Resting Limit Expired / Chase Exceeded"
+                detail = sig.get("cancellation_detail") or ""
+                text = self.format_limit_cancelled(sig, current_price, reason, detail)
+            else:
+                label = sig.get("outcome_label", "Horizon Expired")
+                text = self.format_expired(sig, current_price, gain_pct, label)
+            if group_jid:
+                self._enqueue_message(group_jid, text, priority=3)
+
     def emit_regime_alert(self, shield_data: Dict[str, Any]):
         """
         Called when BTC switches regime or trips a circuit breaker.
+        Enforces a global regime shift lock to prevent rapid back-and-forth oscillations
+        (e.g., flipping between BEAR_TREND and CONSOLIDATION within minutes).
         """
-        if not settings.WHATSAPP_SEND_REGIME_ALERTS:
+        if not self.send_regime_alerts:
             return
 
         regime = shield_data.get("status_code") or shield_data.get("regime") or "NORMAL"
@@ -473,17 +1005,70 @@ class WhatsAppService:
         if regime in ["NORMAL"]:
             return
 
-        # Deduplicate: Only 1 regime alert per 30 minutes
-        bucket_30m = int(time.time() // 1800)
-        dedup_key = f"REGIME_SHIFT:{regime}:{bucket_30m}"
-        if self.is_already_sent(dedup_key, ttl_seconds=1800):
+        is_emergency_dump = regime in ["ALERT_DUMP", "FLASH_DUMP"] or "CRASH" in str(shield_data.get("reason", "")).upper()
+
+        # 1. Exact regime repeat deduplication: Don't repeat the exact same regime within 45m (or 4 hours for CONSOLIDATION)
+        repeat_ttl = 14400 if regime in ["CONSOLIDATION", "RANGE_SQUEEZE", "NO_TRADE_ZONE"] else 2700
+        same_regime_key = f"REGIME_REPEAT:{regime}"
+        if self.is_already_sent(same_regime_key, ttl_seconds=repeat_ttl):
+            return
+
+        # 2. Global regime cooldown: Prevent rapid alternating oscillations between ANY regimes
+        # (e.g. flipping between BEAR_TREND and CONSOLIDATION within 20 minutes)
+        global_lock_key = "GLOBAL_REGIME_ALERT_LOCK"
+        if not is_emergency_dump:
+            if self.is_already_sent(global_lock_key, ttl_seconds=1200):
+                return
+        else:
+            # For emergency crash dumps, establish shorter 10m lock
+            self.is_already_sent(global_lock_key, ttl_seconds=600)
+
+        if not self.enabled:
             return
 
         text = self.format_regime_shift(shield_data)
-        if settings.WHATSAPP_GROUP_ID:
-            self._enqueue_message(settings.WHATSAPP_GROUP_ID, text, priority=1)
-        if settings.WHATSAPP_CHANNEL_ID:
-            self._enqueue_message(settings.WHATSAPP_CHANNEL_ID, text, priority=1)
+        if self.group_id:
+            self._enqueue_message(self.group_id, text, priority=1)
+        if self.channel_id:
+            self._enqueue_message(self.channel_id, text, priority=1)
+
+    def emit_macro_ntz_start(self, reason: str, btc_shield: Dict[str, Any]):
+        """
+        Called on edge transition when engine enters Macro No Trade Zone.
+        Dispatches high-priority alert to Group and Channel.
+        """
+        if not self.send_regime_alerts:
+            return
+
+        dedup_key = f"MACRO_NTZ_START:{int(time.time() // 300)}"
+        if self.is_already_sent(dedup_key, ttl_seconds=600):
+            return
+
+        text = self.format_macro_ntz_start(reason, btc_shield)
+        if self.group_id:
+            self._enqueue_message(self.group_id, text, priority=1)
+        if self.channel_id:
+            self._enqueue_message(self.channel_id, text, priority=1)
+        logger.info(f"[WHATSAPP 🛑] Dispatched Macro NTZ START alert to queue (reason: {reason})")
+
+    def emit_macro_ntz_end(self, btc_shield: Dict[str, Any]):
+        """
+        Called on edge transition when engine exits Macro No Trade Zone.
+        Dispatches high-priority alert to Group and Channel.
+        """
+        if not self.send_regime_alerts:
+            return
+
+        dedup_key = f"MACRO_NTZ_END:{int(time.time() // 300)}"
+        if self.is_already_sent(dedup_key, ttl_seconds=600):
+            return
+
+        text = self.format_macro_ntz_end(btc_shield)
+        if self.group_id:
+            self._enqueue_message(self.group_id, text, priority=1)
+        if self.channel_id:
+            self._enqueue_message(self.channel_id, text, priority=1)
+        logger.info("[WHATSAPP 🟢] Dispatched Macro NTZ END alert to queue")
 
     # =========================================================================
     # MANAGEMENT & DIAGNOSTIC ENDPOINTS
@@ -491,14 +1076,16 @@ class WhatsAppService:
     def get_status(self) -> Dict[str, Any]:
         """Returns diagnostic health of the WhatsApp dispatcher."""
         return {
-            "enabled": settings.WHATSAPP_ENABLED,
-            "gateway_type": settings.WHATSAPP_GATEWAY_TYPE,
-            "api_url": settings.WHATSAPP_API_URL,
-            "instance_name": settings.WHATSAPP_INSTANCE_NAME,
-            "group_configured": bool(settings.WHATSAPP_GROUP_ID),
-            "group_id": settings.WHATSAPP_GROUP_ID,
-            "channel_configured": bool(settings.WHATSAPP_CHANNEL_ID),
-            "channel_id": settings.WHATSAPP_CHANNEL_ID,
+            "enabled": self.enabled,
+            "gateway_type": self.gateway_type,
+            "api_url": self.api_url,
+            "instance_name": self.instance_name,
+            "group_configured": bool(self.group_id),
+            "group_id": self.group_id,
+            "channel_configured": bool(self.channel_id),
+            "channel_id": self.channel_id,
+            "min_grade": self.min_grade,
+            "min_win_prob": self.min_win_prob,
             "queue_size": self._queue.qsize(),
             "has_redis_dedup": HAS_REDIS,
             "in_memory_keys_count": len(self._in_memory_dedup)

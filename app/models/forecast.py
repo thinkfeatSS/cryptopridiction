@@ -8,7 +8,7 @@ class MarketForecast(Base):
     __tablename__ = "market_forecasts"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
-    timestamp_utc = Column(String(64), nullable=False)
+    timestamp_utc = Column(String(64), nullable=False, index=True)
     strategy_name = Column(String(128), default="Multi-Horizon Quantitative Engine")
     top_round_signals_json = Column(Text().with_variant(LONGTEXT, "mysql"), nullable=True)
     scanner_leaderboard_json = Column(Text().with_variant(LONGTEXT, "mysql"), nullable=True)

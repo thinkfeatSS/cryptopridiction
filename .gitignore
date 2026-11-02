@@ -48,9 +48,11 @@ catboost_info/
 !user_pasted_signals.csv
 
 # Temporary export data & database files
-export_app_data/*.csv
-export_app_data/*.json
+export_app_data/
+staging_export_app_data/
+export_staging/
 trader_signals_tracker.csv
+freeze_archive*.csv
 *.log
 *.sqlite
 *.sqlite3
@@ -64,6 +66,19 @@ trader_signals_tracker.csv
 profile_vps.py
 scratch_test_asset.py
 deploy_vps.py
+check_*.py
+scratch_*.py
+deploy_*.py
+scratch/
+*inspect*.py
+sftp_*.py
+sync_*.py
+curl_*.py
+test_api_*.py
+test_dup_*.py
+test_vps_*.py
+test_scanner_*.py
+*.tsv
 *.swp
 *.swo
 *~

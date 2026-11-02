@@ -31,329 +31,275 @@ import {
   SlidersHorizontal,
   RotateCcw,
   CircleDot,
+  Info,
 } from "lucide-react";
 import { useWatchlist } from "@/hooks/useWatchlist";
 import { useRelativeTime, formatRelativeMinutes, formatServerPredictionTime } from "@/hooks/useRelativeTime";
 
-type HorizonKey =
-  | "all"
-  | "high_confluence"
-  | "high_yield"
-  | "reversals"
-  | "trend_expansion"
-  | "watchlist"
-  | "scalp"
-  | "horizon_30m"
-  | "swing"
-  | "horizon_4h"
-  | "horizon_12h"
-  | "macro"
-  | "horizon_4d"
-  | "weekly"
-  | "biweekly"
-  | "monthly";
+// ============================================================================
+// 9 MULTI-HORIZON TIMEFRAME SPECIFICATIONS (USER DEFINED)
+// ============================================================================
+export interface HorizonDef {
+  key: string;
+  altKeys: string[];
+  label: string;
+  short: string;
+  badge: string;
+  desc: string;
+}
 
-export type HorizonSortKey =
-  | "scalp"
-  | "horizon_30m"
-  | "swing"
-  | "horizon_4h"
-  | "horizon_12h"
-  | "macro"
-  | "horizon_4d"
-  | "weekly"
-  | "biweekly"
-  | "monthly";
+export const ALL_9_HORIZONS: HorizonDef[] = [
+  { key: "5m", altKeys: ["5M"], label: "5m (5 Minutes)", short: "5M", badge: "⚡ 5M", desc: "Micro Momentum & Scalp Trigger" },
+  { key: "15m", altKeys: ["15M", "scalp"], label: "15m (15 Minutes)", short: "15M", badge: "⚡ 15M", desc: "Primary Scalp Horizon" },
+  { key: "1h", altKeys: ["1H", "swing"], label: "1h (1 Hour)", short: "1H", badge: "⏳ 1H", desc: "Day Trade / Hourly Momentum" },
+  { key: "4h", altKeys: ["4H"], label: "4h (4 Hours)", short: "4H", badge: "⏳ 4H", desc: "Intermediate Swing & Structure" },
+  { key: "12h", altKeys: ["12H"], label: "12h (12 Hours)", short: "12H", badge: "🌊 12H", desc: "Half-Day Directional Trend" },
+  { key: "1d", altKeys: ["1D", "24h", "24H", "macro"], label: "24h / 1d (1 Day / 24 Hours)", short: "24H / 1D", badge: "🌊 1D", desc: "Daily Anchor Horizon" },
+  { key: "1w", altKeys: ["1W", "7d", "7D", "weekly"], label: "7d / 1w (7 Days / 1 Week)", short: "7D / 1W", badge: "📅 7D", desc: "Macro Weekly Structure" },
+  { key: "15d", altKeys: ["15D"], label: "15d (15 Days / Bi-Weekly - aggregated from 1D candles)", short: "15D", badge: "📅 15D", desc: "Bi-Weekly Aggregated Cycle" },
+  { key: "1M", altKeys: ["30d", "30D", "1m", "monthly"], label: "30d / 1M (1 Month / 30 Days)", short: "30D / 1M", badge: "🏛️ 1M", desc: "Macro Secular Trend" },
+];
+
+export type HorizonFilterKey =
+  | "all"
+  | "5m"
+  | "15m"
+  | "1h"
+  | "4h"
+  | "12h"
+  | "1d"
+  | "1w"
+  | "15d"
+  | "1M"
+  | "order_blocks"
+  | "high_confluence"
+  | "watchlist";
 
 export type BiasSortOrder = "bullish_first" | "bearish_first" | "consolidate_first" | "none";
 export type BiasFilter = "all" | "bullish" | "consolidate" | "bearish";
 
-export const SORT_HORIZONS: { key: HorizonSortKey; label: string; short: string }[] = [
-  { key: "scalp", label: "⚡ Scalp (15M)", short: "15M" },
-  { key: "horizon_30m", label: "⏱️ 30M", short: "30M" },
-  { key: "swing", label: "🌊 Swing (1H)", short: "1H" },
-  { key: "horizon_4h", label: "⏳ Intraday (4H)", short: "4H" },
-  { key: "horizon_12h", label: "🌗 12H", short: "12H" },
-  { key: "macro", label: "🚀 Macro (24H)", short: "24H" },
-  { key: "horizon_4d", label: "📅 4D", short: "4D" },
-  { key: "weekly", label: "🗓️ Weekly (7D)", short: "7D" },
-  { key: "biweekly", label: "📆 15D", short: "15D" },
-  { key: "monthly", label: "🪐 Monthly (30D)", short: "30D" },
-];
+// Helper to reliably extract prediction data for any of the 9 horizons
+export function getTimeframeData(item: any, hDef: HorizonDef): any {
+  if (!item) return {};
 
+  // 1. Direct check in all_9_timeframe_predictions
+  const all9 = item.all_9_timeframe_predictions;
+  if (all9 && typeof all9 === "object") {
+    if (all9[hDef.key]) return all9[hDef.key];
+    for (const alt of hDef.altKeys) {
+      if (all9[alt]) return all9[alt];
+    }
+  }
+
+  // 2. Direct check in horizons dict
+  const horizons = item.horizons;
+  if (horizons && typeof horizons === "object") {
+    if (horizons[hDef.key]) return horizons[hDef.key];
+    for (const alt of hDef.altKeys) {
+      if (horizons[alt]) return horizons[alt];
+    }
+  }
+
+  // 3. Fallbacks for legacy fields
+  if (hDef.key === "15m" && item.support_15m) return item.support_15m;
+  if (hDef.key === "1d" && item.support_24h) return item.support_24h;
+
+  return {};
+}
+
+// Helper to determine stance: bullish vs bearish vs consolidate
 export function getHorizonStance(h?: any): "bullish" | "consolidate" | "bearish" {
-  if (!h) return "consolidate";
-  const decision = String(h.decision || "").toUpperCase();
+  if (!h || typeof h !== "object") return "consolidate";
+
+  const trend = String(h.trend_state || "").toUpperCase();
+  if (trend === "BULLISH") return "bullish";
+  if (trend === "BEARISH") return "bearish";
+  if (trend === "CONSOLIDATION") return "consolidate";
+
+  const candle = String(h.candle_color || "").toUpperCase();
+  if (candle.includes("GREEN") || candle.includes("BULLISH")) return "bullish";
+  if (candle.includes("RED") || candle.includes("BEARISH")) return "bearish";
+
   const direction = String(h.direction || "").toUpperCase();
+  if (direction === "LONG" || direction === "BULLISH") return "bullish";
+  if (direction === "SHORT" || direction === "BEARISH") return "bearish";
 
-  // Explicit neutral or consolidation
-  if (
-    decision.includes("CONSOLIDATION") ||
-    decision.includes("RANGE") ||
-    decision.includes("CHOP") ||
-    direction === "NEUTRAL" ||
-    direction === "CONSOLIDATION"
-  ) {
-    return "consolidate";
-  }
-
-  // Bullish signals: check directional bias
-  if (
-    direction === "BULLISH" ||
-    direction === "LONG" ||
-    decision.includes("LONG") ||
-    decision.includes("BUY") ||
-    decision.includes("BOTTOM-REVERSAL")
-  ) {
-    return "bullish";
-  }
-
-  // Bearish signals: check directional bias
-  if (
-    direction === "BEARISH" ||
-    direction === "SHORT" ||
-    decision.includes("SHORT") ||
-    decision.includes("SELL") ||
-    decision.includes("TOP-REVERSAL")
-  ) {
-    return "bearish";
-  }
-
-  // Sidelined / Defensive / Filter without direction
-  if (
-    decision.includes("FILTER") ||
-    decision.includes("DEFENSIVE") ||
-    decision.includes("WAIT")
-  ) {
-    return "consolidate";
-  }
+  const decision = String(h.decision || "").toUpperCase();
+  if (decision.includes("LONG") || decision.includes("BUY")) return "bullish";
+  if (decision.includes("SHORT") || decision.includes("SELL")) return "bearish";
 
   return "consolidate";
 }
 
-// Helper to render rich 3-line signal strength, catalyst badges, and ML Win Prob matching institutional scanner
-// Helper to render rich 3-line signal strength, catalyst badges, and ML Win Prob matching institutional scanner
-function renderSignalCell(h?: any, livePrice?: number) {
-  if (!h || (!h.direction && !h.decision)) {
-    return <span className="text-slate-600 font-sans text-xs">—</span>;
+// Valid crypto symbol filter (ignores tokenized stocks, delisted tokens, and meme coins)
+function isValidCryptoSymbol(symbol: string): boolean {
+  if (!symbol) return false;
+  const upper = symbol.toUpperCase();
+  if (upper.includes("SHIB") || upper.includes("DOGE") || upper.includes("PEPE") || upper.includes("BONK") || upper.includes("WIF") || upper.includes("FLOKI") || upper.includes("TRUMP") || upper.includes("OLD")) return false;
+  const base = upper.replace("/USDT", "").replace("USDT", "");
+  if (["USDSOLD", "ERD", "VEN", "BCC", "BCHABC", "BCHSV", "BTT", "NANO", "USDSB"].includes(base)) return false;
+  if (base.endsWith("B") && base !== "BNB" && base !== "ARB") return false;
+  return true;
+}
+
+// Rich 9-Horizon Cell Renderer
+function renderMultiHorizonCell(h?: any, livePrice?: number) {
+  if (!h || (!h.direction && !h.trend_state && !h.decision && !h.candle_color)) {
+    return (
+      <div className="flex flex-col items-center justify-center p-2 text-slate-600 font-mono text-[11px]">
+        <span>—</span>
+      </div>
+    );
   }
 
-  const isLong = h.direction === "BULLISH" || h.direction === "LONG" || (h.decision && h.decision.includes("LONG"));
-  const directionText = h.direction || (isLong ? "BULLISH" : "BEARISH");
-  const convictionVal = h.conviction !== undefined && h.conviction !== null ? Number(h.conviction).toFixed(1) : "—";
-  
-  // Secondary ML Meta-Labeler Win Probability
-  const metaProb =
-    h.meta_win_prob_pct ??
-    (h.meta_win_prob !== undefined && h.meta_win_prob !== null
-      ? h.meta_win_prob <= 1.0
-        ? h.meta_win_prob * 100.0
-        : h.meta_win_prob
-      : h.conviction
-      ? Math.min(94.5, Math.max(48.0, h.conviction * 0.86))
-      : 72.0);
+  const stance = getHorizonStance(h);
+  const isBull = stance === "bullish";
+  const isBear = stance === "bearish";
+  const isChop = stance === "consolidate";
 
-  let decision: string = h.decision || (isLong ? "EXECUTE LONG" : "EXECUTE SHORT");
-  
-  const isConsolidation = decision.includes("CONSOLIDATION") || decision.includes("RANGE");
-  const isBottomReversal = decision.includes("BOTTOM-REVERSAL");
-  const isTopReversal = decision.includes("TOP-REVERSAL");
-  const isFilter = decision.includes("FILTER");
-  const isShortSqueeze = decision.includes("SHORT SQUEEZE");
-  const isLongFlush = decision.includes("LONG FLUSH");
-  const isLiquiditySweep = decision.includes("LIQUIDITY-SWEEP") || decision.includes("SWEEP");
-  const isDipBuy = decision.includes("DIP-BUY");
-  const isRallySell = decision.includes("RALLY-SELL");
-  const isElite = decision.includes("ELITE");
+  const directionText = isBull ? "BULLISH" : isBear ? "BEARISH" : "CHOP";
+  const candleColor = h.candle_color || (isBull ? "🟢 GREEN" : isBear ? "🔴 RED" : "🟡 NEUTRAL");
+  const votes = h.classifier_votes || (isBull ? `${h.bullish_votes ?? 4}/5 BULL` : isBear ? `${h.bearish_votes ?? 4}/5 BEAR` : "3/5 CHOP");
+  const consensusProb = h.consensus_probability !== undefined 
+    ? (Number(h.consensus_probability) * 100).toFixed(1) 
+    : (h.conviction !== undefined ? Number(h.conviction).toFixed(1) : "55.0");
 
-  // Prefix emoji if missing
-  if (
-    !decision.startsWith("🎯") &&
-    !decision.startsWith("⛔") &&
-    !decision.startsWith("✅") &&
-    !decision.startsWith("⚡") &&
-    !decision.startsWith("🌊") &&
-    !decision.startsWith("💎") &&
-    !decision.startsWith("⚪")
-  ) {
-    if (isConsolidation) {
-      decision = `⚪ ${decision}`;
-    } else if (isBottomReversal || isTopReversal) {
-      decision = `🎯 ${decision}`;
-    } else if (isFilter) {
-      decision = `⛔ ${decision}`;
-    } else if (isElite) {
-      decision = `🎯 ${decision}`;
-    } else if (isShortSqueeze) {
-      decision = `⚡ ${decision}`;
-    } else if (isLongFlush) {
-      decision = `🌊 ${decision}`;
-    } else {
-      decision = `${isLong ? "🟢" : "🔴"} ${decision}`;
-    }
-  }
-
-  let badgeStyle = "bg-dark-900 text-slate-300 border-slate-800";
-  if (isBottomReversal) {
-    badgeStyle = "bg-emerald-950/95 text-emerald-200 border-emerald-400/80 shadow-md shadow-emerald-500/25";
-  } else if (isTopReversal) {
-    badgeStyle = "bg-rose-950/95 text-rose-200 border-rose-400/80 shadow-md shadow-rose-500/25";
-  } else if (isConsolidation) {
-    badgeStyle = "bg-slate-900/90 text-slate-400 border-slate-700/60";
-  } else if (isFilter) {
-    badgeStyle = "bg-slate-900/90 text-slate-400 border-slate-800/80";
-  } else if (isShortSqueeze) {
-    badgeStyle = "bg-amber-950/80 text-amber-300 border-amber-500/60 shadow-sm shadow-amber-500/20";
-  } else if (isLongFlush) {
-    badgeStyle = "bg-purple-950/80 text-purple-300 border-purple-500/60 shadow-sm shadow-purple-500/20";
-  } else if (isDipBuy) {
-    badgeStyle = "bg-emerald-950/90 text-emerald-300 border-emerald-500/70 shadow-sm shadow-emerald-500/20";
-  } else if (isRallySell) {
-    badgeStyle = "bg-rose-950/90 text-rose-300 border-rose-500/70 shadow-sm shadow-rose-500/20";
-  } else if (isLiquiditySweep) {
-    badgeStyle = isLong
-      ? "bg-cyan-950/90 text-cyan-300 border-cyan-500/70 shadow-sm shadow-cyan-500/20"
-      : "bg-fuchsia-950/90 text-fuchsia-300 border-fuchsia-500/70 shadow-sm shadow-fuchsia-500/20";
-  } else if (isElite) {
-    badgeStyle = isLong
-      ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/70 shadow-sm shadow-emerald-500/20"
-      : "bg-rose-950/80 text-rose-300 border-rose-500/70 shadow-sm shadow-rose-500/20";
-  } else if (isLong) {
-    badgeStyle = "bg-emerald-950/50 text-emerald-400 border-emerald-800/60";
-  } else {
-    badgeStyle = "bg-rose-950/50 text-rose-400 border-rose-800/60";
-  }
+  const metaWinProb = h.meta_win_prob_pct !== undefined 
+    ? Number(h.meta_win_prob_pct).toFixed(1) 
+    : (h.meta_win_probability_pct !== undefined ? Number(h.meta_win_probability_pct).toFixed(1) : "75.0");
 
   const curr = (livePrice && livePrice > 0) ? livePrice : (Number(h.current_price) || 1.0);
-  const cachedPrice = Number(h.current_price) || curr;
-  const isDiverged = Math.abs(curr - cachedPrice) / Math.max(1e-6, cachedPrice) > 0.035 || 
-                     (Number(h.tp1_price) > 0 && Math.abs(curr - Number(h.tp1_price)) / curr > 0.20);
-  
-  const expRet = Number(h.exp_return || 0.01);
-  const tpStep = Math.max(0.0075, Math.abs(expRet));
-  const slDist = Math.max(curr * 0.005, curr * 0.0035);
+  const targetPrice = Number(h.predicted_target_price || h.tp1_price || (isBull ? curr * 1.01 : curr * 0.99));
+  const changePct = h.predicted_change_pct !== undefined 
+    ? Number(h.predicted_change_pct) 
+    : (curr > 0 ? ((targetPrice - curr) / curr) * 100 : 0.0);
 
-  const tp1 = isDiverged ? (isLong ? curr * (1.0 + tpStep) : curr * (1.0 - tpStep)) : Number(h.tp1_price || h.tp_price || (isLong ? curr * 1.01 : curr * 0.99));
-  const tp2 = isDiverged ? (isLong ? curr * (1.0 + tpStep * 1.85) : curr * (1.0 - tpStep * 1.85)) : Number(h.tp2_price || (isLong ? curr * 1.02 : curr * 0.98));
-  const tp3 = isDiverged ? (isLong ? curr * (1.0 + tpStep * 2.90) : curr * (1.0 - tpStep * 2.90)) : Number(h.tp3_price || (isLong ? curr * 1.04 : curr * 0.96));
-  const tp4 = isDiverged ? (isLong ? curr * (1.0 + tpStep * 4.00) : curr * (1.0 - tpStep * 4.00)) : Number(h.tp4_price || (isLong ? curr * 1.07 : curr * 0.93));
-  const sl = isDiverged ? (isLong ? curr - slDist : curr + slDist) : Number(h.sl_price || (isLong ? curr * 0.995 : curr * 1.005));
-
-  let predNextPrice = isDiverged ? tp1 : Number(h.predicted_next_price || tp1);
-  let predReturnPct = Number((((predNextPrice - curr) / curr) * 100).toFixed(2));
-  const isHypeSurge = h.is_hype_surge;
-  const isBlowoffTop = h.is_blowoff_top;
-
-  // Dynamic Target Advancement if Actual Price Crossed Predicted Target Price
-  let isTargetCrossed = false;
-  if (isLong && curr >= predNextPrice && predNextPrice > 0) {
-    isTargetCrossed = true;
-    predNextPrice = curr < tp2 ? tp2 : (curr < tp3 ? tp3 : tp4);
-    predReturnPct = Number((((predNextPrice - curr) / curr) * 100).toFixed(2));
-  } else if (!isLong && curr <= predNextPrice && predNextPrice > 0) {
-    isTargetCrossed = true;
-    predNextPrice = curr > tp2 ? tp2 : (curr > tp3 ? tp3 : tp4);
-    predReturnPct = Number((((predNextPrice - curr) / curr) * 100).toFixed(2));
-  }
-
-  // Best Selling Price / Peak Profit Zone
-  const bestSellPrice = isDiverged 
-    ? (isLong ? (isHypeSurge ? tp4 : tp3) : (isBlowoffTop ? tp4 : tp3))
-    : Number(h.best_sell_price || (isLong ? (isHypeSurge ? tp4 : tp3) : (isBlowoffTop ? tp4 : tp3)));
+  // Model breakdowns for hover inspection
+  const clfBreakdown = h.classifier_breakdown || {};
+  const regBreakdown = h.regressor_breakdown || {};
 
   return (
-    <div className="flex flex-col gap-1 py-1 min-w-[175px] max-w-[250px]">
-      {/* Line 1: Direction & Conviction % & ML Win Prob */}
+    <div
+      className="flex flex-col gap-1 py-1.5 px-2 rounded-lg bg-dark-900/60 border border-slate-800/80 hover:border-slate-700 transition-all min-w-[170px] max-w-[210px]"
+      title={`[${h.timeframe || ""}] Consensus: ${votes} | Target: ${formatUsd(targetPrice)} (${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%)\nModels: CatBoost, XGBoost, HistGB, ExtraTrees, RandomForest`}
+    >
+      {/* Line 1: Next Candle Direction & Consensus Prob */}
       <div className="flex items-center justify-between gap-1 font-mono text-[11px] leading-tight">
-        <div className="flex items-center gap-1">
-          {isConsolidation ? (
-            <span className="text-slate-400 font-bold flex items-center gap-1">
-              <span>⚪</span>
-              <span>NEUTRAL</span>
-            </span>
-          ) : (
-            <>
-              <span>{isLong ? "🟢" : "🔴"}</span>
-              <span className={isLong ? "text-emerald-400 font-extrabold" : "text-rose-400 font-extrabold"}>
-                {directionText}
-              </span>
-              <span className="text-slate-300 font-medium">({convictionVal}%)</span>
-            </>
-          )}
-        </div>
+        <span className={`inline-flex items-center gap-1 font-extrabold ${isBull ? "text-emerald-400" : isBear ? "text-rose-400" : "text-amber-300"}`}>
+          <span>{isBull ? "🟢" : isBear ? "🔴" : "🟡"}</span>
+          <span>{directionText}</span>
+        </span>
+        <span className="text-[10px] text-slate-400 font-medium">
+          ({consensusProb}%)
+        </span>
         <span
-          className="text-purple-300 font-bold text-[10px] bg-purple-950/80 px-1 py-0.5 rounded border border-purple-500/40 shrink-0"
+          className="text-purple-300 font-bold text-[9.5px] bg-purple-950/80 px-1 py-0.2 rounded border border-purple-500/40 shrink-0 ml-auto"
           title="Secondary ML Meta-Labeler Win Probability"
         >
-          🧠 {metaProb.toFixed(1)}%
+          🧠 {metaWinProb}%
         </span>
       </div>
 
-      {/* Line 2: Continuous ML Next Price Target Regression */}
-      <div className={`text-[10.5px] font-mono px-1.5 py-0.5 rounded border flex items-center justify-between ${
-        isTargetCrossed 
-          ? "text-emerald-200 bg-emerald-950/60 border-emerald-500/40 shadow-sm shadow-emerald-500/20 animate-pulse" 
-          : "text-purple-200 bg-purple-950/40 border-purple-500/20"
+      {/* Line 2: 5 Top Regressors Consensus Target Price */}
+      <div className={`text-[10px] font-mono px-1.5 py-0.5 rounded border flex items-center justify-between ${
+        isBull 
+          ? "text-emerald-200 bg-emerald-950/40 border-emerald-500/30" 
+          : isBear 
+          ? "text-rose-200 bg-rose-950/40 border-rose-500/30" 
+          : "text-amber-200 bg-amber-950/30 border-amber-500/20"
       }`}>
-        <span className={isTargetCrossed ? "text-emerald-300 font-bold flex items-center gap-0.5" : "text-purple-300 font-bold flex items-center gap-0.5"}>
-          {isTargetCrossed ? "🎯 T1 Hit ➔ Next:" : "🔮 ML Target:"}
+        <span className="font-bold flex items-center gap-0.5">
+          🎯 Target:
         </span>
-        <span>
-          {formatUsd(predNextPrice)}{" "}
-          <span className={predReturnPct >= 0 ? "text-emerald-400 font-semibold" : "text-rose-400 font-semibold"}>
-            ({predReturnPct >= 0 ? "+" : ""}{predReturnPct}%)
+        <span className="font-extrabold">
+          {formatUsd(targetPrice)}{" "}
+          <span className={changePct >= 0 ? "text-emerald-400" : "text-rose-400"}>
+            ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
           </span>
         </span>
       </div>
 
-      {/* Line 3: Best Selling Price / Take Profit Zone */}
-      <div className="text-[10px] font-mono text-amber-200/90 bg-amber-950/30 px-1.5 py-0.5 rounded border border-amber-500/20 flex items-center justify-between">
-        <span className="text-amber-400 font-bold">💎 Best Sell:</span>
-        <span className="font-extrabold text-amber-300">
-          {formatUsd(bestSellPrice)}
+      {/* Line 3: 5 Classifiers Vote Consensus */}
+      <div className="flex items-center justify-between text-[9.5px] font-mono text-slate-400 px-1">
+        <span className="text-slate-500">Votes:</span>
+        <span className="font-semibold text-slate-300 truncate max-w-[125px]">
+          {votes}
         </span>
       </div>
 
-      {/* Line 4: Take Profit & Stop Loss targets */}
-      <div className="text-[10px] font-mono text-slate-400 whitespace-nowrap leading-tight">
-        <span>TP: <strong className="text-emerald-400">{formatUsd(tp1)}</strong></span>
-        <span className="mx-1 text-slate-600">|</span>
-        <span>SL: <strong className="text-rose-400">{formatUsd(sl)}</strong></span>
-      </div>
-
-      {/* Line 5: Signal Strength / Filter Badge & Hype Alerts */}
+      {/* Line 4: Trend State Badge & Candlestick Compression Indicators */}
       <div className="mt-0.5 flex flex-col gap-0.5">
         <span
-          className={`inline-block rounded px-1.5 py-0.5 text-[9.5px] font-bold font-sans border tracking-tight leading-snug whitespace-normal ${badgeStyle}`}
+          className={`inline-block w-full text-center rounded px-1.5 py-0.5 text-[9px] font-bold font-sans border tracking-tight leading-none ${
+            isBull
+              ? "bg-emerald-950/70 text-emerald-300 border-emerald-600/60"
+              : isBear
+              ? "bg-rose-950/70 text-rose-300 border-rose-600/60"
+              : "bg-slate-900 text-slate-400 border-slate-700"
+          }`}
         >
-          {decision}
+          {h.trend_label || (isBull ? "🟢 BULLISH" : isBear ? "🔴 BEARISH" : "🟡 CONSOLIDATION")}
         </span>
-        {isBlowoffTop && (
-          <div className="flex flex-col gap-0.5 mt-0.5">
-            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-950/90 text-rose-300 border border-rose-500 animate-pulse text-center">
-              🛑 BLOW-OFF TOP (SELL / FADE ZONE)
-            </span>
-            <span className="text-[8.5px] font-mono text-rose-400 text-center">
-              Peak Exhaustion Level: {formatUsd(bestSellPrice || h.sl_price)}
-            </span>
-          </div>
-        )}
-        {isHypeSurge && !isBlowoffTop && (
-          <div className="flex flex-col gap-0.5 mt-0.5">
-            <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-amber-950/90 text-amber-300 border border-amber-500 animate-pulse text-center">
-              🚀 HYPE PUMP (MOMENTUM SCALP)
-            </span>
-            <span className="text-[8.5px] font-mono text-emerald-300 text-center bg-emerald-950/60 rounded px-1 py-0.2 border border-emerald-500/30">
-              🎯 Next Target: {formatUsd(predNextPrice)} | 💎 Best Sell: {formatUsd(bestSellPrice)}
-            </span>
+        {(h.is_inside_bar || h.is_nr7 || h.is_coiling_squeeze) && (
+          <div className="flex items-center justify-center gap-1 mt-0.5">
+            {h.is_inside_bar && (
+              <span className="text-[7.5px] font-mono px-1 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-600/40" title="Inside Bar Compression">
+                IB
+              </span>
+            )}
+            {h.is_nr7 && (
+              <span className="text-[7.5px] font-mono px-1 py-0.2 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-600/40" title="Narrow Range 7 (Maximum Volatility Contraction)">
+                NR7
+              </span>
+            )}
+            {h.is_coiling_squeeze && !h.is_nr7 && (
+              <span className="text-[7.5px] font-mono px-1 py-0.2 rounded bg-purple-950/80 text-purple-300 border border-purple-600/40" title="Spring-Loaded Coiling Squeeze">
+                SQUEEZE
+              </span>
+            )}
           </div>
         )}
       </div>
+
+      {/* Line 5: Institutional Order Block (OB) Active Touch Badge */}
+      {h.order_block_touch ? (
+        <div
+          className={`mt-1 flex items-center justify-between px-1.5 py-0.5 rounded border text-[9px] font-mono font-bold animate-pulse shadow-sm ${
+            h.order_block_type === "BULLISH_OB"
+              ? "bg-emerald-950/90 text-emerald-300 border-emerald-500 shadow-emerald-900/40"
+              : "bg-rose-950/90 text-rose-300 border-rose-500 shadow-rose-900/40"
+          }`}
+          title={`🎯 INSTITUTIONAL ORDER BLOCK ACTIVE TOUCH\nRank: ${h.order_block_rank_label || `Rank ${h.order_block_rank || 1}`}\nZone: ${h.order_block_zone || ""}\nTouch: ${h.order_block_touch_type || "PROXIMAL_TOUCH"}`}
+        >
+          <span className="flex items-center gap-1">
+            <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-ping" />
+            <span>🎯 OB TOUCH [R{h.order_block_rank || 1}]</span>
+          </span>
+          <span className="text-[8px] opacity-80 uppercase tracking-tighter">
+            {h.order_block_touch_type === "MEAN_THRESHOLD_50" ? "50% EQ" : (h.order_block_touch_type || "TEST")}
+          </span>
+        </div>
+      ) : h.total_order_blocks && Number(h.total_order_blocks) > 0 ? (
+        <div
+          className="mt-0.5 flex items-center justify-between text-[8.5px] font-mono text-slate-500 px-1 hover:text-slate-400 transition-colors"
+          title={`${h.total_order_blocks} active institutional order blocks monitored on this timeframe`}
+        >
+          <span className="flex items-center gap-0.5">
+            <span>🏛️</span>
+            <span>{h.total_order_blocks} OBs</span>
+          </span>
+          {h.order_block_zone && (
+            <span className="truncate max-w-[95px] text-[7.5px] opacity-75">
+              {h.order_block_zone}
+            </span>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-// Asset & Confluence Cell with Server Date/Time and live ticking relative updates
+// Sticky Asset & Confluence Cell
 function AssetConfluenceCell({
   item,
   livePrice,
@@ -362,7 +308,6 @@ function AssetConfluenceCell({
   toggleWatchlist,
   idx,
   serverPredictionTimeFallback,
-  isStale,
 }: {
   item: any;
   livePrice: number;
@@ -371,19 +316,12 @@ function AssetConfluenceCell({
   toggleWatchlist: (s: string) => void;
   idx: number;
   serverPredictionTimeFallback?: string | number;
-  isStale?: boolean;
 }) {
   const itemTime = item.server_prediction_time || item.server_prediction_ts || serverPredictionTimeFallback;
   const relTime = useRelativeTime(itemTime);
-  const formattedTime = formatServerPredictionTime(itemTime);
-
-  const btcTag = item.btc_alignment_tag;
-  const btcLabel = item.btc_alignment_label;
-  const isHype = item.is_hype_surge;
-  const isBlowoff = item.is_blowoff_top;
 
   return (
-    <td className="py-3 px-3 sm:px-4 min-w-[210px] sm:min-w-[235px] sticky-col shadow-md border-r border-slate-800/80">
+    <td className="py-3 px-3 sm:px-4 min-w-[210px] sm:min-w-[230px] sticky-col shadow-md border-r border-slate-800/80 bg-dark-950/95">
       <div className="flex items-start gap-1.5 sm:gap-2">
         <button
           type="button"
@@ -394,11 +332,7 @@ function AssetConfluenceCell({
           className="p-1 mt-0.5 text-slate-500 hover:text-amber-400 transition-colors shrink-0"
           title={isStarred ? "Remove from Watchlist" : "Add to Watchlist"}
         >
-          <Star
-            className={`h-3.5 w-3.5 ${
-              isStarred ? "fill-amber-400 text-amber-400" : ""
-            }`}
-          />
+          <Star className={`h-3.5 w-3.5 ${isStarred ? "fill-amber-400 text-amber-400" : ""}`} />
         </button>
         <div className="flex flex-col gap-1 w-full">
           {/* Confluence Tag Badge */}
@@ -407,89 +341,63 @@ function AssetConfluenceCell({
               <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
               {confTag}
             </span>
+            {item.has_order_block_touch && (
+              <span
+                className="rounded bg-gradient-to-r from-emerald-950/90 to-cyan-950/90 px-1.5 py-0.5 text-[9px] font-extrabold text-cyan-300 border border-cyan-500/60 shadow-sm shadow-cyan-950/50 flex items-center gap-1 animate-pulse"
+                title={`Active Order Block Touch on Horizons: ${(item.touched_order_block_horizons || []).join(", ")}`}
+              >
+                <span>🎯</span>
+                <span>OB TOUCH</span>
+              </span>
+            )}
             {idx === 0 && (
               <span className="inline-flex items-center gap-1 rounded bg-amber-950/80 px-1 py-0.5 text-[9px] font-bold text-amber-300 border border-amber-500/50">
                 🥇 TOP
               </span>
             )}
-            {/* Stale / Updating badge – visible while this coin is still being scanned */}
-            {isStale && (
-              <span className="inline-flex items-center gap-1 rounded bg-amber-950/60 px-1.5 py-0.5 text-[9px] font-bold text-amber-400 border border-amber-500/40 animate-pulse">
-                ⟳ Updating
-              </span>
-            )}
           </div>
 
-          {/* Symbol & Price */}
-          <div className="flex items-baseline justify-between gap-1.5">
-            <span className="font-bold text-white text-sm font-sans group-hover:text-cyan-400 transition-colors flex items-center gap-1">
+          {/* Symbol & Live Spot Price */}
+          <div className="flex items-baseline justify-between gap-1">
+            <span className="text-sm font-black text-white tracking-wide group-hover:text-cyan-300 transition-colors">
               {item.symbol}
-              <History className="h-3 w-3 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity" />
             </span>
-            <span className="text-xs font-mono font-semibold text-cyan-400">
-              ({formatUsd(livePrice)})
+            <span className="text-xs font-mono font-bold text-slate-200">
+              {formatUsd(livePrice)}
             </span>
           </div>
 
-          {/* BTC Alignment & Systematic Beta Badge */}
-          {btcLabel && (
-            <div className="flex items-center gap-1 mt-0.5">
-              <span
-                className={`text-[9.5px] font-bold px-1.5 py-0.2 rounded border ${
-                  btcTag === "BEAR_SENSITIVE_LEVERAGED"
-                    ? "bg-rose-950/80 text-rose-300 border-rose-500/50"
-                    : btcTag === "INVERSE_BTC_HEDGE"
-                    ? "bg-indigo-950/80 text-indigo-300 border-indigo-500/50"
-                    : btcTag === "DECOUPLED_INDEPENDENT"
-                    ? "bg-amber-950/80 text-amber-300 border-amber-500/50"
-                    : "bg-emerald-950/80 text-emerald-300 border-emerald-500/50"
-                }`}
-                title={`BTC Correlation & Systematic Beta: ${btcLabel}`}
-              >
-                {btcLabel}
-              </span>
-            </div>
-          )}
-
-          {/* Hype Surge / Blow-off Top Indicator */}
-          {isBlowoff ? (
-            <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-500 animate-pulse w-fit">
-              🛑 BLOW-OFF TOP
+          {/* 24h Volume & 24h Change */}
+          <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+            <span>Vol: ${((item.volume_24h_usd || 0) / 1e6).toFixed(1)}M</span>
+            <span className={(item.change_24h_pct || 0) >= 0 ? "text-emerald-400 font-semibold" : "text-rose-400 font-semibold"}>
+              {(item.change_24h_pct || 0) >= 0 ? "+" : ""}{(item.change_24h_pct || 0).toFixed(2)}%
             </span>
-          ) : isHype ? (
-            <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-500 animate-pulse w-fit">
-              🚀 PARABOLIC HYPE
-            </span>
-          ) : null}
-
-          {/* Small Date & Time of Prediction at Server + Relative Updates */}
-          <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
-            <Clock className="h-2.5 w-2.5 text-slate-500 shrink-0" />
-            <span className="text-slate-300">{formattedTime}</span>
-            <span className="text-slate-600">•</span>
-            <span className="text-emerald-400 font-medium">({relTime})</span>
           </div>
+
+          {/* Timestamp sync */}
+          <span className="text-[9px] text-slate-500 font-mono flex items-center gap-1">
+            <Clock className="h-2.5 w-2.5 text-slate-500" />
+            {relTime}
+          </span>
         </div>
       </div>
     </td>
   );
 }
 
-// ─── Memoized Row Components ────────────────────────────────────────────────
-
-// Wraps a single <tr> and only re-renders when its data identity changes.
-const AssetAllHorizonRow = React.memo(function AssetAllHorizonRow({
+// Full 9-Horizon Row Component
+const AssetFull9HorizonsRow = React.memo(function AssetFull9HorizonsRow({
   item,
   idx,
   livePrice,
   confTag,
   isStarredFn,
   toggleWatchlist,
-  activeHorizonKey,
+  activeSortKey,
   sortOrder,
   serverPredictionTimeFallback,
   onSelectCoin,
-  isStale,
 }: {
   item: any;
   idx: number;
@@ -497,28 +405,23 @@ const AssetAllHorizonRow = React.memo(function AssetAllHorizonRow({
   confTag: string;
   isStarredFn: (s: string) => boolean;
   toggleWatchlist: (s: string) => void;
-  activeHorizonKey: HorizonSortKey;
+  activeSortKey: string;
   sortOrder: BiasSortOrder;
   serverPredictionTimeFallback?: string;
   onSelectCoin: (symbol: string, price: number) => void;
-  isStale: boolean;
 }) {
-  const s    = item.horizons?.scalp       || {};
-  const h30m = item.horizons?.horizon_30m || {};
-  const w    = item.horizons?.swing       || {};
-  const h4h  = item.horizons?.horizon_4h  || {};
-  const h12h = item.horizons?.horizon_12h || {};
-  const m    = item.horizons?.macro       || {};
-  const h4d  = item.horizons?.horizon_4d  || {};
-  const h7d  = item.horizons?.weekly      || {};
-  const h15d = item.horizons?.biweekly    || {};
-  const h30d = item.horizons?.monthly     || {};
+  const ta = item.trend_alignment || {};
+  const alignRatio = item.alignment_ratio || ta.alignment_ratio || "0/9";
+  const alignScore = item.alignment_score ?? ta.alignment_score_pct ?? 0;
+  const bullCount = item.confluence_bull_count ?? (ta.bullish_horizons || []).length;
+  const bearCount = item.confluence_bear_count ?? (ta.bearish_horizons || []).length;
 
   return (
     <tr
+      id={`asset-row-${item.symbol.replace("/", "_")}`}
       onClick={() => onSelectCoin(item.symbol, livePrice)}
       className="matrix-row-virtual hover:bg-slate-800/60 cursor-pointer transition-colors group"
-      title="Click to view 15-minute historical signal records for this coin"
+      title="Click to view historical signal records for this coin"
     >
       <AssetConfluenceCell
         item={item}
@@ -528,30 +431,64 @@ const AssetAllHorizonRow = React.memo(function AssetAllHorizonRow({
         toggleWatchlist={toggleWatchlist}
         idx={idx}
         serverPredictionTimeFallback={serverPredictionTimeFallback}
-        isStale={isStale}
       />
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "scalp"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(s, livePrice)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_30m" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h30m, livePrice)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "swing"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(w, livePrice)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4h"  && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h4h, livePrice)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_12h" && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h12h, livePrice)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "macro"       && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(m, livePrice)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "horizon_4d"  && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h4d, livePrice)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "weekly"      && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h7d, livePrice)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "biweekly"    && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h15d, livePrice)}</td>
-      <td className={`py-3 px-3 transition-colors ${activeHorizonKey === "monthly"     && sortOrder !== "none" ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""}`}>{renderSignalCell(h30d, livePrice)}</td>
+
+      {/* Render all 9 user-requested Multihorizon columns */}
+      {ALL_9_HORIZONS.map((hDef) => {
+        const tfData = getTimeframeData(item, hDef);
+        const isCurrentSortCol = activeSortKey === hDef.key && sortOrder !== "none";
+        return (
+          <td
+            key={hDef.key}
+            className={`py-2 px-2 transition-colors ${
+              isCurrentSortCol ? "bg-cyan-950/20 border-x border-cyan-500/20" : ""
+            }`}
+          >
+            {renderMultiHorizonCell(tfData, livePrice)}
+          </td>
+        );
+      })}
+
+      {/* Multi-Alignment & Status Column */}
       <td className="py-3 px-4 text-right font-sans">
-        <div className="flex flex-col items-end gap-1">
-          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-black border ${
-            item.confluence_bull_count >= 6 ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/60"
-            : item.confluence_bear_count >= 6 ? "bg-rose-950/80 text-rose-300 border-rose-500/60"
-            : "bg-slate-900/90 text-slate-400 border-slate-800"
-          }`}>
+        <div className="flex flex-col items-end gap-1 min-w-[130px]">
+          <span
+            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-black border ${
+              bullCount >= 6
+                ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/60"
+                : bearCount >= 6
+                ? "bg-rose-950/80 text-rose-300 border-rose-500/60"
+                : "bg-slate-900/90 text-slate-400 border-slate-800"
+            }`}
+          >
             <Activity className="h-3 w-3" />
-            {item.confluence_bull_count ?? 0} Bulls / {item.confluence_bear_count ?? 0} Bears
+            {alignRatio} ({alignScore}%)
           </span>
-          <span className="text-[10px] font-mono text-slate-500">
-            Align: {item.alignment_score !== undefined ? `${item.alignment_score > 0 ? "+" : ""}${item.alignment_score}%` : "—"}
+          {item.archetype === "ARCHETYPE_B_COILING_BREAKOUT" ? (
+            <span className="text-[9px] font-black font-mono text-cyan-300 bg-cyan-950/80 px-1.5 py-0.2 rounded border border-cyan-500/40" title={item.matrix_rationale}>
+              ⚡ COIL BREAKOUT
+            </span>
+          ) : item.archetype === "ARCHETYPE_C_RANGE_ROTATION" ? (
+            <span className="text-[9px] font-black font-mono text-amber-300 bg-amber-950/80 px-1.5 py-0.2 rounded border border-amber-500/40" title={item.matrix_rationale}>
+              ⚖️ RANGE ROTATION
+            </span>
+          ) : item.archetype === "ARCHETYPE_A_SECULAR_EXPANSION" ? (
+            <span className="text-[9px] font-black font-mono text-emerald-300 bg-emerald-950/80 px-1.5 py-0.2 rounded border border-emerald-500/40" title={item.matrix_rationale}>
+              💎 SECULAR TREND
+            </span>
+          ) : null}
+          <span className={`text-[10px] font-mono font-bold ${
+            item.is_ntz_active || (item.signal_status && item.signal_status.includes("NO_TRADE_ZONE"))
+              ? "text-amber-400 font-black"
+              : item.signal_status === "ACTIVE_SIGNAL" || item.is_trade_active
+              ? "text-emerald-400 animate-pulse"
+              : "text-slate-500"
+          }`}>
+            {item.is_ntz_active || (item.signal_status && item.signal_status.includes("NO_TRADE_ZONE"))
+              ? "🛑 NO TRADE ZONE"
+              : item.signal_status === "ACTIVE_SIGNAL" || item.is_trade_active
+              ? "🎯 ACTIVE SIGNAL"
+              : "WAITING ALIGN"}
           </span>
         </div>
       </td>
@@ -559,6 +496,7 @@ const AssetAllHorizonRow = React.memo(function AssetAllHorizonRow({
   );
 });
 
+// Single Horizon Focused Deep Dive Row
 const AssetSingleHorizonRow = React.memo(function AssetSingleHorizonRow({
   item,
   idx,
@@ -569,7 +507,6 @@ const AssetSingleHorizonRow = React.memo(function AssetSingleHorizonRow({
   selectedHorizon,
   serverPredictionTimeFallback,
   onSelectCoin,
-  isStale,
 }: {
   item: any;
   idx: number;
@@ -577,26 +514,27 @@ const AssetSingleHorizonRow = React.memo(function AssetSingleHorizonRow({
   confTag: string;
   isStarredFn: (s: string) => boolean;
   toggleWatchlist: (s: string) => void;
-  selectedHorizon: HorizonKey;
+  selectedHorizon: string;
   serverPredictionTimeFallback?: string;
   onSelectCoin: (symbol: string, price: number) => void;
-  isStale: boolean;
 }) {
-  const h = item.horizons?.[selectedHorizon] || {};
-  const isLong = h.direction === "BULLISH" || h.direction === "LONG";
-  const conv = h.conviction ?? 50.0;
-  const metaProb =
-    h.meta_win_prob_pct ??
-    (h.meta_win_prob !== undefined && h.meta_win_prob !== null
-      ? h.meta_win_prob <= 1.0 ? h.meta_win_prob * 100.0 : h.meta_win_prob
-      : h.conviction ? Math.min(94.5, Math.max(48.0, h.conviction * 0.86)) : 72.0);
-  const expRet = h.exp_return ? h.exp_return * 100 : 0.0;
+  const hDef = ALL_9_HORIZONS.find((h) => h.key === selectedHorizon) || ALL_9_HORIZONS[1];
+  const h = getTimeframeData(item, hDef);
+
+  const stance = getHorizonStance(h);
+  const isLong = stance === "bullish";
+  const conv = h.consensus_probability !== undefined ? (h.consensus_probability * 100) : (h.conviction ?? 50.0);
+  const metaProb = h.meta_win_prob_pct !== undefined ? Number(h.meta_win_prob_pct) : 75.0;
+  const curr = livePrice > 0 ? livePrice : (Number(h.current_price) || 1.0);
+  const targetPrice = Number(h.predicted_target_price || h.tp1_price || (isLong ? curr * 1.01 : curr * 0.99));
+  const changePct = h.predicted_change_pct !== undefined ? Number(h.predicted_change_pct) : (curr > 0 ? ((targetPrice - curr) / curr) * 100 : 0.0);
 
   return (
     <tr
+      id={`asset-row-${item.symbol.replace("/", "_")}`}
       onClick={() => onSelectCoin(item.symbol, livePrice)}
       className="matrix-row-virtual hover:bg-slate-800/60 cursor-pointer transition-colors group"
-      title="Click to view 15-minute historical signal records for this coin"
+      title="Click to view historical signal records for this coin"
     >
       <AssetConfluenceCell
         item={item}
@@ -606,65 +544,58 @@ const AssetSingleHorizonRow = React.memo(function AssetSingleHorizonRow({
         toggleWatchlist={toggleWatchlist}
         idx={idx}
         serverPredictionTimeFallback={serverPredictionTimeFallback}
-        isStale={isStale}
       />
+
       <td className="py-3 px-4">
-        <span className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-bold font-sans ${
-          isLong ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                 : "bg-rose-500/20 text-rose-400 border border-rose-500/40"
-        }`}>
-          {isLong ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
-          {isLong ? "LONG BUY" : "SHORT SELL"}
+        <span className={`inline-flex items-center gap-1 font-bold ${isLong ? "text-emerald-400" : stance === "bearish" ? "text-rose-400" : "text-amber-300"}`}>
+          {isLong ? "🟢 LONG" : stance === "bearish" ? "🔴 SHORT" : "🟡 CHOP"}
         </span>
       </td>
-      <td className="py-3 px-4"><span className="font-bold text-cyan-300">{conv.toFixed(1)}%</span></td>
+
       <td className="py-3 px-4 font-mono">
-        <span className="inline-flex items-center gap-1 rounded bg-purple-950/80 px-2 py-0.5 text-xs font-bold text-purple-300 border border-purple-500/40 shadow-sm shadow-purple-500/20">
+        <span className="text-slate-300 font-bold">{conv.toFixed(1)}%</span>
+      </td>
+
+      <td className="py-3 px-4 font-mono">
+        <span className="text-purple-300 font-bold bg-purple-950/80 px-2 py-0.5 rounded border border-purple-500/40">
           🧠 {metaProb.toFixed(1)}%
         </span>
       </td>
-      <td className="py-3 px-4 font-bold text-emerald-400">{formatUsd(h.tp_price)}</td>
-      <td className="py-3 px-4 font-bold text-rose-400">{formatUsd(h.sl_price)}</td>
-      <td className="py-3 px-4">
-        <span className={`font-bold ${expRet >= 0 ? "text-emerald-400" : "text-rose-400"}`}>{formatPercent(expRet)}</span>
+
+      <td className="py-3 px-4 font-mono text-emerald-400 font-bold">
+        {formatUsd(targetPrice)} ({changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%)
       </td>
-      <td className="py-3 px-4 text-right font-sans">
-        <div className="flex justify-end">{renderSignalCell(h, livePrice)}</div>
+
+      <td className="py-3 px-4 font-mono text-rose-400 font-bold">
+        {formatUsd(h.sl_price || (isLong ? curr * 0.985 : curr * 1.015))}
+      </td>
+
+      <td className="py-3 px-4 font-mono">
+        <span className="text-slate-300">{h.classifier_votes || "4/5 CONSENSUS"}</span>
+      </td>
+
+      <td className="py-3 px-4 text-right">
+        <span className={`inline-block rounded px-2 py-1 text-[10px] font-bold border ${
+          isLong ? "bg-emerald-950/80 text-emerald-300 border-emerald-600/80" : stance === "bearish" ? "bg-rose-950/80 text-rose-300 border-rose-600/80" : "bg-slate-900 text-slate-400 border-slate-700"
+        }`}>
+          {h.trend_label || (isLong ? "🟢 BULLISH" : stance === "bearish" ? "🔴 BEARISH" : "🟡 CONSOLIDATION")}
+        </span>
       </td>
     </tr>
   );
 });
 
-// ─── Main Component ──────────────────────────────────────────────────────────
-
-const EXCLUDED_STABLECOIN_BASES = new Set([
-  "USDC", "FDUSD", "TUSD", "USDD", "DAI", "BUSD", "EUR", "TRY", "PAXG", "WBTC",
-  "USDP", "AEUR", "T", "USTC", "EURI", "USD", "EURR", "RLUSD", "USD1", "U", "USDE",
-  "PYUSD", "GUSD", "LUSD", "FRAX", "CUSD", "EURT", "XAUT", "XAU", "XAG", "XUSD",
-  "USDS", "USDX", "SUSD", "USDJ", "USDK", "USDQ", "USDM", "USDL", "BGBP", "BIDR",
-  "IDRT", "BVND", "VND", "BRL", "GBP", "AUD", "NGN", "ZAR", "RUB", "UAH", "PLN",
-  "RON", "CZK", "HUF", "ARS", "COP", "MXN", "PHP", "THB", "PAX", "TBTC", "BTCB",
-  "USDT", "EURS", "EURC", "USN", "CEUR"
-]);
-
-function isValidCryptoSymbol(symbol: string): boolean {
-  if (!symbol) return false;
-  const clean = symbol.trim().toUpperCase().replace(":USDT", "");
-  const base = clean.split("/")[0];
-  if (/^COIN\d+$/.test(base)) return false;
-  if (!/^[A-Z0-9]+$/.test(base)) return false;
-  if (EXCLUDED_STABLECOIN_BASES.has(base)) return false;
-  if (base.length > 4 && base.endsWith("B") && ["NVDAB", "CRCLB", "SPCXB", "SNDKB", "INTCB", "SOXLB", "MSTRB", "TSLAB", "QQQB", "COINB"].includes(base)) return false;
-  return true;
-}
-
+// ============================================================================
+// MAIN COMPONENT: ASSET PREDICTION MATRIX
+// ============================================================================
 export default function AssetPredictionMatrix() {
   const { data: forecast, isLoading } = useForecastQuery();
   const { data: status } = useStatusQuery();
   const { data: livePricesData } = useLivePricesQuery();
   const livePrices = useMemo(() => livePricesData?.prices || {}, [livePricesData?.prices]);
   const { isStarred, toggleWatchlist, watchlist } = useWatchlist();
-  const [selectedHorizon, setSelectedHorizon] = useState<HorizonKey>("all");
+
+  const [selectedHorizon, setSelectedHorizon] = useState<HorizonFilterKey>("all");
   const [search, setSearch] = useState("");
   const [selectedCoin, setSelectedCoin] = useState<{ symbol: string; price?: number } | null>(null);
 
@@ -672,205 +603,119 @@ export default function AssetPredictionMatrix() {
   const serverSyncTimeFormatted = formatServerPredictionTime(forecast?.server_prediction_time || forecast?.timestamp);
 
   // User-configurable Horizon Stance Sorting & Filtering
-  const [sortHorizon, setSortHorizon] = useState<HorizonSortKey>("scalp");
+  const [sortHorizon, setSortHorizon] = useState<string>("15m");
   const [sortOrder, setSortOrder] = useState<BiasSortOrder>("none");
   const [biasFilter, setBiasFilter] = useState<BiasFilter>("all");
 
-  const activeHorizonKey: HorizonSortKey = sortHorizon || "scalp";
+  const activeSortKey = sortHorizon || "15m";
 
-  // ── Stable per-symbol row cache (stable object references) ─────────────────
-  const rowCacheRef = useRef<Map<string, any>>(new Map());
-  // Tracks the insertion order of symbols (so table order is stable)
-  const symbolOrderRef = useRef<string[]>([]);
-
+  // Raw leaderboard from forecast endpoint
   const rawLeaderboard = useMemo(
     () => (forecast?.scanner_leaderboard || []).filter((item: any) => isValidCryptoSymbol(item.symbol)),
     [forecast?.scanner_leaderboard]
   );
 
-  // Merge incoming rows into the stable cache, pruning stale/removed coins.
-  useEffect(() => {
-    const incoming = rawLeaderboard;
-    if (incoming.length === 0) return;
-
-    const freshSymbols = new Set(incoming.map((item: any) => item.symbol));
-
-    // Prune stale/deleted symbols from cache
-    Array.from(rowCacheRef.current.keys()).forEach((sym) => {
-      if (!freshSymbols.has(sym)) {
-        rowCacheRef.current.delete(sym);
-      }
-    });
-    symbolOrderRef.current = symbolOrderRef.current.filter((sym) => freshSymbols.has(sym));
-
-    incoming.forEach((item: any) => {
-      const sym = item.symbol;
-      const cached = rowCacheRef.current.get(sym);
-
-      if (!cached) {
-        // Brand-new symbol – insert
-        rowCacheRef.current.set(sym, item);
-        if (!symbolOrderRef.current.includes(sym)) {
-          symbolOrderRef.current.push(sym);
-        }
-      } else {
-        // Only replace the reference when data actually changed.
-        const newTime = item.server_prediction_time || item.server_prediction_ts || item.timestamp || "";
-        const oldTime = cached.server_prediction_time || cached.server_prediction_ts || cached.timestamp || "";
-        if (newTime !== oldTime || cached._fingerprint !== JSON.stringify(item.horizons)) {
-          rowCacheRef.current.set(sym, { ...item, _fingerprint: JSON.stringify(item.horizons) });
-        }
-      }
-    });
-  }, [rawLeaderboard]);
-
-  // Build a stable leaderboard strictly aligned with fresh server leaderboard.
-  const leaderboard = useMemo(() => {
-    if (rawLeaderboard.length === 0) {
-      return symbolOrderRef.current
-        .map(sym => rowCacheRef.current.get(sym))
-        .filter(Boolean);
-    }
-    return rawLeaderboard.map((item: any) =>
-      rowCacheRef.current.get(item.symbol) ?? item
-    );
-  }, [rawLeaderboard]);
-
-  // Set of symbols that are in the cache but NOT in the latest fetch → still scanning
-  const staleSymbols = useMemo(() => {
-    if (rawLeaderboard.length === 0) return new Set<string>();
-    const freshSet = new Set(rawLeaderboard.map((i: any) => i.symbol as string));
-    const stale = new Set<string>();
-    rowCacheRef.current.forEach((_, sym) => {
-      if (!freshSet.has(sym)) stale.add(sym);
-    });
-    return stale;
-  }, [rawLeaderboard]);
-
-  // Live stance distribution counts for the active horizon
+  // Stance counts for the active sort horizon
   const stanceCounts = useMemo(() => {
     let bull = 0;
     let cons = 0;
     let bear = 0;
-    for (const item of leaderboard) {
-      const st = getHorizonStance(item.horizons?.[activeHorizonKey]);
+    const currentHDef = ALL_9_HORIZONS.find((h) => h.key === activeSortKey) || ALL_9_HORIZONS[1];
+    for (const item of rawLeaderboard) {
+      const tfData = getTimeframeData(item, currentHDef);
+      const st = getHorizonStance(tfData);
       if (st === "bullish") bull++;
       else if (st === "bearish") bear++;
       else cons++;
     }
-    return { bull, cons, bear, total: leaderboard.length };
-  }, [leaderboard, activeHorizonKey]);
+    return { bull, cons, bear, total: rawLeaderboard.length };
+  }, [rawLeaderboard, activeSortKey]);
 
-  const handleColumnHeaderSort = useCallback((horizon: HorizonSortKey) => {
-    if (sortHorizon !== horizon) {
-      setSortHorizon(horizon);
+  // Handle column header click: cycles Bullish First -> Bearish First -> Consolidate First -> Reset
+  const handleColumnHeaderSort = useCallback((horizonKey: string) => {
+    if (sortHorizon !== horizonKey) {
+      setSortHorizon(horizonKey);
       setSortOrder("bullish_first");
     } else {
-      if (sortOrder === "bullish_first") {
-        setSortOrder("bearish_first");
-      } else if (sortOrder === "bearish_first") {
-        setSortOrder("consolidate_first");
-      } else if (sortOrder === "consolidate_first") {
-        setSortOrder("none");
-      } else {
-        setSortOrder("bullish_first");
-      }
+      if (sortOrder === "none") setSortOrder("bullish_first");
+      else if (sortOrder === "bullish_first") setSortOrder("bearish_first");
+      else if (sortOrder === "bearish_first") setSortOrder("consolidate_first");
+      else setSortOrder("none");
     }
   }, [sortHorizon, sortOrder]);
 
   const handleResetSort = useCallback(() => {
-    setSortHorizon("scalp");
     setSortOrder("none");
     setBiasFilter("all");
+    setSortHorizon("15m");
     setSelectedHorizon("all");
     setSearch("");
   }, []);
 
+  // Filter and sort assets
   const filteredAssets = useMemo(() => {
-    let list = leaderboard;
+    let list = [...rawLeaderboard];
 
-    if (selectedHorizon === "high_confluence") {
-      list = list.filter(
-        (item: any) =>
-          item.confluence_bull_count >= 5 ||
-          item.confluence_bear_count >= 5 ||
-          item.is_triple_confluence ||
-          (item.consistency_index && item.consistency_index >= 80)
-      );
-    } else if (selectedHorizon === "high_yield") {
-      list = list.filter((item: any) => {
-        if (!item.horizons) return false;
-        return Object.values(item.horizons).some((h: any) => {
-          const rawExp = h.expected_return_pct !== undefined ? Math.abs(Number(h.expected_return_pct)) : 0;
-          const modelExp = h.exp_return !== undefined ? Math.abs(Number(h.exp_return) * 100) : 0;
-          const entry = Number(h.current_price || h.entry_price || 0);
-          const tp = Number(h.tp_price || h.tp1_price || 0);
-          const gain = entry > 0 && tp > 0 ? (Math.abs(tp - entry) / entry) * 100 : 0;
-          return Math.max(rawExp, modelExp, gain) >= 3.0;
-        });
-      });
-    } else if (selectedHorizon === "reversals") {
-      list = list.filter(
-        (item: any) =>
-          (item.confluence_tag && (item.confluence_tag.includes("REVERSAL") || item.confluence_tag.includes("EXHAUSTION"))) ||
-          (item.market_phase && (item.market_phase.includes("ACCUMULATION") || item.market_phase.includes("DISTRIBUTION"))) ||
-          item.horizons?.scalp?.decision?.includes("REVERSAL") ||
-          item.horizons?.scalp?.decision?.includes("DIP-BUY") ||
-          item.horizons?.scalp?.decision?.includes("RALLY-SELL")
-      );
-    } else if (selectedHorizon === "trend_expansion") {
-      list = list.filter(
-        (item: any) =>
-          (item.market_phase && item.market_phase.includes("EXPANSION")) ||
-          item.confluence_bull_count >= 6 ||
-          item.confluence_bear_count >= 6
-      );
-    } else if (selectedHorizon === "watchlist") {
-      list = list.filter((item: any) => isStarred(item.symbol));
-    }
-
+    // Search query filter
     if (search.trim()) {
-      const q = search.toLowerCase().trim();
-      list = list.filter((item: any) => item.symbol?.toLowerCase().includes(q));
+      const q = search.trim().toUpperCase();
+      list = list.filter((item: any) => item.symbol && item.symbol.toUpperCase().includes(q));
     }
 
-    // Filter by stance (Bullish / Consolidate / Bearish) on the selected horizon
-    if (biasFilter !== "all") {
+    // Watchlist tab filter
+    if (selectedHorizon === "watchlist") {
+      list = list.filter((item: any) => isStarred(item.symbol));
+    } else if (selectedHorizon === "order_blocks") {
+      list = list.filter((item: any) => item.has_order_block_touch);
+    } else if (selectedHorizon === "high_confluence") {
       list = list.filter((item: any) => {
-        const st = getHorizonStance(item.horizons?.[activeHorizonKey]);
-        return st === biasFilter;
+        const alignScore = item.alignment_score ?? (item.trend_alignment?.alignment_score_pct ?? 0);
+        return alignScore >= 66.0 || item.is_triple_confluence;
+      });
+    } else if (ALL_9_HORIZONS.some((h) => h.key === selectedHorizon)) {
+      const targetHDef = ALL_9_HORIZONS.find((h) => h.key === selectedHorizon);
+      if (targetHDef) {
+        list.sort((a: any, b: any) => {
+          const stA = getHorizonStance(getTimeframeData(a, targetHDef));
+          const stB = getHorizonStance(getTimeframeData(b, targetHDef));
+          const scoreA = stA !== "consolidate" ? 2 : 0;
+          const scoreB = stB !== "consolidate" ? 2 : 0;
+          return scoreB - scoreA;
+        });
+      }
+    }
+
+    // Stance filter based on active sort horizon
+    if (biasFilter !== "all") {
+      const currentHDef = ALL_9_HORIZONS.find((h) => h.key === activeSortKey) || ALL_9_HORIZONS[1];
+      list = list.filter((item: any) => {
+        const tfData = getTimeframeData(item, currentHDef);
+        return getHorizonStance(tfData) === biasFilter;
       });
     }
 
-    let sorted = [...list];
+    // Sorting
     if (sortOrder !== "none") {
-      sorted.sort((a: any, b: any) => {
-        const hA = a.horizons?.[activeHorizonKey];
-        const hB = b.horizons?.[activeHorizonKey];
-        const stanceA = getHorizonStance(hA);
-        const stanceB = getHorizonStance(hB);
+      const currentHDef = ALL_9_HORIZONS.find((h) => h.key === activeSortKey) || ALL_9_HORIZONS[1];
+      list.sort((a: any, b: any) => {
+        const aStarred = isStarred(a.symbol);
+        const bStarred = isStarred(b.symbol);
+        if (aStarred && !bStarred) return -1;
+        if (!aStarred && bStarred) return 1;
 
-        const convA = Number(hA?.conviction ?? 50);
-        const convB = Number(hB?.conviction ?? 50);
+        const stA = getHorizonStance(getTimeframeData(a, currentHDef));
+        const stB = getHorizonStance(getTimeframeData(b, currentHDef));
 
-        if (sortOrder === "bullish_first") {
-          const scoreA = stanceA === "bullish" ? 2000 + convA : stanceA === "consolidate" ? 1000 : 0 - convA;
-          const scoreB = stanceB === "bullish" ? 2000 + convB : stanceB === "consolidate" ? 1000 : 0 - convB;
-          return scoreB - scoreA;
-        } else if (sortOrder === "bearish_first") {
-          const scoreA = stanceA === "bearish" ? 2000 + convA : stanceA === "consolidate" ? 1000 : 0 - convA;
-          const scoreB = stanceB === "bearish" ? 2000 + convB : stanceB === "consolidate" ? 1000 : 0 - convB;
-          return scoreB - scoreA;
-        } else if (sortOrder === "consolidate_first") {
-          const scoreA = stanceA === "consolidate" ? 2000 + Number(a.consistency_index ?? 50) : stanceA === "bullish" ? 1000 + convA : 0 + convA;
-          const scoreB = stanceB === "consolidate" ? 2000 + Number(b.consistency_index ?? 50) : stanceB === "bullish" ? 1000 + convB : 0 + convB;
-          return scoreB - scoreA;
-        }
-        return 0;
+        const getRank = (st: string) => {
+          if (sortOrder === "bullish_first") return st === "bullish" ? 0 : st === "consolidate" ? 1 : 2;
+          if (sortOrder === "bearish_first") return st === "bearish" ? 0 : st === "consolidate" ? 1 : 2;
+          return st === "consolidate" ? 0 : st === "bullish" ? 1 : 2;
+        };
+        return getRank(stA) - getRank(stB);
       });
     } else {
-      // Always pin starred / active trade assets at the top while preserving original rank
-      sorted.sort((a: any, b: any) => {
+      // Default: Starred on top, followed by algorithmic ranking
+      list.sort((a: any, b: any) => {
         const aStarred = isStarred(a.symbol);
         const bStarred = isStarred(b.symbol);
         if (aStarred && !bStarred) return -1;
@@ -879,71 +724,30 @@ export default function AssetPredictionMatrix() {
       });
     }
 
-    return sorted;
-  }, [leaderboard, search, selectedHorizon, isStarred, activeHorizonKey, sortOrder, biasFilter]);
+    return list;
+  }, [rawLeaderboard, search, selectedHorizon, isStarred, activeSortKey, sortOrder, biasFilter]);
 
-  const horizonTabs: { key: HorizonKey; label: string }[] = useMemo(
+  // Horizon Filter Tabs
+  const horizonTabs: { key: HorizonFilterKey; label: string }[] = useMemo(
     () => [
-      { key: "all", label: "All Horizons Matrix (10TF)" },
-      { key: "high_confluence", label: "💎 High Confluence (≥6/10)" },
-      { key: "high_yield", label: "🎯 High Yield (≥3% Target)" },
-      { key: "reversals", label: "⚡ Reversals & Bounces" },
-      { key: "trend_expansion", label: "🚀 Trend Expansion" },
+      { key: "all", label: "🌐 All 9 Horizons (5M .. 30D)" },
+      { key: "order_blocks", label: "🎯 OB Touches" },
+      { key: "5m", label: "⚡ 5M Micro" },
+      { key: "15m", label: "⚡ 15M Scalp" },
+      { key: "1h", label: "⏳ 1H Intraday" },
+      { key: "4h", label: "⏳ 4H Swing" },
+      { key: "12h", label: "🌊 12H Half-Day" },
+      { key: "1d", label: "🌊 1D / 24H Daily" },
+      { key: "1w", label: "📅 7D Weekly" },
+      { key: "15d", label: "📅 15D Bi-Weekly" },
+      { key: "1M", label: "🏛️ 30D / 1M Monthly" },
+      { key: "high_confluence", label: "💎 High Confluence" },
       { key: "watchlist", label: `⭐ Watchlist (${watchlist.length})` },
-      { key: "scalp", label: "⚡ Scalp (15M)" },
-      { key: "horizon_30m", label: "⏱️ 30M" },
-      { key: "swing", label: "🌊 Swing (1H)" },
-      { key: "horizon_4h", label: "⏳ Intraday (4H)" },
-      { key: "horizon_12h", label: "🌗 12H" },
-      { key: "macro", label: "🚀 Macro (24H)" },
-      { key: "horizon_4d", label: "📅 4D" },
-      { key: "weekly", label: "🗓️ Weekly (7D)" },
-      { key: "biweekly", label: "📆 15D" },
-      { key: "monthly", label: "🪐 Monthly (30D)" },
     ],
     [watchlist.length]
   );
 
   const handleCloseModal = useCallback(() => setSelectedCoin(null), []);
-
-  const renderSortableHeader = (key: HorizonSortKey, label: string) => {
-    const isSorted = activeHorizonKey === key && sortOrder !== "none";
-    return (
-      <th
-        key={key}
-        onClick={() => handleColumnHeaderSort(key)}
-        className={`py-3 px-4 cursor-pointer select-none transition-all group ${
-          isSorted
-            ? "bg-cyan-950/50 text-cyan-200 border-b-2 border-cyan-400"
-            : "hover:bg-slate-800/80 text-slate-300"
-        }`}
-        title={`Click to cycle sort for ${label}: Bullish ➔ Bearish ➔ Consolidate ➔ Reset`}
-      >
-        <div className="flex items-center justify-between gap-1.5">
-          <span className="font-bold tracking-tight">{label}</span>
-          <div className="shrink-0 flex items-center">
-            {isSorted ? (
-              sortOrder === "bullish_first" ? (
-                <span className="inline-flex items-center gap-0.5 bg-emerald-950/90 text-emerald-300 px-1.5 py-0.5 rounded text-[9px] font-black border border-emerald-500/50 shadow-sm shadow-emerald-500/20">
-                  <ArrowUp className="h-2.5 w-2.5" /> Bull
-                </span>
-              ) : sortOrder === "bearish_first" ? (
-                <span className="inline-flex items-center gap-0.5 bg-rose-950/90 text-rose-300 px-1.5 py-0.5 rounded text-[9px] font-black border border-rose-500/50 shadow-sm shadow-rose-500/20">
-                  <ArrowDown className="h-2.5 w-2.5" /> Bear
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-0.5 bg-slate-800 text-slate-200 px-1.5 py-0.5 rounded text-[9px] font-black border border-slate-600">
-                  <CircleDot className="h-2.5 w-2.5" /> Chop
-                </span>
-              )
-            ) : (
-              <ArrowUpDown className="h-3 w-3 text-slate-600 group-hover:text-slate-300 transition-colors" />
-            )}
-          </div>
-        </div>
-      </th>
-    );
-  };
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">
@@ -956,16 +760,16 @@ export default function AssetPredictionMatrix() {
         />
       )}
 
-      {/* Clean Matrix Header with Radar Confluence Diagnostics */}
+      {/* Header */}
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between border-b border-slate-800/80 pb-4">
         <div>
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2.5 flex-wrap">
             <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
               <Compass className="h-5 w-5 text-cyan-400" />
-              Complete Top 200-Asset Multi-Horizon Prediction Matrix
+              Multi-Horizon Matrix (5M, 15M, 1H, 4H, 12H, 24H, 7D, 15D, 1M)
             </h2>
             <span className="rounded-md bg-dark-900 px-2.5 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50">
-              {filteredAssets.length} of {leaderboard.length || 200} Assets
+              {filteredAssets.length} of {rawLeaderboard.length || 40} Coins
             </span>
             <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-bold text-emerald-400 border border-emerald-500/30">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
@@ -973,25 +777,24 @@ export default function AssetPredictionMatrix() {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Multi-timeframe AI prediction matrix with Hysteresis noise-filtering, 10-horizon confluence scoring, and institutional phase tags.{" "}
+            Institutional AI prediction matrix showing next candle direction (Green Bullish / Red Bearish), 5 Classifiers + 5 Regressors consensus, and Secondary ML Meta-Labelers across all 9 timeframes.{" "}
             <span className="text-cyan-400 font-semibold underline decoration-dotted">
-              Click column headers or toolbar buttons to sort by Bullish, Consolidate, or Bearish stance across horizons.
+              Click any column header to sort by that timeframe.
             </span>
           </p>
         </div>
       </div>
 
-      {/* Controls & Horizon Tabs */}
+      {/* Horizon Filter Tabs & Search */}
       <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        {/* Horizon Filter Tabs (10 Horizons Spectrum) */}
         <div className="flex items-center gap-1 rounded-xl bg-dark-900/90 p-1 border border-slate-800 overflow-x-auto max-w-full">
           {horizonTabs.map((tab) => (
             <button
               key={tab.key}
               onClick={() => {
                 setSelectedHorizon(tab.key);
-                if (SORT_HORIZONS.some((h) => h.key === tab.key)) {
-                  setSortHorizon(tab.key as HorizonSortKey);
+                if (ALL_9_HORIZONS.some((h) => h.key === tab.key)) {
+                  setSortHorizon(tab.key);
                 }
               }}
               className={`whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all ${
@@ -1010,7 +813,7 @@ export default function AssetPredictionMatrix() {
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-500" />
           <input
             type="text"
-            placeholder="Search 200 assets..."
+            placeholder="Search 40 curated pairs..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="w-full rounded-xl bg-dark-900/90 pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 border border-slate-800 focus:border-cyan-500 focus:outline-none"
@@ -1018,44 +821,40 @@ export default function AssetPredictionMatrix() {
         </div>
       </div>
 
-      {/* Interactive Multi-Horizon Stance Sorter & Scanner Diagnostics */}
+      {/* Stance Sorting & Filtering Toolbar */}
       <div className="mt-3.5 flex flex-col gap-2.5 rounded-xl bg-dark-900/80 p-3 border border-slate-800/90 shadow-inner">
         <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3">
           {/* Target Horizon Sorter Selection */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
               <SlidersHorizontal className="h-3.5 w-3.5 text-cyan-400" />
-              Sort Horizon:
+              Active Sort Horizon:
             </span>
             <div className="flex items-center gap-1 bg-dark-950/90 p-1 rounded-lg border border-slate-800 flex-wrap">
-              {SORT_HORIZONS.map((h) => (
+              {ALL_9_HORIZONS.map((h) => (
                 <button
                   key={h.key}
                   type="button"
                   onClick={() => setSortHorizon(h.key)}
-                  className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all ${
-                    activeHorizonKey === h.key
+                  className={`px-2 py-0.5 text-xs font-bold rounded-md transition-all ${
+                    activeSortKey === h.key
                       ? "bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 shadow-sm"
                       : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
                   }`}
+                  title={h.desc}
                 >
-                  {h.label}
+                  {h.short}
                 </button>
               ))}
 
-              {/* Reset to Original Order Button */}
               <button
                 type="button"
                 onClick={handleResetSort}
-                className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-md transition-all border ${
-                  sortOrder !== "none" || biasFilter !== "all" || sortHorizon !== "scalp" || selectedHorizon !== "all" || search !== ""
-                    ? "bg-cyan-500/25 text-cyan-200 border-cyan-500/60 hover:bg-cyan-500/35 shadow-sm shadow-cyan-500/25 ring-1 ring-cyan-500/40"
-                    : "bg-slate-800/70 text-slate-300 border-slate-700 hover:text-white hover:bg-slate-700/60"
-                }`}
-                title="Reset to Original AI Engine Ranking Order (Rank #1, #2, #3...)"
+                className="flex items-center gap-1 px-2.5 py-0.5 text-xs font-bold rounded-md bg-slate-800/70 text-slate-300 border border-slate-700 hover:text-white transition-all ml-1"
+                title="Reset sorting and filters"
               >
-                <RotateCcw className="h-3.5 w-3.5 text-cyan-400" />
-                <span>↺ Reset to Original Order</span>
+                <RotateCcw className="h-3 w-3 text-cyan-400" />
+                <span>Reset</span>
               </button>
             </div>
           </div>
@@ -1068,70 +867,44 @@ export default function AssetPredictionMatrix() {
             <div className="flex items-center gap-1 bg-dark-950/90 p-1 rounded-lg border border-slate-800">
               <button
                 type="button"
-                onClick={() => {
-                  setSortOrder("none");
-                  setBiasFilter("all");
-                }}
-                className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-md transition-all ${
-                  sortOrder === "none" && biasFilter === "all"
+                onClick={() => setSortOrder("none")}
+                className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all ${
+                  sortOrder === "none"
                     ? "bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 shadow-sm"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
+                    : "text-slate-400 hover:text-slate-200"
                 }`}
-                title="Original institutional ranking order by AI quantitative conviction"
               >
-                <RotateCcw className="h-3.5 w-3.5 text-cyan-400" />
-                <span>Original Order</span>
+                Default Rank
               </button>
-
               <button
                 type="button"
-                onClick={() => setSortOrder(sortOrder === "bullish_first" ? "none" : "bullish_first")}
-                className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-md transition-all ${
+                onClick={() => setSortOrder("bullish_first")}
+                className={`flex items-center gap-1 px-2.5 py-1 text-xs font-bold rounded-md transition-all ${
                   sortOrder === "bullish_first"
-                    ? "bg-emerald-500/30 text-emerald-300 border border-emerald-500/50 shadow-sm shadow-emerald-500/20"
-                    : "text-slate-400 hover:text-emerald-400 hover:bg-emerald-950/30"
+                    ? "bg-emerald-950/90 text-emerald-300 border border-emerald-500/60 shadow-sm"
+                    : "text-emerald-400/80 hover:text-emerald-300"
                 }`}
-                title="Sort Bullish coins to the top with highest conviction"
               >
-                <span>🟢</span>
                 <span>Bullish First</span>
-                {sortOrder === "bullish_first" && <ArrowUp className="h-3.5 w-3.5 text-emerald-400" />}
+                {sortOrder === "bullish_first" && <ArrowUp className="h-3 w-3 text-emerald-400" />}
               </button>
-
               <button
                 type="button"
-                onClick={() => setSortOrder(sortOrder === "consolidate_first" ? "none" : "consolidate_first")}
-                className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-md transition-all ${
-                  sortOrder === "consolidate_first"
-                    ? "bg-slate-700/60 text-slate-100 border border-slate-500/60 shadow-sm"
-                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"
-                }`}
-                title="Sort Consolidating and range-bound coins to the top"
-              >
-                <span>⚪</span>
-                <span>Consolidate First</span>
-                {sortOrder === "consolidate_first" && <CircleDot className="h-3.5 w-3.5 text-slate-300" />}
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setSortOrder(sortOrder === "bearish_first" ? "none" : "bearish_first")}
-                className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded-md transition-all ${
+                onClick={() => setSortOrder("bearish_first")}
+                className={`flex items-center gap-1 px-2.5 py-1 text-xs font-bold rounded-md transition-all ${
                   sortOrder === "bearish_first"
-                    ? "bg-rose-500/30 text-rose-300 border border-rose-500/50 shadow-sm shadow-rose-500/20"
-                    : "text-slate-400 hover:text-rose-400 hover:bg-rose-950/30"
+                    ? "bg-rose-950/90 text-rose-300 border border-rose-500/60 shadow-sm"
+                    : "text-rose-400/80 hover:text-rose-300"
                 }`}
-                title="Sort Bearish coins to the top with highest conviction"
               >
-                <span>🔴</span>
                 <span>Bearish First</span>
-                {sortOrder === "bearish_first" && <ArrowDown className="h-3.5 w-3.5 text-rose-400" />}
+                {sortOrder === "bearish_first" && <ArrowDown className="h-3 w-3 text-rose-400" />}
               </button>
             </div>
           </div>
         </div>
 
-        {/* Quick Stance Filter Chips & Diagnostics */}
+        {/* Quick Stance Filter Chips */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-t border-slate-800/70 pt-2 text-xs">
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
@@ -1140,7 +913,7 @@ export default function AssetPredictionMatrix() {
             <button
               type="button"
               onClick={() => setBiasFilter("all")}
-              className={`px-2.5 py-0.5 rounded text-[11px] font-bold transition-all ${
+              className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all ${
                 biasFilter === "all"
                   ? "bg-slate-800 text-white border border-slate-600 shadow-sm"
                   : "text-slate-400 hover:text-slate-200"
@@ -1151,7 +924,7 @@ export default function AssetPredictionMatrix() {
             <button
               type="button"
               onClick={() => setBiasFilter("bullish")}
-              className={`px-2.5 py-0.5 rounded text-[11px] font-bold transition-all ${
+              className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all ${
                 biasFilter === "bullish"
                   ? "bg-emerald-950/90 text-emerald-300 border border-emerald-500/60 shadow-sm"
                   : "text-emerald-400/80 hover:text-emerald-300"
@@ -1162,18 +935,18 @@ export default function AssetPredictionMatrix() {
             <button
               type="button"
               onClick={() => setBiasFilter("consolidate")}
-              className={`px-2.5 py-0.5 rounded text-[11px] font-bold transition-all ${
+              className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all ${
                 biasFilter === "consolidate"
                   ? "bg-slate-800 text-slate-200 border border-slate-600 shadow-sm"
                   : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              ⚪ Consolidate ({stanceCounts.cons})
+              🟡 Consolidate ({stanceCounts.cons})
             </button>
             <button
               type="button"
               onClick={() => setBiasFilter("bearish")}
-              className={`px-2.5 py-0.5 rounded text-[11px] font-bold transition-all ${
+              className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all ${
                 biasFilter === "bearish"
                   ? "bg-rose-950/90 text-rose-300 border border-rose-500/60 shadow-sm"
                   : "text-rose-400/80 hover:text-rose-300"
@@ -1185,91 +958,99 @@ export default function AssetPredictionMatrix() {
 
           <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
             {sortOrder !== "none" ? (
-              <span className="text-cyan-300 font-semibold flex items-center gap-1 bg-cyan-950/60 px-2.5 py-0.5 rounded border border-cyan-700/40">
+              <span className="text-cyan-300 font-semibold flex items-center gap-1 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-700/40">
                 <span>Active Sort:</span>
                 <strong className="text-white">
-                  {SORT_HORIZONS.find((h) => h.key === activeHorizonKey)?.label}
+                  {ALL_9_HORIZONS.find((h) => h.key === activeSortKey)?.short}
                 </strong>
                 <span>➔</span>
                 <span className="capitalize text-cyan-200">{sortOrder.replace("_first", "")} First</span>
               </span>
             ) : (
               <span className="text-slate-500">
-                Sorted by: Default Institutional Rank (#1 to #{leaderboard.length})
+                Sorted by: Default Institutional Ranking (#1 to #{rawLeaderboard.length})
               </span>
             )}
           </div>
         </div>
       </div>
 
-      {/* Top 100 Assets Full Prediction Table */}
+      {/* 9-Horizon Matrix Table Container */}
       <div className="mt-4 overflow-x-auto touch-scroll rounded-xl border border-slate-800/80 shadow-inner">
         <table className="w-full text-left text-xs text-slate-300 font-mono">
           <thead className="bg-dark-900/95 uppercase text-[10px] font-bold tracking-wider text-slate-400 border-b border-slate-800">
             <tr>
-              <th className="py-3 px-3 sm:px-4 min-w-[210px] sm:min-w-[235px] sticky-col shadow-md border-r border-slate-800/80 bg-dark-900/95"># / Asset &amp; Confluence</th>
-              {selectedHorizon === "all" || selectedHorizon === "high_confluence" || selectedHorizon === "high_yield" || selectedHorizon === "reversals" || selectedHorizon === "trend_expansion" || selectedHorizon === "watchlist" ? (
+              <th className="py-3 px-3 sm:px-4 min-w-[210px] sm:min-w-[230px] sticky-col shadow-md border-r border-slate-800/80 bg-dark-900/95">
+                # / Asset &amp; Confluence
+              </th>
+
+              {selectedHorizon === "all" || selectedHorizon === "high_confluence" || selectedHorizon === "watchlist" ? (
                 <>
-                  {renderSortableHeader("scalp", "⚡ 15M")}
-                  {renderSortableHeader("horizon_30m", "⏱️ 30M")}
-                  {renderSortableHeader("swing", "🌊 1H")}
-                  {renderSortableHeader("horizon_4h", "⏳ 4H")}
-                  {renderSortableHeader("horizon_12h", "🌗 12H")}
-                  {renderSortableHeader("macro", "🚀 24H")}
-                  {renderSortableHeader("horizon_4d", "📅 4D")}
-                  {renderSortableHeader("weekly", "🗓️ 7D")}
-                  {renderSortableHeader("biweekly", "📆 15D")}
-                  {renderSortableHeader("monthly", "🪐 30D")}
-                  <th className="py-3 px-4 text-right">Radar Confluence</th>
+                  {/* All 9 Timeframe Columns Requested by User */}
+                  {ALL_9_HORIZONS.map((hDef) => {
+                    const isSorted = activeSortKey === hDef.key && sortOrder !== "none";
+                    return (
+                      <th
+                        key={hDef.key}
+                        onClick={() => handleColumnHeaderSort(hDef.key)}
+                        className={`py-3 px-3 min-w-[170px] cursor-pointer select-none transition-all group ${
+                          isSorted
+                            ? "bg-cyan-950/50 text-cyan-200 border-b-2 border-cyan-400"
+                            : "hover:bg-slate-800/80 text-slate-300"
+                        }`}
+                        title={`${hDef.label} - ${hDef.desc}\nClick to cycle sort`}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="font-bold tracking-tight">{hDef.label}</span>
+                          <div className="shrink-0 flex items-center">
+                            {isSorted ? (
+                              sortOrder === "bullish_first" ? (
+                                <span className="inline-flex items-center gap-0.5 bg-emerald-950 text-emerald-300 px-1 py-0.5 rounded text-[8.5px] font-black border border-emerald-500/50">
+                                  <ArrowUp className="h-2 w-2" /> Bull
+                                </span>
+                              ) : sortOrder === "bearish_first" ? (
+                                <span className="inline-flex items-center gap-0.5 bg-rose-950 text-rose-300 px-1 py-0.5 rounded text-[8.5px] font-black border border-rose-500/50">
+                                  <ArrowDown className="h-2 w-2" /> Bear
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-0.5 bg-slate-800 text-slate-200 px-1 py-0.5 rounded text-[8.5px] font-black border border-slate-600">
+                                  <CircleDot className="h-2 w-2" /> Chop
+                                </span>
+                              )
+                            ) : (
+                              <ArrowUpDown className="h-3 w-3 text-slate-600 group-hover:text-slate-300 transition-colors" />
+                            )}
+                          </div>
+                        </div>
+                      </th>
+                    );
+                  })}
+                  <th className="py-3 px-4 text-right min-w-[130px]">Multi-Alignment</th>
                 </>
               ) : (
                 <>
-                  <th
-                    onClick={() => handleColumnHeaderSort(activeHorizonKey)}
-                    className="py-3 px-4 cursor-pointer select-none hover:bg-slate-800/80 transition-colors group"
-                    title="Click to cycle sort: Bullish ➔ Bearish ➔ Consolidate ➔ Reset"
-                  >
-                    <div className="flex items-center justify-between gap-1.5">
-                      <span>Predicted Direction</span>
-                      {sortOrder !== "none" ? (
-                        sortOrder === "bullish_first" ? (
-                          <span className="inline-flex items-center gap-0.5 bg-emerald-950/90 text-emerald-300 px-1 py-0.5 rounded text-[9px] font-black border border-emerald-500/50">
-                            <ArrowUp className="h-2.5 w-2.5" /> Bull
-                          </span>
-                        ) : sortOrder === "bearish_first" ? (
-                          <span className="inline-flex items-center gap-0.5 bg-rose-950/90 text-rose-300 px-1 py-0.5 rounded text-[9px] font-black border border-rose-500/50">
-                            <ArrowDown className="h-2.5 w-2.5" /> Bear
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-0.5 bg-slate-800 text-slate-300 px-1 py-0.5 rounded text-[9px] font-black border border-slate-600">
-                            <CircleDot className="h-2.5 w-2.5" /> Chop
-                          </span>
-                        )
-                      ) : (
-                        <ArrowUpDown className="h-3 w-3 text-slate-600 group-hover:text-slate-300" />
-                      )}
-                    </div>
-                  </th>
-                  <th className="py-3 px-4">Conviction %</th>
-                  <th className="py-3 px-4">🧠 ML Win Prob</th>
-                  <th className="py-3 px-4">Take-Profit Target</th>
-                  <th className="py-3 px-4">Invalidation SL</th>
-                  <th className="py-3 px-4">Expected Return</th>
-                  <th className="py-3 px-4 text-right">Signal Strength / Decision</th>
+                  {/* Single Horizon Deep Dive Columns */}
+                  <th className="py-3 px-4 min-w-[120px]">Predicted Direction</th>
+                  <th className="py-3 px-4 min-w-[100px]">Conviction %</th>
+                  <th className="py-3 px-4 min-w-[120px]">🧠 ML Win Prob</th>
+                  <th className="py-3 px-4 min-w-[140px]">Target Price (% Chg)</th>
+                  <th className="py-3 px-4 min-w-[120px]">Invalidation SL</th>
+                  <th className="py-3 px-4 min-w-[130px]">Classifier Votes</th>
+                  <th className="py-3 px-4 text-right min-w-[130px]">Trend State</th>
                 </>
               )}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/60 bg-dark-950/40">
-            {isLoading && leaderboard.length === 0 ? (
+            {isLoading && rawLeaderboard.length === 0 ? (
               <tr>
-                <td colSpan={12} className="py-12 text-center text-slate-500 font-sans">
-                  Loading Top 200 asset predictions from latest multi-horizon scan...
+                <td colSpan={11} className="py-12 text-center text-slate-500 font-sans">
+                  Loading Curated Top 40 asset predictions across 9 horizons...
                 </td>
               </tr>
             ) : filteredAssets.length === 0 ? (
               <tr>
-                <td colSpan={12} className="py-12 text-center font-sans">
+                <td colSpan={11} className="py-12 text-center font-sans">
                   <div className="flex flex-col items-center justify-center gap-3">
                     <SlidersHorizontal className="h-8 w-8 text-slate-600" />
                     <p className="text-slate-400 font-medium text-sm">
@@ -1280,26 +1061,21 @@ export default function AssetPredictionMatrix() {
                       className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-cyan-600/20 text-cyan-300 border border-cyan-500/40 hover:bg-cyan-600/30 text-xs font-semibold transition-all shadow-sm cursor-pointer"
                     >
                       <RotateCcw className="h-3.5 w-3.5" />
-                      Reset All Filters &amp; View All 200 Assets
+                      Reset All Filters &amp; View All 40 Assets
                     </button>
                   </div>
                 </td>
               </tr>
             ) : (
               filteredAssets.map((item: any, idx: number) => {
-                const isTriple = item.is_triple_confluence;
-                const confTag = item.confluence_tag || (isTriple ? "💎 TRIPLE CONFLUENCE" : `Score: ${item.alignment_score ?? 0}%`);
+                const confTag = item.confluence_tag || `Score: ${item.alignment_score ?? 0}%`;
                 const livePrice = livePrices[item.symbol] || livePrices[item.symbol.replace('/', '')] || item.current_price;
-                const isStale = staleSymbols.has(item.symbol);
                 const fallbackTime = forecast?.server_prediction_time || forecast?.timestamp;
 
-                // Single-Horizon focused view
+                // Single-Horizon view
                 if (
                   selectedHorizon !== "all" &&
                   selectedHorizon !== "high_confluence" &&
-                  selectedHorizon !== "high_yield" &&
-                  selectedHorizon !== "reversals" &&
-                  selectedHorizon !== "trend_expansion" &&
                   selectedHorizon !== "watchlist"
                 ) {
                   return (
@@ -1314,14 +1090,13 @@ export default function AssetPredictionMatrix() {
                       selectedHorizon={selectedHorizon}
                       serverPredictionTimeFallback={fallbackTime}
                       onSelectCoin={(sym, price) => setSelectedCoin({ symbol: sym, price })}
-                      isStale={isStale}
                     />
                   );
                 }
 
-                // All-Horizon / Confluence Overview Row
+                // Full 9-Horizon Matrix Row
                 return (
-                  <AssetAllHorizonRow
+                  <AssetFull9HorizonsRow
                     key={item.symbol}
                     item={item}
                     idx={idx}
@@ -1329,11 +1104,10 @@ export default function AssetPredictionMatrix() {
                     confTag={confTag}
                     isStarredFn={isStarred}
                     toggleWatchlist={toggleWatchlist}
-                    activeHorizonKey={activeHorizonKey}
+                    activeSortKey={activeSortKey}
                     sortOrder={sortOrder}
                     serverPredictionTimeFallback={fallbackTime}
                     onSelectCoin={(sym, price) => setSelectedCoin({ symbol: sym, price })}
-                    isStale={isStale}
                   />
                 );
               })

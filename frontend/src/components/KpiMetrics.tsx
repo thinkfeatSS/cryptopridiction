@@ -30,7 +30,10 @@ export default function KpiMetrics() {
 
   const currentBalance = portfolio?.current_balance_usd ?? 15.0;
   const netProfit = portfolio?.total_net_profit_usd ?? 0.0;
-  const openTradesCount = portfolio?.open_positions?.length ?? 0;
+  const openTradesCount = portfolio?.open_positions?.filter((p: any) => {
+    const s = (p.symbol || "").toUpperCase();
+    return !s.includes("OLD") && !s.includes("DELISTED") && !s.includes("USDSOLD");
+  })?.length ?? 0;
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3 sm:gap-4">

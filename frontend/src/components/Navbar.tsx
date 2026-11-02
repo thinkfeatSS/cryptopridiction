@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useStatusQuery } from "@/hooks/useCryptoData";
+import { useNotificationCenter } from "@/context/NotificationContext";
 import NavCountdownTimer from "@/components/NavCountdownTimer";
 import HotkeysModal from "@/components/HotkeysModal";
 import { useKeyboardHotkeys } from "@/hooks/useKeyboardHotkeys";
@@ -20,6 +21,8 @@ import {
   Volume2,
   VolumeX,
   Keyboard,
+  Bell,
+  Target,
 } from "lucide-react";
 import { getShieldTheme } from "@/lib/marketShield";
 
@@ -27,34 +30,12 @@ export default function Navbar() {
   const pathname = usePathname();
   const { data: status } = useStatusQuery();
   const { showHotkeysModal, setShowHotkeysModal } = useKeyboardHotkeys();
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
-
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem("quantedge_sound_enabled");
-      if (stored !== null) {
-        setSoundEnabled(stored === "true");
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  }, []);
-
-  const toggleSound = () => {
-    setSoundEnabled((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem("quantedge_sound_enabled", String(next));
-      } catch (e) {
-        console.error(e);
-      }
-      return next;
-    });
-  };
+  const { unreadCount, isDrawerOpen, setIsDrawerOpen, soundEnabled, toggleSound } = useNotificationCenter();
 
   const navLinks = useMemo(
     () => [
-      { href: "/", label: "Master Terminal", icon: Activity },
+      { href: "/", label: "V16 Quant Terminal", icon: Activity },
+      { href: "/my-trades", label: "My Trades Desk", icon: Target },
       { href: "/signals", label: "Signals Audit Ledger", icon: BarChart2 },
       { href: "/portfolio", label: "Paper Trading Bot", icon: TrendingUp },
       { href: "/radar", label: "Multi-Horizon Radar", icon: Layers },
@@ -73,20 +54,20 @@ export default function Navbar() {
         <div className="mx-auto flex max-w-7xl items-center justify-between px-3 py-2 sm:px-6 sm:py-3 gap-2">
           {/* Left: Brand / Strategy Title */}
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            <div className="flex h-8 w-8 sm:h-10 sm:w-10 items-center justify-center rounded-xl bg-gradient-to-tr from-cyan-500 to-indigo-600 shadow-lg shadow-cyan-500/20 shrink-0">
-              <Zap className="h-4 w-4 sm:h-5 sm:w-5 text-white" />
+            <div className="flex h-8 w-8 sm:h-10 sm:w-10 items-center justify-center rounded-xl bg-gradient-to-tr from-[#8C6239] via-[#F8E8A8] to-[#8C6239] shadow-lg shadow-amber-900/20 shrink-0">
+              <Zap className="h-4 w-4 sm:h-5 sm:w-5 text-[#1F1F1F]" />
             </div>
             <div>
               <div className="flex items-center gap-1.5 sm:gap-2">
                 <span className="text-base sm:text-lg font-black tracking-wider text-white">
-                  QUANT<span className="text-cyan-400">EDGE</span>
+                  QUANT<span className="text-[#F8E8A8]">EDGE</span>
                 </span>
-                <span className="rounded-md bg-cyan-950/80 px-1.5 py-0.2 sm:px-2 sm:py-0.5 text-[10px] sm:text-xs font-semibold text-cyan-300 border border-cyan-700/50">
-                  V15.0 AI
+                <span className="rounded-md bg-stone-900 px-1.5 py-0.2 sm:px-2 sm:py-0.5 text-[10px] sm:text-xs font-semibold text-[#F8E8A8] border border-stone-700 font-mono">
+                  V16.0 QUANT
                 </span>
               </div>
               <p className="text-[10px] sm:text-[11px] text-slate-400 hidden xs:block">
-                Multi-Horizon Confluence & Signal Engine
+                Statistical Net EV & Risk Intelligence Terminal
               </p>
             </div>
           </div>
@@ -113,8 +94,26 @@ export default function Navbar() {
             })}
           </nav>
 
-          {/* Right Controls: Sound, Hotkeys, Shield, Timer, Daemon */}
+          {/* Right Controls: Notification Bell, Sound, Hotkeys, Shield, Timer, Daemon */}
           <div className="flex items-center gap-1.5 sm:gap-2.5">
+            {/* 🔔 Notification Activity Bell Button */}
+            <button
+              onClick={() => setIsDrawerOpen(!isDrawerOpen)}
+              className={`relative p-1.5 sm:p-2 rounded-xl border transition-all text-xs flex items-center justify-center shrink-0 ${
+                unreadCount > 0
+                  ? "bg-cyan-950/70 border-cyan-500/50 text-cyan-300 shadow-md shadow-cyan-500/20"
+                  : "bg-dark-900 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
+              }`}
+              title="Trade & Signal Notifications"
+            >
+              <Bell className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-cyan-400 text-[9px] font-black text-black ring-2 ring-dark-950 animate-pulse">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+            </button>
+
             {/* Audio Alert Toggle */}
             <button
               onClick={toggleSound}
@@ -123,7 +122,7 @@ export default function Navbar() {
                   ? "bg-cyan-950/50 border-cyan-500/40 text-cyan-400 shadow-sm shadow-cyan-500/10"
                   : "bg-dark-900 border-slate-800 text-slate-500 hover:text-slate-300"
               }`}
-              title={soundEnabled ? "Audio Alerts: ON (Chime on Grade A+ signals)" : "Audio Alerts: OFF"}
+              title={soundEnabled ? "Audio Alerts: ON (Chimes for Signals, TP, SL, Expirations)" : "Audio Alerts: OFF"}
             >
               {soundEnabled ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
             </button>

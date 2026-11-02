@@ -5,8 +5,8 @@ import Navbar from "@/components/Navbar";
 import ErrorBoundary from "@/components/ErrorBoundary";
 
 export const metadata: Metadata = {
-  title: "QUANT EDGE V15.0 - Quantitative Crypto Terminal",
-  description: "AI-powered quantitative cryptocurrency trading predictions, multi-horizon signal engine, and live win/loss audit tracking.",
+  title: "QUANT EDGE V16.0 - Quantitative Crypto Terminal",
+  description: "Statistically validated, cost-aware, risk-controlled quantitative cryptocurrency signal and execution terminal.",
 };
 
 export default function RootLayout({
@@ -26,7 +26,7 @@ export default function RootLayout({
           </main>
           <footer className="border-t border-slate-800/80 bg-dark-950 py-5 text-center text-xs text-slate-500 px-4">
             <p>
-              QUANT EDGE AI V15.0 • Quantitative Multi-Horizon Trading Terminal • 24/7 Live Daemon
+              QUANT EDGE V16.0 • Quantitative Trading & Net Expectancy Terminal • 24/7 Live Daemon
             </p>
           </footer>
         </Providers>

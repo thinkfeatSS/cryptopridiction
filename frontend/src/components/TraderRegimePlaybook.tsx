@@ -172,9 +172,18 @@ export default function TraderRegimePlaybookComponent() {
 
   // Determine current active regime
   let activeRegimeKey = "CONSOLIDATION";
-  if (shield?.predicted_trend === "BULLISH" || (shield?.bull_trend_prob && shield.bull_trend_prob >= 50)) {
+  if (
+    shield?.predicted_trend === "BULLISH" ||
+    shield?.predicted_trend === "BULL_TREND" ||
+    (shield?.bull_trend_prob && shield.bull_trend_prob >= 50)
+  ) {
     activeRegimeKey = "BULLISH";
-  } else if (shield?.predicted_trend === "BEARISH" || (shield?.bear_trend_prob && shield.bear_trend_prob >= 50) || shield?.active) {
+  } else if (
+    shield?.predicted_trend === "BEARISH" ||
+    shield?.predicted_trend === "BEAR_TREND" ||
+    (shield?.bear_trend_prob && shield.bear_trend_prob >= 50) ||
+    shield?.active
+  ) {
     activeRegimeKey = "BEARISH";
   }
 

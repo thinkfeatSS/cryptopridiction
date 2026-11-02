@@ -137,9 +137,8 @@ export default function StarredRadarTable() {
               <tr>
                 <th className="py-3 px-4">Monitored Asset & Price</th>
                 <th className="py-3 px-4">⚡ Scalp (15M)</th>
-                <th className="py-3 px-4">🌊 Swing (1H)</th>
-                <th className="py-3 px-4">🚀 Macro (24H)</th>
-                <th className="py-3 px-4">🗓️ Weekly (7D)</th>
+                <th className="py-3 px-4">⏳ Day Trade (1H)</th>
+                <th className="py-3 px-4">🌊 Swing Trade (1D)</th>
                 <th className="py-3 px-4 text-center">Horizon Confluence Status</th>
                 <th className="py-3 px-4 text-right">Audit & History</th>
               </tr>
@@ -151,12 +150,11 @@ export default function StarredRadarTable() {
                 const m = item.horizons?.macro || {};
                 const h7d = item.horizons?.weekly || {};
 
-                // Determine Horizon Confluence
+                // Determine 3-Horizon Confluence (Scalp 15M + Day Trade 1H + Swing 1D)
                 const directions = [
                   s.direction || "",
                   w.direction || "",
                   m.direction || "",
-                  h7d.direction || "",
                 ].map((d) => (d.includes("LONG") || d.includes("BULL") ? "LONG" : "SHORT"));
 
                 const longCount = directions.filter((d) => d === "LONG").length;
@@ -219,36 +217,33 @@ export default function StarredRadarTable() {
                     {/* Scalp */}
                     <td className="py-3 px-4">{renderHorizonCell(s)}</td>
 
-                    {/* Swing */}
+                    {/* Day Trade 1H */}
                     <td className="py-3 px-4">{renderHorizonCell(w)}</td>
 
-                    {/* Macro */}
+                    {/* Swing Trade 1D */}
                     <td className="py-3 px-4">{renderHorizonCell(m)}</td>
-
-                    {/* Weekly */}
-                    <td className="py-3 px-4">{renderHorizonCell(h7d)}</td>
 
                     {/* Confluence Badge */}
                     <td className="py-3 px-4 text-center">
-                      {longCount === 4 ? (
+                      {longCount === 3 ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/80 px-2.5 py-1 text-[11px] font-black text-emerald-300 border border-emerald-500/50 shadow-sm shadow-emerald-500/20">
-                          <CheckCircle2 className="h-3 w-3" /> FULL BULL (4/4)
+                          <CheckCircle2 className="h-3 w-3" /> FULL BULL (3/3 TRIPLE)
                         </span>
-                      ) : shortCount === 4 ? (
+                      ) : shortCount === 3 ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-rose-950/80 px-2.5 py-1 text-[11px] font-black text-rose-300 border border-rose-500/50 shadow-sm shadow-rose-500/20">
-                          <CheckCircle2 className="h-3 w-3" /> FULL BEAR (4/4)
+                          <CheckCircle2 className="h-3 w-3" /> FULL BEAR (3/3 TRIPLE)
                         </span>
-                      ) : longCount >= 3 ? (
+                      ) : longCount >= 2 ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/40 px-2 py-0.5 text-[10px] font-bold text-emerald-400 border border-emerald-600/30">
-                          🟢 BULL ALIGNED ({longCount}/4)
+                          🟢 BULL ALIGNED ({longCount}/3)
                         </span>
-                      ) : shortCount >= 3 ? (
+                      ) : shortCount >= 2 ? (
                         <span className="inline-flex items-center gap-1 rounded-full bg-rose-950/40 px-2 py-0.5 text-[10px] font-bold text-rose-400 border border-rose-600/30">
-                          🔴 BEAR ALIGNED ({shortCount}/4)
+                          🔴 BEAR ALIGNED ({shortCount}/3)
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 rounded-full bg-amber-950/40 px-2 py-0.5 text-[10px] font-bold text-amber-400 border border-amber-600/30">
-                          <AlertTriangle className="h-3 w-3" /> MIXED / HEDGE (2/2)
+                          <AlertTriangle className="h-3 w-3" /> MIXED CHOP
                         </span>
                       )}
                     </td>

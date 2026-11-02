@@ -22,7 +22,7 @@ export default function RadarPage() {
             Multi-Horizon Opportunity Matrix & Active Trades Radar
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Simultaneous multi-scale scanning across Scalp (15M), Swing (1H-2H), and Macro (24H) horizons with active trade monitoring.
+            Simultaneous multi-scale scanning across Scalp (15M), Day Trade (1H), and Swing Trade (1D) horizons with active trade monitoring.
           </p>
         </div>
 

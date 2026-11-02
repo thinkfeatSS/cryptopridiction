@@ -37,11 +37,13 @@ if docker ps --format '{{.Names}}' | grep -q "^crypto_mysql$"; then
     mkdir -p "$BACKUP_DIR" 2>/dev/null || mkdir -p "./db_backups"
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     
-    # Extract DB creds safely from environment or defaults
-    ROOT_PASS=$(grep -E "^MYSQL_ROOT_PASSWORD=" .env | cut -d '=' -f2 | tr -d '\r\n' || echo "root_crypto_secure_2026")
+    # Extract DB creds safely from environment
+    ROOT_PASS=$(grep -E "^MYSQL_ROOT_PASSWORD=" .env | cut -d '=' -f2 | tr -d '\r\n')
     DB_NAME=$(grep -E "^MYSQL_DATABASE=" .env | cut -d '=' -f2 | tr -d '\r\n' || echo "crypto_trading")
     
-    docker exec crypto_mysql mysqldump -u root -p"${ROOT_PASS:-root_crypto_secure_2026}" "${DB_NAME:-crypto_trading}" > "${BACKUP_DIR}/backup_${TIMESTAMP}.sql" 2>/dev/null || true
+    if [ -n "$ROOT_PASS" ]; then
+        docker exec crypto_mysql mysqldump -u root -p"${ROOT_PASS}" "${DB_NAME:-crypto_trading}" > "${BACKUP_DIR}/backup_${TIMESTAMP}.sql" 2>/dev/null || true
+    fi
     echo "✅ Database backup snapshot saved: ${BACKUP_DIR}/backup_${TIMESTAMP}.sql"
 fi
 

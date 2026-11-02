@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo, useCallback } from "react";
 import { useSignalsQuery, useDailySummaryQuery } from "@/hooks/useCryptoData";
+import { useTrackedTrades } from "@/hooks/useTrackedTrades";
 import { formatPercent, formatUsd } from "@/lib/utils";
 import {
   Search,
@@ -17,13 +18,284 @@ import {
   Sparkles,
   RefreshCw,
   Calendar,
+  TrendingUp,
+  Check,
+  ShieldCheck,
 } from "lucide-react";
 
 interface SignalsTableProps {
   initialDate?: string;
 }
 
+const SignalTableRow = React.memo(function SignalTableRow({
+  sig,
+  onTakeTrade,
+  isTracked,
+}: {
+  sig: any;
+  onTakeTrade: (sig: any) => void;
+  isTracked: boolean;
+}) {
+  const isLong = sig.direction === "LONG" || sig.direction === "BULLISH";
+  const statusStr = String(sig.status || "").toUpperCase();
+  const outcomeStr = String(sig.outcome_label || "").toUpperCase();
+  const combinedStr = `${statusStr} ${outcomeStr}`;
+  
+  const isExpired = combinedStr.includes("EXP") || statusStr.includes("EXP") || outcomeStr.includes("EXP");
+  const hasExit = Boolean(sig.exit_price || sig.realized_return_pct);
+  const isResolvedExit = statusStr.startsWith("WON_") || statusStr.startsWith("LOST_") || isExpired || statusStr === "STAGNATION_CUT" || combinedStr.includes("CLOSED") || combinedStr.includes("RESOLVED") || combinedStr.includes("CANCEL");
+  const isClosed = hasExit || isResolvedExit;
+
+  const isProtectedActive = statusStr === "TIER0_PROTECTED_BREAKEVEN" || statusStr === "TP1_LOCKED_BREAKEVEN" || statusStr === "TP2_LOCKED_TRAIL" || Boolean(sig.is_tier0_locked) || Boolean(sig.is_tp1_locked);
+  const isBreakeven = isProtectedActive || (isClosed && (statusStr.includes("BE") || statusStr.includes("TIER0") || combinedStr.includes("BREAKEVEN") || combinedStr.includes("GUARD")));
+  const isStagnation = statusStr.includes("STAGNATION") || combinedStr.includes("STAGNATION");
+  const isWon = isClosed && !isBreakeven && !isStagnation && !isExpired && (statusStr.startsWith("WON_") || combinedStr.includes("WON"));
+  const isLost = isClosed && !isBreakeven && !isStagnation && !isExpired && (statusStr.startsWith("LOST_") || combinedStr.includes("LOST") || combinedStr.includes("STOPPED"));
+
+  // Temporal expiration: historical signals older than their candle window cannot be taken
+  const isExpiredByTime = React.useMemo(() => {
+    if (!sig.date_utc || !sig.time_utc) return false;
+    try {
+      const cleanTime = String(sig.time_utc).replace(" UTC", "").trim();
+      const sigTs = Date.parse(`${sig.date_utc}T${cleanTime}Z`);
+      if (isNaN(sigTs)) return false;
+      const ageHours = (Date.now() - sigTs) / (1000 * 3600);
+      const hz = String(sig.horizon || "").toLowerCase();
+      const maxAge = hz.includes("15m") ? 2 : hz.includes("1h") ? 8 : hz.includes("4h") ? 20 : 36;
+      return ageHours > maxAge;
+    } catch {
+      return false;
+    }
+  }, [sig.date_utc, sig.time_utc, sig.horizon]);
+
+  const isTakeDisabled = isTracked || isClosed || isExpiredByTime;
+  const isGradeAPlus = sig.quality_grade?.includes("A+");
+
+  return (
+    <tr className="hover:bg-slate-800/40 transition-colors">
+      {/* Date / Rank */}
+      <td className="py-3 px-4">
+        <div className="flex flex-col">
+          <span className="font-bold text-white font-sans text-xs flex items-center gap-1">
+            {sig.rank || "#1"}
+          </span>
+          <span className="text-[10px] text-slate-400">{sig.date_utc} {sig.time_utc}</span>
+        </div>
+      </td>
+
+      {/* Asset & Horizon */}
+      <td className="py-3 px-4">
+        <div className="flex flex-col">
+          <span className="font-bold text-white text-sm flex items-center gap-1">
+            {sig.symbol}
+          </span>
+          <span className="text-[10px] text-cyan-400 font-sans">{sig.horizon}</span>
+        </div>
+      </td>
+
+      {/* Quality Grade */}
+      <td className="py-3 px-4 font-sans">
+        <div className="flex flex-col gap-0.5">
+          <span
+            className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-bold ${
+              isGradeAPlus
+                ? "bg-cyan-950 text-cyan-300 border border-cyan-600/40"
+                : (sig.quality_grade || "").includes("B")
+                ? "bg-indigo-950 text-indigo-300 border border-indigo-600/40"
+                : "bg-emerald-950 text-emerald-300 border border-emerald-600/30"
+            }`}
+          >
+            {sig.quality_grade || (isGradeAPlus ? "💎 A+ Elite" : "🟢 Grade A")}
+          </span>
+          {sig.meta_win_prob_pct !== undefined && sig.meta_win_prob_pct !== null && (
+            <span className="text-[10px] text-purple-300 font-mono font-bold">
+              🧠 {Number(sig.meta_win_prob_pct).toFixed(1)}% Prob
+            </span>
+          )}
+        </div>
+      </td>
+
+      {/* Side & Conviction */}
+      <td className="py-3 px-4">
+        <div className="flex flex-col">
+          <span
+            className={`inline-flex items-center gap-0.5 text-xs font-bold font-sans ${
+              isLong ? "text-emerald-400" : "text-rose-400"
+            }`}
+          >
+            {isLong ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
+            {isLong ? "LONG" : "SHORT"}
+          </span>
+          <span className="text-[10px] text-slate-400">
+            {sig.conviction_pct?.toFixed(1)}% Conv
+          </span>
+        </div>
+      </td>
+
+      {/* Entry Price */}
+      <td className="py-3 px-4 font-semibold text-white">
+        {formatUsd(sig.entry_price)}
+      </td>
+
+      {/* TP Targets */}
+      <td className="py-3 px-4">
+        <div className="flex flex-col text-[11px] font-mono gap-0.5">
+          <div className="flex items-center gap-1.5">
+            <span className="text-emerald-400 font-bold">TP1: {formatUsd(sig.tp1_price)}</span>
+            {sig.entry_price > 0 && sig.tp1_price && (
+              <span className="text-[10px] text-emerald-400 font-medium">
+                (+{Math.abs(((sig.tp1_price - sig.entry_price) / sig.entry_price) * 100).toFixed(1)}%)
+              </span>
+            )}
+            {sig.p_tp1_pct ? (
+              <span className="text-[9px] text-purple-300 font-semibold bg-purple-950/60 px-1 rounded border border-purple-500/20">
+                {Number(sig.p_tp1_pct).toFixed(0)}%
+              </span>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-400">TP2: {formatUsd(sig.tp2_price)}</span>
+            {sig.entry_price > 0 && sig.tp2_price && (
+              <span className="text-[10px] text-slate-500 font-medium">
+                (+{Math.abs(((sig.tp2_price - sig.entry_price) / sig.entry_price) * 100).toFixed(1)}%)
+              </span>
+            )}
+          </div>
+        </div>
+      </td>
+
+      {/* Stop-Loss */}
+      <td className="py-3 px-4 font-sans">
+        <div className="flex flex-col font-mono text-[11px]">
+          <div className="flex items-center gap-1.5">
+            <span className={`font-semibold ${isBreakeven ? "text-cyan-400" : "text-rose-400"}`}>
+              {formatUsd(sig.sl_price)}
+            </span>
+            {sig.entry_price > 0 && sig.sl_price && !isBreakeven && (
+              <span className="text-[10px] text-rose-500 font-medium">
+                (-{Math.abs(((sig.entry_price - sig.sl_price) / sig.entry_price) * 100).toFixed(1)}%)
+              </span>
+            )}
+          </div>
+          {isBreakeven ? (
+            <span className="text-[10px] text-cyan-400/90 font-mono font-medium flex items-center gap-0.5">
+              🛡️ Breakeven SL
+            </span>
+          ) : sig.p_sl_pct ? (
+            <span className="text-[10px] text-rose-400/80 font-medium">
+              Risk: {Number(sig.p_sl_pct).toFixed(0)}%
+            </span>
+          ) : null}
+        </div>
+      </td>
+
+      {/* Status & Outcome Badge */}
+      <td className="py-3 px-4 font-sans">
+        {isBreakeven ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-cyan-950/80 px-2.5 py-1 text-[11px] font-bold text-cyan-300 border border-cyan-500/40">
+            <ShieldCheck className="h-3 w-3 text-cyan-400" /> {sig.outcome_label || "BE PROTECTED 🛡️"}
+          </span>
+        ) : isStagnation ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-amber-950/80 px-2.5 py-1 text-[11px] font-bold text-amber-300 border border-amber-500/40">
+            <Clock className="h-3 w-3 text-amber-400" /> {sig.outcome_label || "STAGNATION SCRATCH ⏱️"}
+          </span>
+        ) : isWon ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/80 px-2.5 py-1 text-[11px] font-bold text-emerald-300 border border-emerald-500/40">
+            <CheckCircle2 className="h-3 w-3 text-emerald-400" /> {sig.outcome_label || "WON 🟢"}
+          </span>
+        ) : isLost ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-rose-950/80 px-2.5 py-1 text-[11px] font-bold text-rose-300 border border-rose-500/40">
+            <XCircle className="h-3 w-3 text-rose-400" /> {sig.outcome_label || "LOST 🔴"}
+          </span>
+        ) : isExpired ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-slate-900/90 px-2.5 py-1 text-[11px] font-bold text-slate-300 border border-slate-700/60">
+            <Clock className="h-3 w-3 text-slate-400" /> {sig.outcome_label || "EXPIRED ⏱️"}
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded-full bg-blue-950/80 px-2.5 py-1 text-[11px] font-bold text-blue-300 border border-blue-500/40">
+            <Clock className="h-3 w-3 text-blue-400 animate-pulse" /> {sig.outcome_label || "PENDING ⏳"}
+          </span>
+        )}
+      </td>
+
+      {/* Realized Return */}
+      <td className="py-3 px-4 text-right font-sans">
+        {sig.realized_return_pct ? (
+          <div className="flex flex-col items-end">
+            <span
+              className={`text-xs font-bold ${
+                sig.realized_return_pct.includes("-")
+                  ? "text-rose-400"
+                  : sig.realized_return_pct.includes("+") && sig.realized_return_pct !== "+0.00%"
+                  ? "text-emerald-400"
+                  : "text-slate-300"
+              }`}
+            >
+              {sig.realized_return_pct}
+            </span>
+            {sig.exit_price && (
+              <span className="text-[10px] text-slate-400 font-mono">
+                Exit: {formatUsd(sig.exit_price)}
+              </span>
+            )}
+          </div>
+        ) : isClosed || isExpired ? (
+          <div className="flex flex-col items-end">
+            <span className="text-xs font-bold text-slate-300">
+              {sig.realized_return_num !== undefined && sig.realized_return_num !== null
+                ? `${sig.realized_return_num > 0 ? "+" : ""}${Number(sig.realized_return_num).toFixed(2)}%`
+                : "+0.00%"}
+            </span>
+            {sig.exit_price ? (
+              <span className="text-[10px] text-slate-400 font-mono">
+                Exit: {formatUsd(sig.exit_price)}
+              </span>
+            ) : sig.entry_price ? (
+              <span className="text-[10px] text-slate-400 font-mono">
+                Exit: {formatUsd(sig.entry_price)}
+              </span>
+            ) : null}
+          </div>
+        ) : (
+          <span className="text-[11px] text-slate-500">Evaluating...</span>
+        )}
+      </td>
+
+      {/* Action / Track */}
+      <td className="py-3 px-4 text-right">
+        <button
+          onClick={() => onTakeTrade(sig)}
+          disabled={isTakeDisabled}
+          className={`px-2.5 py-1 rounded-lg text-[11px] font-bold font-mono transition-all inline-flex items-center gap-1 ${
+            isTracked
+              ? "bg-emerald-950 text-emerald-300 border border-emerald-500"
+              : isTakeDisabled
+              ? "bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed"
+              : "bg-cyan-950 text-cyan-300 border border-cyan-500/50 hover:bg-cyan-900"
+          }`}
+          title={isTakeDisabled ? "This signal has already completed or expired" : "Track this signal on your personal Trading Desk"}
+        >
+          {isTracked ? (
+            <>
+              <Check className="h-3 w-3 text-emerald-400" />
+              <span>Tracked</span>
+            </>
+          ) : isTakeDisabled ? (
+            <span>Closed</span>
+          ) : (
+            <>
+              <TrendingUp className="h-3 w-3" />
+              <span>Take</span>
+            </>
+          )}
+        </button>
+      </td>
+    </tr>
+  );
+});
+
 export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
+  const { takeTrade, isTradeTracked } = useTrackedTrades();
   const [search, setSearch] = useState("");
   const [dateFilter, setDateFilter] = useState(initialDate);
   const [outcomeFilter, setOutcomeFilter] = useState("");
@@ -168,11 +440,26 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
           className="rounded-xl bg-dark-900/90 px-3 py-2 text-xs text-slate-300 border border-slate-800 focus:border-cyan-500 focus:outline-none"
         >
           <option value="">📅 All Dates</option>
-          {dailyData?.map((d) => (
+          {dailyData?.filter((d) => d.date && d.date !== "False" && String(d.date).startsWith("202")).map((d) => (
             <option key={d.date} value={d.date}>
               {d.date} ({d.won_count}W/{d.lost_count}L - {d.win_rate_pct}%)
             </option>
           ))}
+        </select>
+
+        {/* Horizon Filter */}
+        <select
+          value={horizonFilter}
+          onChange={(e) => {
+            setHorizonFilter(e.target.value);
+            setPage(0);
+          }}
+          className="rounded-xl bg-dark-900/90 px-3 py-2 text-xs text-slate-300 border border-slate-800 focus:border-cyan-500 focus:outline-none"
+        >
+          <option value="">⏱️ All Horizons</option>
+          <option value="15M">⚡ Scalp (15M)</option>
+          <option value="1H">⏳ Day Trade (1H)</option>
+          <option value="24H">🌊 Swing Trade (1D)</option>
         </select>
 
         {/* Outcome Filter */}
@@ -186,6 +473,8 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
         >
           <option value="">🎯 All Outcomes</option>
           <option value="WON">🟢 Won (TP Hit)</option>
+          <option value="BREAKEVEN">🛡️ Breakeven Protected</option>
+          <option value="STAGNATION">⏱️ Stagnation Scratch</option>
           <option value="LOST">🔴 Lost (SL Hit)</option>
           <option value="PENDING">⏳ Pending</option>
           <option value="EXPIRED">⏱️ Expired</option>
@@ -221,138 +510,31 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
               <th className="py-3 px-4">Stop-Loss</th>
               <th className="py-3 px-4">Outcome Status</th>
               <th className="py-3 px-4 text-right">Realized Return</th>
+              <th className="py-3 px-4 text-right">Trade Desk</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/60 bg-dark-950/40 font-mono">
             {isLoading ? (
               <tr>
-                <td colSpan={9} className="py-8 text-center text-slate-500 font-sans">
+                <td colSpan={10} className="py-8 text-center text-slate-500 font-sans">
                   Loading signals ledger from MySQL database...
                 </td>
               </tr>
             ) : signals.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-8 text-center text-slate-500 font-sans">
+                <td colSpan={10} className="py-8 text-center text-slate-500 font-sans">
                   No signals matched the selected criteria.
                 </td>
               </tr>
             ) : (
-              signals.map((sig) => {
-                const isLong = sig.direction === "LONG" || sig.direction === "BULLISH";
-                const outcomeStr = (sig.outcome_label || sig.status || "").toUpperCase();
-                const isWon = outcomeStr.includes("WON");
-                const isLost = outcomeStr.includes("LOST");
-                const isGradeAPlus = sig.quality_grade?.includes("A+");
-
-                return (
-                  <tr
-                    key={sig.signal_id || sig.id}
-                    className="hover:bg-slate-800/40 transition-colors"
-                  >
-                    {/* Date / Rank */}
-                    <td className="py-3 px-4">
-                      <div className="flex flex-col">
-                        <span className="font-bold text-white font-sans text-xs flex items-center gap-1">
-                          {sig.rank || "#1"}
-                        </span>
-                        <span className="text-[10px] text-slate-400">{sig.date_utc} {sig.time_utc}</span>
-                      </div>
-                    </td>
-
-                    {/* Asset & Horizon */}
-                    <td className="py-3 px-4">
-                      <div className="flex flex-col">
-                        <span className="font-bold text-white text-sm flex items-center gap-1">
-                          {sig.symbol}
-                        </span>
-                        <span className="text-[10px] text-cyan-400 font-sans">{sig.horizon}</span>
-                      </div>
-                    </td>
-
-                    {/* Quality Grade */}
-                    <td className="py-3 px-4 font-sans">
-                      <span
-                        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-bold ${
-                          isGradeAPlus
-                            ? "bg-cyan-950 text-cyan-300 border border-cyan-600/40"
-                            : "bg-emerald-950 text-emerald-300 border border-emerald-600/30"
-                        }`}
-                      >
-                        {isGradeAPlus ? "💎 A+ Elite" : "🟢 Grade A"}
-                      </span>
-                    </td>
-
-                    {/* Side & Conviction */}
-                    <td className="py-3 px-4">
-                      <div className="flex flex-col">
-                        <span
-                          className={`inline-flex items-center gap-0.5 text-xs font-bold font-sans ${
-                            isLong ? "text-emerald-400" : "text-rose-400"
-                          }`}
-                        >
-                          {isLong ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
-                          {isLong ? "LONG" : "SHORT"}
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          {sig.conviction_pct?.toFixed(1)}% Conv
-                        </span>
-                      </div>
-                    </td>
-
-                    {/* Entry Price */}
-                    <td className="py-3 px-4 font-semibold text-white">
-                      {formatUsd(sig.entry_price)}
-                    </td>
-
-                    {/* TP Targets */}
-                    <td className="py-3 px-4">
-                      <div className="flex flex-col text-[11px]">
-                        <span className="text-emerald-400">TP1: {formatUsd(sig.tp1_price)}</span>
-                        <span className="text-slate-400">TP2: {formatUsd(sig.tp2_price)}</span>
-                      </div>
-                    </td>
-
-                    {/* Stop-Loss */}
-                    <td className="py-3 px-4 font-semibold text-rose-400">
-                      {formatUsd(sig.sl_price)}
-                    </td>
-
-                    {/* Status & Outcome Badge (Green for Win, Red for Loss, Blue for Pending) */}
-                    <td className="py-3 px-4 font-sans">
-                      {isWon ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/80 px-2.5 py-1 text-[11px] font-bold text-emerald-300 border border-emerald-500/40">
-                          <CheckCircle2 className="h-3 w-3 text-emerald-400" /> {sig.outcome_label || "WON 🟢"}
-                        </span>
-                      ) : isLost ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-rose-950/80 px-2.5 py-1 text-[11px] font-bold text-rose-300 border border-rose-500/40">
-                          <XCircle className="h-3 w-3 text-rose-400" /> {sig.outcome_label || "LOST 🔴"}
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-blue-950/80 px-2.5 py-1 text-[11px] font-bold text-blue-300 border border-blue-500/40">
-                          <Clock className="h-3 w-3 text-blue-400 animate-pulse" /> {sig.outcome_label || "PENDING ⏳"}
-                        </span>
-                      )}
-                    </td>
-
-                    {/* Realized Return */}
-                    <td className="py-3 px-4 text-right">
-                      {sig.realized_return_pct ? (
-                        <span
-                          className={`text-xs font-bold ${
-                            sig.realized_return_pct.includes("+")
-                              ? "text-emerald-400"
-                              : "text-rose-400"
-                          }`}
-                        >
-                          {sig.realized_return_pct}
-                        </span>
-                      ) : (
-                        <span className="text-[11px] text-slate-500">Evaluating...</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })
+              signals.map((sig) => (
+                <SignalTableRow
+                  key={sig.signal_id || sig.id}
+                  sig={sig}
+                  onTakeTrade={takeTrade}
+                  isTracked={isTradeTracked(sig.signal_id || sig.symbol)}
+                />
+              ))
             )}
           </tbody>
         </table>

@@ -81,17 +81,22 @@ services:
       - WHATSAPP_INSTANCE_NAME=${WHATSAPP_INSTANCE_NAME:-crypto_bot}
       - WHATSAPP_GROUP_ID=${WHATSAPP_GROUP_ID:-}
       - WHATSAPP_CHANNEL_ID=${WHATSAPP_CHANNEL_ID:-}
-      - WHATSAPP_MIN_GRADE=${WHATSAPP_MIN_GRADE:-Grade A}
-      - WHATSAPP_MIN_WIN_PROB=${WHATSAPP_MIN_WIN_PROB:-0.70}
+      - WHATSAPP_MIN_GRADE=${WHATSAPP_MIN_GRADE:-ALL}
+      - WHATSAPP_MIN_WIN_PROB=${WHATSAPP_MIN_WIN_PROB:-0.0}
       - WHATSAPP_SEND_TP_UPDATES=${WHATSAPP_SEND_TP_UPDATES:-true}
       - WHATSAPP_SEND_SL_UPDATES=${WHATSAPP_SEND_SL_UPDATES:-true}
       - WHATSAPP_SEND_REGIME_ALERTS=${WHATSAPP_SEND_REGIME_ALERTS:-true}
+      - PROBABILITY_CALIBRATION_MODE=${PROBABILITY_CALIBRATION_MODE:-CHRONOLOGICAL_CALIBRATED}
+      - TRADE_MANAGEMENT_POLICY=${TRADE_MANAGEMENT_POLICY:-TIER0_ATR_TRAILING_BUFFER}
+      - ACTIVE_TRADE_HORIZONS=${ACTIVE_TRADE_HORIZONS:-INTRADAY_SWING}
     volumes:
       - app_exports:/app/export_app_data
       - app_models:/app/models_export_v3
       - ./app:/app/app
       - ./test.py:/app/test.py
       - ./run_scanner_daemon.py:/app/run_scanner_daemon.py
+      - ./run_modular_daemon.py:/app/run_modular_daemon.py
+      - ./train_per_coin_models.py:/app/train_per_coin_models.py
     ports:
       - "127.0.0.1:8005:8000"
     depends_on:
@@ -144,17 +149,22 @@ services:
       - WHATSAPP_INSTANCE_NAME=${WHATSAPP_INSTANCE_NAME:-crypto_bot}
       - WHATSAPP_GROUP_ID=${WHATSAPP_GROUP_ID:-}
       - WHATSAPP_CHANNEL_ID=${WHATSAPP_CHANNEL_ID:-}
-      - WHATSAPP_MIN_GRADE=${WHATSAPP_MIN_GRADE:-Grade A}
-      - WHATSAPP_MIN_WIN_PROB=${WHATSAPP_MIN_WIN_PROB:-0.70}
+      - WHATSAPP_MIN_GRADE=${WHATSAPP_MIN_GRADE:-ALL}
+      - WHATSAPP_MIN_WIN_PROB=${WHATSAPP_MIN_WIN_PROB:-0.0}
       - WHATSAPP_SEND_TP_UPDATES=${WHATSAPP_SEND_TP_UPDATES:-true}
       - WHATSAPP_SEND_SL_UPDATES=${WHATSAPP_SEND_SL_UPDATES:-true}
       - WHATSAPP_SEND_REGIME_ALERTS=${WHATSAPP_SEND_REGIME_ALERTS:-true}
+      - PROBABILITY_CALIBRATION_MODE=${PROBABILITY_CALIBRATION_MODE:-CHRONOLOGICAL_CALIBRATED}
+      - TRADE_MANAGEMENT_POLICY=${TRADE_MANAGEMENT_POLICY:-TIER0_ATR_TRAILING_BUFFER}
+      - ACTIVE_TRADE_HORIZONS=${ACTIVE_TRADE_HORIZONS:-INTRADAY_SWING}
     volumes:
       - app_exports:/app/export_app_data
       - app_models:/app/models_export_v3
       - ./app:/app/app
       - ./test.py:/app/test.py
       - ./run_scanner_daemon.py:/app/run_scanner_daemon.py
+      - ./run_modular_daemon.py:/app/run_modular_daemon.py
+      - ./train_per_coin_models.py:/app/train_per_coin_models.py
     depends_on:
       db:
         condition: service_healthy

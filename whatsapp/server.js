@@ -167,7 +167,10 @@ app.post("/newsletter/send/:instance?", async (req, res) => {
     return res.status(400).json({ error: "Missing 'number' or 'message.text' in body" });
   }
 
-  let jid = number.trim();
+  let jid = String(number).trim();
+  if (jid.includes("whatsapp.com/channel/")) {
+    jid = jid.split("whatsapp.com/channel/")[1].split(/[/?#]/)[0].trim();
+  }
   if (!jid.includes("@newsletter")) {
     // Strip any existing domain and force @newsletter
     jid = jid.replace(/@[^@]*$/, "") + "@newsletter";

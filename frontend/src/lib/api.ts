@@ -117,6 +117,9 @@ export interface BtcMarketShield {
   altcoin_posture?: string;
   market_phase_description?: string;
   trader_playbook?: TraderPlaybook;
+  is_ntz_active?: boolean;
+  macro_ntz_active?: boolean;
+  ntz_reason?: string;
 }
 
 export interface EngineStatus {
@@ -171,6 +174,10 @@ export interface ClosedTradeItem {
   symbol: string;
   horizon: string;
   direction: "BULLISH" | "BEARISH" | "LONG" | "SHORT" | string;
+  direction_label?: string;
+  tp_price?: number;
+  tp1_price?: number;
+  sl_price?: number;
   execution_engine?: string;
   entry_price: number;
   raw_entry_price?: number;
@@ -234,23 +241,56 @@ export interface ForecastData {
   server_prediction_time?: string;
   server_prediction_ts?: number;
   strategy: string;
+  market_trade_posture?: string;
+  is_no_trade_zone_active?: boolean;
+  no_trade_zone_reason?: string;
   btc_market_shield?: BtcMarketShield;
   trader_playbook?: TraderPlaybook;
+  dominant_signals_per_coin?: any[];
   top_round_signals: any[];
   signals_by_horizon?: Record<string, any[]>;
+  active_institutional_signals?: any[];
   scanner_leaderboard: any[];
   deep_dive: any;
   paper_portfolio?: any;
 }
 
+
+const NO_CACHE_INIT: RequestInit = {
+  cache: "no-store",
+  headers: {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Accept": "application/json",
+  },
+};
+
+function buildBustedUrl(path: string, params?: URLSearchParams | Record<string, string | number | undefined>): string {
+  const base = `${API_BASE}${path}`;
+  const sep = base.includes("?") ? "&" : "?";
+  const query = new URLSearchParams();
+  if (params instanceof URLSearchParams) {
+    params.forEach((v, k) => query.append(k, v));
+  } else if (params) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "") {
+        query.append(k, v.toString());
+      }
+    });
+  }
+  query.set("_t", Date.now().toString());
+  query.set("_nonce", Math.random().toString(36).slice(2, 8));
+  return `${base}${sep}${query.toString()}`;
+}
+
 export async function fetchKpi(): Promise<KpiSummary> {
-  const res = await fetch(`${API_BASE}/api/signals/kpi`);
+  const res = await fetch(buildBustedUrl("/api/signals/kpi"), NO_CACHE_INIT);
   if (!res.ok) throw new Error("Failed fetching KPI metrics");
   return res.json();
 }
 
 export async function fetchDailySummary(): Promise<DailySummaryItem[]> {
-  const res = await fetch(`${API_BASE}/api/signals/daily-summary`);
+  const res = await fetch(buildBustedUrl("/api/signals/daily-summary"), NO_CACHE_INIT);
   if (!res.ok) throw new Error("Failed fetching daily summary");
   return res.json();
 }
@@ -279,17 +319,17 @@ export async function fetchSignals(params?: {
   if (params?.limit) query.append("limit", params.limit.toString());
   if (params?.offset) query.append("offset", params.offset.toString());
 
-  const res = await fetch(`${API_BASE}/api/signals?${query.toString()}`);
+  const res = await fetch(buildBustedUrl("/api/signals", query), NO_CACHE_INIT);
   if (!res.ok) throw new Error("Failed fetching signals");
   return res.json();
 }
 
 export async function fetchSignalsBySymbol(symbol: string): Promise<SignalItem[]> {
   const encoded = encodeURIComponent(symbol);
-  const res = await fetch(`${API_BASE}/api/signals/by-symbol/${encoded}`);
+  const res = await fetch(buildBustedUrl(`/api/signals/by-symbol/${encoded}`), NO_CACHE_INIT);
   if (!res.ok) {
     // Fallback to standard signals query
-    const res2 = await fetch(`${API_BASE}/api/signals?symbol=${encoded}&limit=100`);
+    const res2 = await fetch(buildBustedUrl("/api/signals", { symbol: encoded, limit: 100 }), NO_CACHE_INIT);
     if (!res2.ok) return [];
     const data = await res2.json();
     return data.signals || [];
@@ -298,28 +338,28 @@ export async function fetchSignalsBySymbol(symbol: string): Promise<SignalItem[]
 }
 
 export async function fetchPortfolio(): Promise<PortfolioData> {
-  const res = await fetch(`${API_BASE}/api/portfolio`);
+  const res = await fetch(buildBustedUrl("/api/portfolio"), NO_CACHE_INIT);
   if (!res.ok) throw new Error("Failed fetching portfolio");
   return res.json();
 }
 
 export async function resetPortfolio(): Promise<{ success: boolean; message: string; portfolio: PortfolioData }> {
-  const res = await fetch(`${API_BASE}/api/portfolio/reset`, {
+  const res = await fetch(buildBustedUrl("/api/portfolio/reset"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" }
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" }
   });
   if (!res.ok) throw new Error("Failed resetting portfolio");
   return res.json();
 }
 
 export async function fetchForecast(): Promise<ForecastData> {
-  const res = await fetch(`${API_BASE}/api/forecast`);
+  const res = await fetch(buildBustedUrl("/api/forecast"), NO_CACHE_INIT);
   if (!res.ok) throw new Error("Failed fetching forecast");
   return res.json();
 }
 
 export async function fetchStatus(): Promise<EngineStatus> {
-  const res = await fetch(`${API_BASE}/api/status`);
+  const res = await fetch(buildBustedUrl("/api/status"), NO_CACHE_INIT);
   if (!res.ok) throw new Error("Failed fetching status");
   return res.json();
 }
@@ -331,7 +371,7 @@ export interface LivePricesResponse {
 
 export async function fetchLivePrices(): Promise<LivePricesResponse> {
   try {
-    const res = await fetch(`${API_BASE}/api/prices`);
+    const res = await fetch(buildBustedUrl("/api/prices"), NO_CACHE_INIT);
     if (!res.ok) return { timestamp: new Date().toISOString(), prices: {} };
     return res.json();
   } catch {

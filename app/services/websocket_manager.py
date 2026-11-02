@@ -42,8 +42,15 @@ class WebSocketManager:
             self.active_connections.discard(websocket)
         logger.info(f"[WS 🔴] Client disconnected. Total active connections: {len(self.active_connections)}")
 
-    async def broadcast(self, message: Dict[str, Any]):
-        """Asynchronously broadcast JSON payload to all connected clients."""
+    async def broadcast(self, message: Dict[str, Any], publish_redis: bool = False):
+        """Asynchronously broadcast JSON payload to all locally connected clients."""
+        if publish_redis:
+            try:
+                from app.services.cache_service import cache_service
+                cache_service.publish_event("crypto_stream_channel", message)
+            except Exception:
+                pass
+
         if not self.active_connections:
             return
 

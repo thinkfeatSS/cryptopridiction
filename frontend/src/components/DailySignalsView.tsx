@@ -24,7 +24,9 @@ export default function DailySignalsView({
 }: DailySignalsViewProps) {
   const { data: dailySummaries, isLoading } = useDailySummaryQuery();
 
-  const summaries = dailySummaries || [];
+  const summaries = (dailySummaries || []).filter(
+    (day) => day.date && day.date !== "False" && String(day.date).startsWith("202")
+  );
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">
@@ -84,15 +86,20 @@ export default function DailySignalsView({
                   </span>
                 </div>
 
-                {/* Win / Lost Metrics */}
+                {/* Win / Lost / Breakeven / Pending Metrics */}
                 <div className="mt-3 flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="flex items-center gap-1 text-emerald-400 font-bold">
                       <CheckCircle2 className="h-3.5 w-3.5" /> {day.won_count}W
                     </span>
                     <span className="flex items-center gap-1 text-rose-400 font-bold">
                       <XCircle className="h-3.5 w-3.5" /> {day.lost_count}L
                     </span>
+                    {day.total_signals - (day.won_count + day.lost_count + day.pending_count) > 0 && (
+                      <span className="text-slate-400 font-medium text-[11px]" title="Exact Breakeven Outcomes">
+                        ⚪ {day.total_signals - (day.won_count + day.lost_count + day.pending_count)}BE
+                      </span>
+                    )}
                     <span className="text-amber-400 font-medium text-[11px]">
                       ⏳ {day.pending_count}
                     </span>

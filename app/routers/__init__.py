@@ -4,6 +4,9 @@ from .portfolio import router as portfolio_router
 from .health import router as health_router
 from .models import router as models_router
 from .websocket import router as websocket_router
+from .whatsapp import router as whatsapp_router
+from .v16_router import v16_router
+from .fundamentals import router as fundamentals_router
 
-__all__ = ["signals_router", "forecast_router", "portfolio_router", "health_router", "models_router", "websocket_router"]
+__all__ = ["signals_router", "forecast_router", "portfolio_router", "health_router", "models_router", "websocket_router", "whatsapp_router", "v16_router", "fundamentals_router"]
 

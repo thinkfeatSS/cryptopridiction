@@ -42,7 +42,7 @@ export default function RadarTable() {
           <h2 className="text-lg font-black tracking-tight text-white flex flex-wrap items-center gap-2">
             🛰️ Multi-Horizon Opportunity Radar
             <span className="rounded-md bg-cyan-950 px-2 py-0.5 text-xs font-semibold text-cyan-400 border border-cyan-800">
-              15M ➔ 30D Multi-Scale Alignment
+              15M / 1H / 1D Multi-Horizon Alignment
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
@@ -68,9 +68,8 @@ export default function RadarTable() {
               <tr>
                 <th className="py-3 px-4">Asset & Live Price</th>
                 <th className="py-3 px-4">⚡ Scalp (15M)</th>
-                <th className="py-3 px-4">🌊 Swing (1H)</th>
-                <th className="py-3 px-4">🚀 Macro (24H)</th>
-                <th className="py-3 px-4">🗓️ Weekly (7D)</th>
+                <th className="py-3 px-4">⏳ Day Trade (1H)</th>
+                <th className="py-3 px-4">🌊 Swing Trade (1D)</th>
                 <th className="py-3 px-4 text-right">Alignment & History</th>
               </tr>
             </thead>
@@ -148,14 +147,11 @@ export default function RadarTable() {
                     {/* Scalp */}
                     <td className="py-3 px-4">{renderHorizonCell(s)}</td>
 
-                    {/* Swing */}
+                    {/* Day Trade 1H */}
                     <td className="py-3 px-4">{renderHorizonCell(w)}</td>
 
-                    {/* Macro */}
+                    {/* Swing Trade 1D */}
                     <td className="py-3 px-4">{renderHorizonCell(m)}</td>
-
-                    {/* Weekly */}
-                    <td className="py-3 px-4">{renderHorizonCell(h7d)}</td>
 
                     {/* Alignment Badge */}
                     <td className="py-3 px-4 text-right">

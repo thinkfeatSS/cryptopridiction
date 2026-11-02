@@ -16,8 +16,9 @@ export function useKpiQuery() {
   return useQuery({
     queryKey: ["kpi"],
     queryFn: fetchKpi,
-    refetchInterval: 10000,
+    refetchInterval: 12000,
     staleTime: 5000,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -26,7 +27,8 @@ export function useDailySummaryQuery() {
     queryKey: ["dailySummary"],
     queryFn: fetchDailySummary,
     refetchInterval: 15000,
-    staleTime: 8000,
+    staleTime: 5000,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -45,7 +47,8 @@ export function useSignalsQuery(params?: {
     queryKey: ["signals", params],
     queryFn: () => fetchSignals(params),
     refetchInterval: 10000,
-    staleTime: 5000,
+    staleTime: 3000,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -55,7 +58,8 @@ export function useCoinSignalsQuery(symbol?: string) {
     queryFn: () => (symbol ? fetchSignalsBySymbol(symbol) : Promise.resolve([])),
     enabled: !!symbol,
     refetchInterval: 10000,
-    staleTime: 5000,
+    staleTime: 3000,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -64,7 +68,8 @@ export function usePortfolioQuery() {
     queryKey: ["portfolio"],
     queryFn: fetchPortfolio,
     refetchInterval: 8000,
-    staleTime: 4000,
+    staleTime: 3000,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -72,8 +77,9 @@ export function useForecastQuery() {
   return useQuery({
     queryKey: ["forecast"],
     queryFn: fetchForecast,
-    refetchInterval: 5000,
-    staleTime: 2000,
+    refetchInterval: 8000,
+    staleTime: 3000,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -81,8 +87,9 @@ export function useStatusQuery() {
   return useQuery({
     queryKey: ["status"],
     queryFn: fetchStatus,
-    refetchInterval: 2500,
+    refetchInterval: 3000,
     staleTime: 1500,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -90,7 +97,8 @@ export function useLivePricesQuery() {
   return useQuery({
     queryKey: ["livePrices"],
     queryFn: fetchLivePrices,
-    refetchInterval: 4000,
-    staleTime: 2000,
+    refetchInterval: 2500,
+    staleTime: 1000,
+    refetchOnWindowFocus: true,
   });
 }

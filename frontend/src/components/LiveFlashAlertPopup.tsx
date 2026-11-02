@@ -25,6 +25,7 @@ import { playSignalChime, playParabolicBreakoutAlert, playExhaustionSellAlert } 
 export interface FlashAlertItem {
   id: string;
   timestamp: string;
+  timestampMs: number;
   symbol: string;
   direction: "LONG" | "SHORT" | "BULLISH" | "BEARISH";
   horizon: string;
@@ -49,6 +50,14 @@ interface LiveFlashAlertPopupProps {
   onSelectCoin?: (symbol: string) => void;
 }
 
+// Strictly sort newest signals to the top (timestampMs descending), secondary by conviction
+const sortSignalsNewestFirst = (a: FlashAlertItem, b: FlashAlertItem): number => {
+  if (b.timestampMs !== a.timestampMs) {
+    return b.timestampMs - a.timestampMs; // Higher timestamp = newer = at top
+  }
+  return b.conviction - a.conviction; // Secondary tiebreaker: higher conviction first
+};
+
 export default function LiveFlashAlertPopup({
   topSignals,
   soundEnabled,
@@ -65,7 +74,7 @@ export default function LiveFlashAlertPopup({
   const prevSignalsRef = useRef<string>("");
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Convert raw signal to normalized FlashAlertItem
+  // Convert raw signal to normalized FlashAlertItem with accurate timestamp extraction
   const normalizeSignal = (s: any): FlashAlertItem => {
     const rawDir = (s.direction || "LONG").toUpperCase();
     const isShort = rawDir.includes("SHORT") || rawDir.includes("BEAR");
@@ -79,7 +88,7 @@ export default function LiveFlashAlertPopup({
       s.decision?.includes("PARABOLIC");
 
     const entry = Number(s.entry_price || s.current_price || 0);
-    const target = Number(s.predicted_next_price || s.tp1_price || s.target_price || s.tp_price || (isShort ? entry * 0.92 : entry * 1.05));
+    const target = Number(s.tp1_price || s.tp_price || s.target_price || s.predicted_next_price || (isShort ? entry * 0.92 : entry * 1.05));
     const targetGain =
       s.predicted_return_pct !== undefined
         ? Number(s.predicted_return_pct)
@@ -99,17 +108,37 @@ export default function LiveFlashAlertPopup({
 
     const stopLoss = Number(s.sl_price || (isShort ? entry * 1.03 : entry * 0.97));
     const conviction = Number(s.conviction_pct || s.conviction || 75.0);
-    const metaWin = Number(s.meta_win_prob_pct || (s.meta_win_prob ? s.meta_win_prob * 100 : 70.0));
+    const metaWin = Number(
+      s.meta_win_probability_pct ??
+      (s.meta_win_probability !== undefined && s.meta_win_probability !== null
+        ? (s.meta_win_probability <= 1.0 ? s.meta_win_probability * 100 : s.meta_win_probability)
+        : (s.meta_win_prob_pct ?? (s.meta_win_prob ? (s.meta_win_prob <= 1.0 ? s.meta_win_prob * 100 : s.meta_win_prob) : 75.0)))
+    );
 
     let alertType: "BLOWOFF_TOP" | "HYPE_BREAKOUT" | "ELITE_SIGNAL" = "ELITE_SIGNAL";
     if (isBlowoff) alertType = "BLOWOFF_TOP";
     else if (isHype) alertType = "HYPE_BREAKOUT";
 
-    const id = `${s.symbol || "UNKNOWN"}-${s.horizon || s.horizon_tag || "SCALP"}-${Math.round(entry * 1000)}`;
+    const id = `${s.symbol || "UNKNOWN"}-${s.horizon || s.horizon_tag || s.horizon_key || "SCALP"}-${Math.round(entry * 1000)}`;
+
+    // Robust timestamp extraction from signal metadata
+    const rawTs = s.created_ts || s.created_at_utc || s.timestamp || s.created_at || s.detected_at || s.signal_time || s.time;
+    let tsMs = Date.now();
+    if (rawTs) {
+      if (typeof rawTs === "number") {
+        tsMs = rawTs < 1e11 ? rawTs * 1000 : rawTs;
+      } else if (typeof rawTs === "string") {
+        const parsed = new Date(rawTs).getTime();
+        if (!isNaN(parsed) && parsed > 0) {
+          tsMs = parsed;
+        }
+      }
+    }
 
     return {
       id,
-      timestamp: formatServerPredictionTime(new Date()),
+      timestamp: formatServerPredictionTime(new Date(tsMs)),
+      timestampMs: tsMs,
       symbol: s.symbol || "UNKNOWN",
       direction: isShort ? "SHORT" : "LONG",
       horizon: s.horizon_tag || s.horizon || s.horizon_name || "15M Scalp",
@@ -128,23 +157,23 @@ export default function LiveFlashAlertPopup({
     };
   };
 
-  // Detect new signals on signal stream change
+  // Detect new signals on signal stream change & maintain strict reverse-chronological order (newest at top)
   useEffect(() => {
     if (!topSignals || topSignals.length === 0) return;
 
     const signalFingerprint = topSignals
-      .map((s) => `${s.symbol}-${s.direction}-${s.entry_price || s.current_price}-${s.decision}`)
+      .map((s) => `${s.symbol}-${s.horizon_tag || s.horizon || s.horizon_key}-${s.direction}-${s.entry_price || s.current_price}-${s.created_at_utc || s.timestamp || ""}`)
       .join("|");
 
     if (prevSignalsRef.current && prevSignalsRef.current !== signalFingerprint) {
       // Find newly arrived signals
-      const newItems = topSignals.map(normalizeSignal);
+      const newItems = topSignals.map(normalizeSignal).sort(sortSignalsNewestFirst);
       if (newItems.length > 0) {
         setActiveAlerts(newItems);
         setCurrentAlertIndex(0);
         setProgress(100);
 
-        // Append to history without duplicates
+        // Prepend to history without duplicates, keeping newer signals at the top
         setAlertHistory((prev) => {
           const combined = [...newItems, ...prev];
           const uniqueMap = new Map<string, FlashAlertItem>();
@@ -153,13 +182,15 @@ export default function LiveFlashAlertPopup({
               uniqueMap.set(it.id, it);
             }
           }
-          return Array.from(uniqueMap.values()).slice(0, 15);
+          return Array.from(uniqueMap.values())
+            .sort(sortSignalsNewestFirst)
+            .slice(0, 50);
         });
       }
     } else if (!prevSignalsRef.current && topSignals.length > 0) {
-      // Initial load: populate history
-      const initialItems = topSignals.map(normalizeSignal);
-      setAlertHistory(initialItems.slice(0, 10));
+      // Initial load: populate history strictly sorted by newest first
+      const initialItems = topSignals.map(normalizeSignal).sort(sortSignalsNewestFirst);
+      setAlertHistory(initialItems.slice(0, 30));
     }
 
     prevSignalsRef.current = signalFingerprint;
@@ -301,15 +332,15 @@ export default function LiveFlashAlertPopup({
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5 mt-1">
-                    {currentAlert.direction === "LONG" ? (
-                      <span className="text-emerald-400 font-extrabold text-sm flex items-center gap-1">
-                        <TrendingUp className="w-4 h-4" />
-                        🟢 LONG BUY EXECUTE
-                      </span>
-                    ) : (
+                    {(currentAlert.direction === "SHORT" || currentAlert.direction === "BEARISH") ? (
                       <span className="text-red-400 font-extrabold text-sm flex items-center gap-1">
                         <TrendingDown className="w-4 h-4" />
                         🔴 SHORT / SELL FADE
+                      </span>
+                    ) : (
+                      <span className="text-emerald-400 font-extrabold text-sm flex items-center gap-1">
+                        <TrendingUp className="w-4 h-4" />
+                        🟢 LONG BUY EXECUTE
                       </span>
                     )}
                   </div>
@@ -335,11 +366,11 @@ export default function LiveFlashAlertPopup({
                 </div>
                 <div>
                   <span className="text-[9px] uppercase tracking-wider text-zinc-400 block">
-                    {currentAlert.direction === "SHORT" ? "Down TP" : "Target (TP1)"}
+                    {(currentAlert.direction === "SHORT" || currentAlert.direction === "BEARISH") ? "Down TP" : "Target (TP1)"}
                   </span>
                   <span
                     className={`font-mono font-bold text-xs ${
-                      currentAlert.direction === "SHORT" ? "text-amber-300" : "text-emerald-300"
+                      (currentAlert.direction === "SHORT" || currentAlert.direction === "BEARISH") ? "text-amber-300" : "text-emerald-300"
                     }`}
                   >
                     {formatUsd(currentAlert.targetPrice)}
@@ -478,7 +509,10 @@ export default function LiveFlashAlertPopup({
                   <p className="text-xs text-zinc-600 mt-1">Alerts will automatically pop up when high-momentum coins or tops are found.</p>
                 </div>
               ) : (
-                alertHistory.map((item) => (
+                alertHistory
+                  .slice()
+                  .sort(sortSignalsNewestFirst)
+                  .map((item) => (
                   <div
                     key={item.id}
                     className={`p-4 rounded-xl border transition-all hover:border-zinc-700 bg-zinc-900/60 ${
@@ -520,7 +554,7 @@ export default function LiveFlashAlertPopup({
                             <span className="text-[10px] text-zinc-500 block uppercase">Target</span>
                             <span
                               className={`font-bold ${
-                                item.direction === "SHORT" ? "text-amber-300" : "text-emerald-300"
+                                (item.direction === "SHORT" || item.direction === "BEARISH") ? "text-amber-300" : "text-emerald-300"
                               }`}
                             >
                               {formatUsd(item.targetPrice)} ({item.targetGainPct >= 0 ? `+${item.targetGainPct.toFixed(1)}%` : `${item.targetGainPct.toFixed(1)}%`})

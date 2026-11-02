@@ -321,13 +321,8 @@ export default function CoinSignalHistoryModal({
                   >
                     <option value="ALL">⏱️ All Horizons</option>
                     <option value="SCALP">⚡ Scalp (15M)</option>
-                    <option value="SWING">🌊 Swing (1H-2H)</option>
-                    <option value="MACRO">🚀 Macro (24H)</option>
-                    <option value="2-DAY">🔮 2-Day (48H)</option>
-                    <option value="3-DAY">🔭 3-Day (72H)</option>
-                    <option value="WEEKLY">🗓️ Weekly (7D)</option>
-                    <option value="BI-WEEKLY">🌕 Bi-Weekly (15D)</option>
-                    <option value="MONTHLY">🪐 Monthly (30D)</option>
+                    <option value="SWING">⏳ Day Trade (1H)</option>
+                    <option value="MACRO">🌊 Swing Trade (1D)</option>
                   </select>
                 </div>
 
@@ -348,6 +343,7 @@ export default function CoinSignalHistoryModal({
                           <tr>
                             <th className="py-3 px-4">Date / Time (UTC)</th>
                             <th className="py-3 px-4">Horizon</th>
+                            <th className="py-3 px-4">Grade & Prob</th>
                             <th className="py-3 px-4">Direction & Conviction</th>
                             <th className="py-3 px-4">Entry Price</th>
                             <th className="py-3 px-4">Target (TP1) & SL</th>
@@ -388,6 +384,20 @@ export default function CoinSignalHistoryModal({
                                   <span className="rounded-md bg-dark-900 px-2 py-0.5 text-xs font-semibold text-cyan-300 border border-slate-800">
                                     {sig.horizon}
                                   </span>
+                                </td>
+
+                                {/* Grade & Prob */}
+                                <td className="py-3 px-4 font-sans">
+                                  <div className="flex flex-col gap-0.5">
+                                    <span className="text-[11px] font-bold text-cyan-300">
+                                      {sig.quality_grade || "Grade A"}
+                                    </span>
+                                    {sig.meta_win_prob_pct !== undefined && sig.meta_win_prob_pct !== null && (
+                                      <span className="text-[10px] font-mono font-bold text-purple-300">
+                                        🧠 {Number(sig.meta_win_prob_pct).toFixed(1)}% Prob
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
 
                                 {/* Direction & Conviction */}
@@ -440,9 +450,11 @@ export default function CoinSignalHistoryModal({
                                     {sig.realized_return_pct ? (
                                       <span
                                         className={`font-bold ${
-                                          sig.realized_return_pct.startsWith("+")
+                                          sig.realized_return_pct.startsWith("-")
+                                            ? "text-rose-400"
+                                            : sig.realized_return_pct.startsWith("+") && sig.realized_return_pct !== "+0.00%"
                                             ? "text-emerald-400"
-                                            : "text-rose-400"
+                                            : "text-slate-300"
                                         }`}
                                       >
                                         {sig.realized_return_pct}
@@ -450,7 +462,11 @@ export default function CoinSignalHistoryModal({
                                     ) : isPending ? (
                                       <span className="text-blue-400 font-sans text-xs">Active ⏳</span>
                                     ) : (
-                                      <span className="text-slate-500">-</span>
+                                      <span className="text-slate-300 font-bold font-mono">
+                                        {sig.realized_return_num !== undefined && sig.realized_return_num !== null
+                                          ? `${sig.realized_return_num > 0 ? "+" : ""}${Number(sig.realized_return_num).toFixed(2)}%`
+                                          : "+0.00%"}
+                                      </span>
                                     )}
                                   </div>
                                 </td>

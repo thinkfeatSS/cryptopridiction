@@ -14,7 +14,7 @@ export default function PortfolioPage() {
           Active Paper Trading Bot & Ledger
         </h1>
         <p className="text-xs text-slate-400 mt-1">
-          Automated paper trading on $100.00 margin per trade (min $20.00 net profit hurdle with 100% real Binance Spot fee deductions: 0.10% buy fee &amp; 0.10% sell fee).
+          Automated paper trading on $100.00 margin per trade across 3 desks (5x Scalp, 3x Day, 2x Swing) with itemized Binance Futures fee (0.0405% taker with BNB discount), spread, slippage, and funding rate drag deductions.
         </p>
       </div>
 

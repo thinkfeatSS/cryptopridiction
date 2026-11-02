@@ -1,0 +1,15 @@
+{
+  "name": "crypto-whatsapp-baileys",
+  "version": "1.0.0",
+  "description": "High-Performance Baileys WhatsApp Multi-Device Gateway",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.3",
+    "pino": "^9.0.0"
+  }
+}

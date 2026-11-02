@@ -1,0 +1,12 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY whatsapp/package.json ./
+RUN npm install --production --no-audit
+
+COPY whatsapp/server.js ./
+
+EXPOSE 8080
+
+CMD ["node", "server.js"]

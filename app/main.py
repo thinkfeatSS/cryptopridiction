@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from app.config import settings
 from app.services.db_sync import migrate_files_to_db, init_db
 from app.services.websocket_manager import ws_manager
-from app.routers import signals_router, forecast_router, portfolio_router, health_router, models_router, websocket_router
+from app.routers import signals_router, forecast_router, portfolio_router, health_router, models_router, websocket_router, whatsapp_router, v16_router, fundamentals_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -57,6 +57,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Enforce No-Cache on API Endpoints to prevent browser stale in-memory cache
+@app.middleware("http")
+async def add_no_cache_headers(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "private, no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "-1"
+        response.headers["Surrogate-Control"] = "no-store"
+    return response
+
 # Include API Routers
 app.include_router(signals_router)
 app.include_router(forecast_router)
@@ -64,6 +75,10 @@ app.include_router(portfolio_router)
 app.include_router(health_router)
 app.include_router(models_router)
 app.include_router(websocket_router)
+app.include_router(whatsapp_router)
+app.include_router(v16_router)
+app.include_router(fundamentals_router)
+
 
 from app.services.signal_service import signal_service
 

@@ -30,44 +30,71 @@ MODELS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "models_exp
 os.makedirs(MODELS_DIR, exist_ok=True)
 META_MODEL_PATH = os.path.join(MODELS_DIR, "signal_meta_classifier.joblib")
 
+class SingleClassPriorModel:
+    """Laplace-smoothed probability model for per-coin cold starts where only one class has resolved so far."""
+    def __init__(self, target_class: int, sample_size: int):
+        self.target_class = int(target_class)
+        self.sample_size = int(sample_size)
+        if self.target_class == 1:
+            self.prob = (sample_size + 1.0) / (sample_size + 2.0)
+        else:
+            self.prob = 1.0 / (sample_size + 2.0)
+            
+    def predict_proba(self, X):
+        p1 = float(self.prob)
+        p0 = 1.0 - p1
+        n = len(X)
+        return np.array([[p0, p1]] * n)
+
 def extract_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Preprocesses and extracts quantitative meta-features from signal records."""
+    """Preprocesses and extracts quantitative meta-features from signal records without lookahead bias."""
     data = []
     for _, row in df.iterrows():
         try:
-            # 1. Target Label: 1 if WON (TP1/TP2/TP3 hit), 0 if LOST (SL hit)
+            # 1. Clean Pure Target Label (Marcos López de Prado Triple-Barrier Meta-Labeling Framework):
+            # Target 1 = Genuine TP Hit (WON_TP1, WON_TP2, WON_TP3, TP1_LOCKED, TP2_LOCKED, TP3_RUNNER, or MFE >= TP1 hurdle without stop out).
+            # Target 0 = Failed to reach TP1 before expiry or stop-out (LOST_SL, LOST_EXP, WON_EXP_PROFIT, EXPIRED_PROFIT, TIER0_BE, BREAKEVEN_EXP, STAGNATION).
             status_str = str(row.get('status', '')).upper()
             outcome_str = str(row.get('outcome_label', '')).upper()
+            combined_st = f"{status_str} {outcome_str}"
             
-            if "WON" in status_str or "WON" in outcome_str:
-                target = 1
-            elif "LOST" in status_str or "LOST" in outcome_str:
-                target = 0
-            else:
+            if any(k in combined_st for k in ['PENDING', 'OPEN', 'ACTIVE', 'WAITING']):
                 continue # Skip pending or unverified
+                
+            entry_p = float(row.get('entry_price', 0.0) or 0.0)
+            tp1_p = float(row.get('tp1_price', 0.0) or 0.0)
+            mfe_val = float(row.get('max_potential_gain_pct', 0.0) or 0.0)
+            tp_pct = abs(tp1_p - entry_p) / entry_p * 100.0 if entry_p > 0 and tp1_p > 0 else 1.5
+
+            # Strict Triple-Barrier Invalidation: Stop barrier crossing FIRST cannot be converted to a win by subsequent MFE!
+            is_sl_hit = any(k in combined_st for k in ['LOST_SL', 'SL_HIT', 'STOP_LOSS', 'LOST_STOP', 'STOPPED', 'STOP_HIT', 'STOP_LOSS_HIT'])
+            is_tp_hit = any(k in combined_st for k in ['WON_TP', 'TP1_LOCKED', 'TP2_LOCKED', 'TP3_RUNNER', 'TP1 HIT', 'TP2 HIT', 'TP3 HIT'])
+
+            if is_sl_hit:
+                target = 0
+            elif is_tp_hit:
+                target = 1
+            elif mfe_val >= tp_pct and mfe_val >= 0.5:
+                # Intra-trade MFE reached or exceeded TP1 hurdle before expiry without stopping out
+                target = 1
+            else:
+                target = 0
             
             # 2. Numeric features
             conviction = float(row.get('conviction_pct', 70.0) or 70.0)
             
             exp_ret_raw = str(row.get('expected_return_pct', '0.0')).replace('%', '').replace('+', '').strip()
             exp_ret = float(exp_ret_raw) if exp_ret_raw not in ['', 'nan', 'None'] else 0.0
-            
-            # Risk-to-Reward (e.g. "1:2.0" -> 2.0)
-            rr_raw = str(row.get('risk_reward_ratio', '1:2.0')).split(':')[-1]
-            try:
-                rr_ratio = float(rr_raw)
-            except Exception:
-                rr_ratio = 2.0
 
             # Quality grade numeric
             grade_str = str(row.get('quality_grade', ''))
             is_a_plus = 1.0 if "A+" in grade_str else 0.0
             
-            # Horizon encoding
+            # Horizon encoding aligned with institutional market structure (15M=Scalp, 1H/4H=Swing/Intraday, 24H+=Macro)
             horizon_str = str(row.get('horizon', '')).lower()
-            is_scalp = 1.0 if "scalp" in horizon_str or "15m" in horizon_str else 0.0
-            is_swing = 1.0 if "swing" in horizon_str or "1h" in horizon_str else 0.0
-            is_macro = 1.0 if any(k in horizon_str for k in ["macro", "24h", "1d", "2d", "3d", "7d", "15d", "30d", "week", "month", "48h", "72h"]) else 0.0
+            is_scalp = 1.0 if any(k in horizon_str for k in ["scalp", "15m", "30m"]) else 0.0
+            is_swing = 1.0 if any(k in horizon_str for k in ["swing", "intraday", "1h", "4h", "12h"]) else 0.0
+            is_macro = 1.0 if any(k in horizon_str for k in ["macro", "24h", "1d", "2d", "3d", "4d", "7d", "15d", "30d", "week", "month", "48h", "72h"]) else 0.0
             
             # Direction
             direction_str = str(row.get('direction', '')).upper()
@@ -82,7 +109,11 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
             is_reversal = 1.0 if (is_bottom_reversal or is_top_reversal) else 0.0
             is_liq_sweep = 1.0 if "LIQUIDITY-SWEEP" in decision_str else 0.0
             is_squeeze = 1.0 if "SHORT SQUEEZE" in decision_str else 0.0
-            is_paper_exec = 1.0 if "EXECUTED" in str(row.get('paper_trading_status', '')).upper() else 0.0
+            is_order_block = 1.0 if "ORDER-BLOCK" in decision_str else 0.0
+            is_breaker_block = 1.0 if "BREAKER-BLOCK" in decision_str else 0.0
+            is_blowoff_top = 1.0 if "BLOW-OFF TOP" in decision_str else 0.0
+            is_hype_surge = 1.0 if "HYPE PUMP" in decision_str else 0.0
+            is_paper_exec = 1.0 if any(k in str(row.get('paper_trading_status', '')).upper() for k in ["EXECUTED", "ACTIVE"]) else 0.0
             
             # Rank (e.g. "#1" -> 1)
             rank_raw = str(row.get('rank', '#1')).replace('#', '').strip()
@@ -91,22 +122,35 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
             except Exception:
                 rank = 1.0
 
-            # TP1 vs SL distance ratio
+            # TP1 vs SL distance ratio using UN-RATCHETED initial stop loss (eliminates lookahead bias)
             entry_p = float(row.get('entry_price', 1.0) or 1.0)
             tp1_p = float(row.get('tp1_price', 1.0) or 1.0)
-            sl_p = float(row.get('sl_price', 1.0) or 1.0)
+            sl_raw = row.get('sl_original')
+            if sl_raw is None or pd.isna(sl_raw) or float(sl_raw) <= 0:
+                sl_raw = row.get('initial_sl_price') or row.get('sl_price', 1.0)
+            sl_p = float(sl_raw or 1.0)
             
-            if entry_p > 0 and sl_p > 0:
+            if entry_p > 0 and sl_p > 0 and tp1_p > 0:
                 tp_pct = abs(tp1_p - entry_p) / entry_p * 100.0
                 sl_pct = abs(entry_p - sl_p) / entry_p * 100.0
             else:
-                tp_pct = abs(exp_ret)
-                sl_pct = abs(exp_ret) / max(1.0, rr_ratio)
+                tp_pct = max(0.5, abs(exp_ret))
+                sl_pct = max(0.3, abs(exp_ret) / 2.0)
+
+            # Enforce valid economic minimum barrier distances
+            if sl_pct < 0.20:
+                sl_pct = max(0.20, abs(exp_ret) / 2.0 if abs(exp_ret) > 0 else 0.50)
+            tp_pct = max(0.30, tp_pct)
+
+            clean_rr = float(np.clip(round(tp_pct / max(0.05, sl_pct), 2), 0.1, 50.0))
+
+            sym_str = str(row.get('symbol', '')).upper()
+            is_meme = 1.0 if any(m in sym_str for m in ["SHIB", "PEPE", "BONK", "DOGE", "FLOKI", "MEME", "WIF", "BOME"]) else 0.0
 
             feat_dict = {
                 'conviction_pct': conviction,
                 'expected_return_pct': exp_ret,
-                'risk_reward_ratio': rr_ratio,
+                'risk_reward_ratio': clean_rr,
                 'is_a_plus': is_a_plus,
                 'is_scalp': is_scalp,
                 'is_swing': is_swing,
@@ -119,15 +163,20 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
                 'is_reversal': is_reversal,
                 'is_liq_sweep': is_liq_sweep,
                 'is_squeeze': is_squeeze,
+                'is_order_block': is_order_block,
+                'is_breaker_block': is_breaker_block,
+                'is_blowoff_top': is_blowoff_top,
+                'is_hype_surge': is_hype_surge,
                 'is_paper_exec': is_paper_exec,
+                'is_meme': is_meme,
                 'rank': rank,
-                'tp_pct': tp_pct,
-                'sl_pct': sl_pct,
-                'tp_sl_ratio': tp_pct / max(0.01, sl_pct),
+                'tp_pct': round(tp_pct, 2),
+                'sl_pct': round(sl_pct, 2),
+                'tp_sl_ratio': clean_rr,
                 'target': target
             }
             data.append(feat_dict)
-        except Exception as e:
+        except Exception:
             continue
             
     return pd.DataFrame(data)
@@ -141,7 +190,15 @@ def train_and_save_meta_classifier():
     # Collect data from available sources
     dfs = []
     candidates = [
+        "export_app_data/live_container_trader_signals_tracker.csv",
+        "export_app_data/historical_meta_training_signals.csv",
+        "latest_signals_from_container.csv",
+        "latest_vps_signals.csv",
         "user_pasted_signals.csv",
+        "vps_downloaded_signals.csv",
+        "downloaded_signals.csv",
+        "today_trader_signals_tracker.csv",
+        "trader_signals_tracker.csv",
         "export_app_data/trader_signals_tracker.csv"
     ]
     for c in candidates:
@@ -175,23 +232,25 @@ def train_and_save_meta_classifier():
     # Model Selection: LightGBM with HistGradientBoosting / RandomForest Fallback
     if HAS_LIGHTGBM:
         base_clf = lgb.LGBMClassifier(
-            n_estimators=120,
+            n_estimators=140,
             max_depth=3,
             num_leaves=8,
-            learning_rate=0.04,
+            learning_rate=0.035,
             subsample=0.85,
             colsample_bytree=0.80,
             min_child_samples=5,
+            class_weight='balanced',
             random_state=42,
             n_jobs=2,
             verbose=-1
         )
     else:
         base_clf = HistGradientBoostingClassifier(
-            max_iter=120,
+            max_iter=140,
             max_depth=3,
-            learning_rate=0.04,
+            learning_rate=0.035,
             min_samples_leaf=5,
+            class_weight='balanced',
             random_state=42
         )
         
@@ -225,25 +284,33 @@ def train_and_save_meta_classifier():
     joblib.dump(bundle, META_MODEL_PATH)
     print(f"[SAVED] Global Meta-Labeler Successfully Saved to: {META_MODEL_PATH}")
 
-    # Train Dedicated Per-Coin Meta-Classifiers where sufficient history exists
+    # Train Dedicated Per-Coin Meta-Classifiers where history >= 5 resolved trades
     if 'symbol' in full_raw.columns:
         for sym, sym_df in full_raw.groupby('symbol'):
             clean_sym = sym.replace('/', '_').replace(':', '_')
             sym_feat = extract_features(sym_df)
-            if len(sym_feat) >= 8 and len(sym_feat['target'].unique()) > 1:
+            if len(sym_feat) >= 5:
                 try:
-                    s_X = sym_feat[feature_cols]
+                    for col in feature_cols:
+                        if col not in sym_feat.columns:
+                            sym_feat[col] = 0.0
+                    s_X = sym_feat[feature_cols].replace([np.inf, -np.inf], 0.0).fillna(0.0)
                     s_y = sym_feat['target']
-                    s_base = HistGradientBoostingClassifier(max_iter=80, max_depth=2, random_state=42)
-                    s_cal = CalibratedClassifierCV(estimator=s_base, method='sigmoid', cv=2)
-                    s_cal.fit(s_X, s_y)
+                    if len(s_y.unique()) > 1:
+                        s_base = HistGradientBoostingClassifier(max_iter=80, max_depth=2, min_samples_leaf=2, random_state=42)
+                        s_cal = CalibratedClassifierCV(estimator=s_base, method='sigmoid', cv=2)
+                        s_cal.fit(s_X, s_y)
+                        m_to_save = s_cal
+                    else:
+                        single_cls = int(s_y.iloc[0])
+                        m_to_save = SingleClassPriorModel(target_class=single_cls, sample_size=len(sym_feat))
                     
                     coin_dir = os.path.join(MODELS_DIR, "per_coin", clean_sym)
                     os.makedirs(coin_dir, exist_ok=True)
                     coin_meta_path = os.path.join(coin_dir, "meta_classifier.joblib")
                     
                     joblib.dump({
-                        'model': s_cal,
+                        'model': m_to_save,
                         'feature_cols': feature_cols,
                         'symbol': sym,
                         'sample_size': len(sym_feat),

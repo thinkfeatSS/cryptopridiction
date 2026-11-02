@@ -16,7 +16,10 @@ import {
 export default function QueuedTrades() {
   const { data: portfolio, isLoading } = usePortfolioQuery();
   const queuedTrades = portfolio?.queued_trades || [];
-  const openPositionsCount = portfolio?.open_positions?.length || 0;
+  const openPositionsCount = portfolio?.open_positions?.filter((p: any) => {
+    const s = (p.symbol || "").toUpperCase();
+    return !s.includes("OLD") && !s.includes("DELISTED") && !s.includes("USDSOLD");
+  })?.length || 0;
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">
@@ -35,14 +38,14 @@ export default function QueuedTrades() {
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">
-            100% Qualified Spot Long setups (&ge;+5.0% net profit under Convert spread &amp; Past Won &gt; Lost) held while active queue is at full capacity (10/10)
+            100% Qualified setups held while active desks are at full capacity (5 total desk slots: 2 Scalp + 2 Day Trading + 1 Swing)
           </p>
         </div>
 
         <div className="flex items-center gap-2">
           <span className="rounded-md bg-cyan-950/60 px-2.5 py-1 text-xs font-mono text-cyan-300 border border-cyan-800/60 flex items-center gap-1.5">
             <Layers className="h-3.5 w-3.5" />
-            Active Slots: {openPositionsCount} / 10
+            Active Slots: {openPositionsCount} / 5
           </span>
         </div>
       </div>
@@ -58,7 +61,7 @@ export default function QueuedTrades() {
           </div>
           <h3 className="text-xs font-bold text-white">No Queued Trades Waiting</h3>
           <p className="text-[11px] text-slate-500 mt-0.5 max-w-md mx-auto">
-            All currently qualified trades have either been admitted directly into the 10 active slots, or the engine is waiting for 4H/24H/Daily setups that satisfy both the &ge;+5.0% net return hurdle (under Convert spread) and positive historical track record.
+            All currently qualified trades have either been admitted directly into the 5 active desk slots (Scalp, Day Trade, Swing), or the engine is waiting for setups that satisfy both the net return hurdle and positive track record.
           </p>
         </div>
       ) : (

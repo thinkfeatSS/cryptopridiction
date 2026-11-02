@@ -7,7 +7,9 @@ import { CheckCircle2, XCircle, Clock, ArrowUpRight, ArrowDownRight } from "luci
 
 export default function ClosedTrades() {
   const { data: portfolio, isLoading } = usePortfolioQuery();
-  const closedTrades = portfolio?.closed_trades_history || [];
+  const closedTrades = portfolio?.closed_trades_history?.length
+    ? portfolio.closed_trades_history
+    : ((portfolio as any)?.closed_trades || []);
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-slate-800">
@@ -48,12 +50,18 @@ export default function ClosedTrades() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60 bg-dark-950/40">
-              {closedTrades.map((t, idx) => {
+              {closedTrades.map((t: any, idx: number) => {
                 const isWon = t.outcome === "WON";
                 const isLost = t.outcome === "LOST";
                 const isLong = t.direction === "BULLISH" || t.direction === "LONG";
-                const netPnl = t.realized_pnl_usd ?? 0.0;
-                const netPct = t.realized_pnl_pct ?? 0.0;
+                const netPnl = t.realized_pnl_usd ?? (t as any).net_pnl_usd ?? 0.0;
+                const netPct = t.realized_pnl_pct ?? (t as any).return_pct ?? 0.0;
+                const feeVal = t.binance_fee_usd ?? (t as any).fees_usd ?? 0.02;
+                const horizonVal = t.horizon || (t as any).signal_horizon || "1H";
+                const exitReasonUpper = String(t.exit_reason || "").toUpperCase();
+                const isBreakeven = t.outcome === "BREAKEVEN" || exitReasonUpper.includes("BREAKEVEN") || exitReasonUpper.includes("TIER0");
+                const isExpired = exitReasonUpper.includes("HORIZON_EXPIRY") || exitReasonUpper.includes("EXPIRED");
+                const isStagnation = exitReasonUpper.includes("STAGNATION");
 
                 return (
                   <tr key={t.trade_id || idx} className="hover:bg-slate-800/40 transition-colors">
@@ -76,7 +84,7 @@ export default function ClosedTrades() {
                           {isLong ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
                           {isLong ? "LONG" : "SHORT"}
                         </span>
-                        <span className="text-[10px] text-cyan-400">{t.horizon}</span>
+                        <span className="text-[10px] text-cyan-400 font-semibold">{horizonVal}</span>
                       </div>
                     </td>
 
@@ -89,17 +97,33 @@ export default function ClosedTrades() {
 
                     {/* Closing Trigger */}
                     <td className="py-3 px-4 font-sans">
-                      {isWon ? (
+                      {isBreakeven ? (
+                        <span className="inline-flex items-center gap-1 text-cyan-400 font-semibold text-xs">
+                          <CheckCircle2 className="h-3.5 w-3.5" /> 🛡️ {t.exit_reason || "TIER0_PROTECTED_BREAKEVEN"}
+                        </span>
+                      ) : isStagnation ? (
+                        <span className="inline-flex items-center gap-1 text-amber-400 font-semibold text-xs">
+                          <Clock className="h-3.5 w-3.5" /> ⏱️ {t.exit_reason || "STAGNATION_SCRATCH"}
+                        </span>
+                      ) : isExpired ? (
+                        <span
+                          className={`inline-flex items-center gap-1 font-semibold text-xs ${
+                            isWon ? "text-emerald-400" : isLost ? "text-rose-400" : "text-amber-400"
+                          }`}
+                        >
+                          <Clock className="h-3.5 w-3.5" /> ⌛ {t.exit_reason || "HORIZON_EXPIRY"}
+                        </span>
+                      ) : isWon ? (
                         <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold text-xs">
-                          <CheckCircle2 className="h-3.5 w-3.5" /> {t.exit_reason || "TAKE_PROFIT_HIT"}
+                          <CheckCircle2 className="h-3.5 w-3.5" /> 🎯 {t.exit_reason || "TAKE_PROFIT_1"}
                         </span>
                       ) : isLost ? (
                         <span className="inline-flex items-center gap-1 text-rose-400 font-semibold text-xs">
-                          <XCircle className="h-3.5 w-3.5" /> {t.exit_reason || "STOP_LOSS_HIT"}
+                          <XCircle className="h-3.5 w-3.5" /> 🛑 {t.exit_reason || "STOP_LOSS"}
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 text-slate-400 font-semibold text-xs">
-                          <Clock className="h-3.5 w-3.5" /> {t.exit_reason || "EXPIRED"}
+                          <Clock className="h-3.5 w-3.5" /> {t.exit_reason || "CLOSED"}
                         </span>
                       )}
                     </td>
@@ -111,10 +135,10 @@ export default function ClosedTrades() {
                     <td className="py-3 px-4">
                       <div className="flex flex-col text-[11px]">
                         <span className="text-slate-300 font-bold">
-                          -${(t.binance_fee_usd ?? 0.02).toFixed(2)}
+                          -${feeVal.toFixed(2)}
                         </span>
-                        <span className="text-[10px] text-slate-500">
-                          B: -${(t.buy_fee_usd ?? 0.01).toFixed(2)} | S: -${(t.sell_fee_usd ?? 0.01).toFixed(2)}
+                        <span className="text-[10px] text-emerald-400/90 font-mono">
+                          0.045% Taker Rate
                         </span>
                       </div>
                     </td>

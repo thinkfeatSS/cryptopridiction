@@ -119,3 +119,113 @@ export function playExhaustionSellAlert(volume: number = 0.38) {
   }
 }
 
+/**
+ * Plays a triumphant ascending 3-tone victory fanfare on TP Hits (+Profit Win)
+ */
+export function playTpHitChime(volume: number = 0.35) {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  try {
+    const now = ctx.currentTime;
+    // C6 (1046.5Hz) -> E6 (1318.5Hz) -> G6 (1567.98Hz) -> C7 (2093.0Hz)
+    const notes = [1046.5, 1318.5, 1567.98, 2093.0];
+    notes.forEach((freq, idx) => {
+      const startTime = now + idx * 0.07;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, startTime);
+      gain.gain.setValueAtTime(volume * (1 + idx * 0.15), startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.22);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + 0.22);
+    });
+  } catch (e) {
+    console.warn("TP hit chime error:", e);
+  }
+}
+
+/**
+ * Plays a protective low warning tone on Stop-Loss Hits
+ */
+export function playSlHitChime(volume: number = 0.30) {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  try {
+    const now = ctx.currentTime;
+    // Descending minor interval: 440Hz (A4) -> 370Hz (F#4) -> 311.13Hz (Eb4)
+    const notes = [440.0, 370.0, 311.13];
+    notes.forEach((freq, idx) => {
+      const startTime = now + idx * 0.09;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(freq, startTime);
+      gain.gain.setValueAtTime(volume, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.25);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + 0.25);
+    });
+  } catch (e) {
+    console.warn("SL hit chime error:", e);
+  }
+}
+
+/**
+ * Plays a clean harmonic confirmation tone on Breakeven Protection lock
+ */
+export function playBreakEvenChime(volume: number = 0.28) {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  try {
+    const now = ctx.currentTime;
+    // Dual fifth harmony: 587.33Hz (D5) -> 880Hz (A5)
+    [587.33, 880.0].forEach((freq, idx) => {
+      const startTime = now + idx * 0.06;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, startTime);
+      gain.gain.setValueAtTime(volume, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.18);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + 0.18);
+    });
+  } catch (e) {
+    console.warn("Breakeven chime error:", e);
+  }
+}
+
+/**
+ * Plays a subtle neutral ping when a trade expires
+ */
+export function playExpiredChime(volume: number = 0.22) {
+  const ctx = getAudioContext();
+  if (!ctx) return;
+
+  try {
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(740.0, now);
+    gain.gain.setValueAtTime(volume, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.15);
+  } catch (e) {
+    console.warn("Expired chime error:", e);
+  }
+}
+

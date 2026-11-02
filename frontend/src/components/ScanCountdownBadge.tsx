@@ -27,13 +27,10 @@ export default React.memo(function ScanCountdownBadge({
     if (status?.seconds_to_next_scan !== undefined && status.seconds_to_next_scan > 0) {
       return status.seconds_to_next_scan;
     }
-    const now = new Date();
-    const mins = 15 - (now.getUTCMinutes() % 15);
-    const secs = (mins * 60) - now.getUTCSeconds();
-    return Math.max(1, secs);
+    return 60;
   }, [status?.next_scan_timestamp, status?.seconds_to_next_scan]);
 
-  const [localSeconds, setLocalSeconds] = useState<number>(900);
+  const [localSeconds, setLocalSeconds] = useState<number>(60);
 
   useEffect(() => {
     setMounted(true);
@@ -51,11 +48,11 @@ export default React.memo(function ScanCountdownBadge({
 
   return (
     <div
-      title={status?.next_scan_utc ? `Authoritative Engine Target: ${status.next_scan_utc}` : "Targeting next 15M candle boundary"}
+      title={status?.next_scan_utc ? `Candle Boundary Sync Target: ${status.next_scan_utc} UTC (Fresh Retrained Models)` : "Candle-Synchronized 15M Retraining Active"}
       className={`flex items-center gap-2.5 rounded-xl border px-3.5 py-2 text-xs shadow-lg transition-all ${
         isScanning
           ? "border-cyan-400/60 bg-cyan-950/70 shadow-cyan-500/20 animate-pulse"
-          : "border-cyan-500/40 bg-cyan-950/40 shadow-cyan-500/10"
+          : "border-emerald-500/40 bg-emerald-950/40 shadow-emerald-500/10"
       } ${className}`}
     >
       <div className="relative flex h-3 w-3">
@@ -63,19 +60,19 @@ export default React.memo(function ScanCountdownBadge({
           <Loader2 className="h-3 w-3 animate-spin text-cyan-400" />
         ) : (
           <>
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75"></span>
-            <span className="relative inline-flex h-3 w-3 rounded-full bg-cyan-500"></span>
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500"></span>
           </>
         )}
       </div>
       <div className="flex flex-col">
-        <span className="text-[10px] uppercase font-bold tracking-wider text-cyan-300">
-          {isScanning ? "Quant Daemon Status" : "Next AI Scan & Refresh In"}
+        <span className="text-[10px] uppercase font-bold tracking-wider text-emerald-400">
+          {isScanning ? "⚡ Retraining Fresh Models" : "⚡ 15M Candle Retrain"}
         </span>
         <span className="font-mono text-sm font-black text-white" suppressHydrationWarning>
           {isScanning
-            ? (status?.scanned_assets_count ? `⚡ Streaming: ${status.scanned_assets_count}/100 Coins...` : "⚡ Streaming Universe...")
-            : (!mounted ? "15:00" : formatTimeRemaining(localSeconds))}
+            ? (status?.scanned_assets_count ? `Retraining: ${status.scanned_assets_count}/${status?.total_assets_count || 110} Coins...` : "Retraining Universe Models...")
+            : (!mounted ? "Candle Sync (60s)" : `Sync in ${formatTimeRemaining(localSeconds)}`)}
         </span>
       </div>
     </div>
