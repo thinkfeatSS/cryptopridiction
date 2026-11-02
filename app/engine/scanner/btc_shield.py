@@ -176,10 +176,11 @@ class BtcPredictiveMarketShield:
             status_code = "NO_TRADE_ZONE"
             regime = "RANGE_SQUEEZE"
             regime_label = "🛑 SEVERE FLATLINE STAGNATION (NO TRADE ZONE ACTIVE)"
-            reason = f"NO TRADE ZONE ACTIVE: Severe flatline stagnation (ADX: {adx_val:.1f} < 12, BBW %ile: {bbw_pctile:.0f}%). Capital preservation mode active."
-            alt_longs = False
+            reason = f"NO TRADE ZONE ACTIVE: Severe flatline stagnation (ADX: {adx_val:.1f} < 12, BBW %ile: {bbw_pctile:.0f}%). Capital preservation mode active for middle chop; structural boundary touches and coiling breakouts authorized."
+            alt_longs = True
+            alt_shorts = True
             alt_posture = "NO_TRADE_ZONE_CAPITAL_PRESERVATION"
-            shield_active = True
+            shield_active = False
             is_ntz_active = True
             predicted_trend = "SQUEEZE_COILING"
             pred_target = round(c_now, 2)

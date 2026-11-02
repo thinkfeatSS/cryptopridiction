@@ -261,7 +261,7 @@ class NoTradeZoneEngine:
             "BREAKOUT", "EXPANSION", "ORDER_BLOCK", "BREAKER",
             "RANGE_BOUNCE", "RANGE_ROTATION", "RANGE_SUPPORT", "RANGE_RESISTANCE",
             "SUB_RANGE", "MEAN_REVERSION", "SWEEP", "RECLAIM", "FVG", "VWAP",
-            "DIP_BUY", "RALLY_FADE"
+            "DIP_BUY", "RALLY_FADE", "COILING", "TURTLE_SOUP", "INSIDE_BAR"
         ]
         decision_str = str(decision).upper() if decision else ""
         is_exempt_strategy = has_fresh_ob or any(k in decision_str for k in exempt_strategies)
@@ -302,17 +302,20 @@ class NoTradeZoneEngine:
             except Exception:
                 vol_24h_quote = 0.0
 
-        is_sub_liquidity = (vol_24h_quote > 0 and vol_24h_quote < min_quote_vol)
-        # Dynamically adapt RVOL floor: relax during quiet sessions if verified OB trigger or trending momentum exists
+        effective_min_vol = (min_quote_vol * 0.50) if is_exempt_strategy else min_quote_vol
+        is_sub_liquidity = (vol_24h_quote > 0 and vol_24h_quote < effective_min_vol)
+        # Dynamically adapt RVOL floor: relax during quiet sessions if verified OB trigger, coiling compression, or boundary setup exists
         effective_rvol_thresh = rvol_dry_thresh
-        if ob_setup and ob_setup.get("setup_detected"):
+        if is_exempt_strategy:
+            effective_rvol_thresh = max(0.35, rvol_dry_thresh - 0.25)
+        elif ob_setup and ob_setup.get("setup_detected"):
             effective_rvol_thresh = max(0.40, rvol_dry_thresh - 0.20)
         elif adx >= 20.0:
             effective_rvol_thresh = max(0.45, rvol_dry_thresh - 0.15)
 
         # Low relative volume during chop/squeeze or attempted breakout
         is_dry_breakout = (rvol < effective_rvol_thresh and any(k in decision.upper() for k in ["BREAKOUT", "PUMP", "MOMENTUM", "CHASE"]))
-        is_dry_volume_lull = (rvol < effective_rvol_thresh and (chop >= chop_squeeze_thresh or adx < adx_severe_thresh))
+        is_dry_volume_lull = (not is_exempt_strategy) and (rvol < effective_rvol_thresh and (chop >= chop_squeeze_thresh or adx < adx_severe_thresh))
 
         if is_sub_liquidity:
             reasons.append(f"Low Liquidity (${vol_24h_quote/1e6:.1f}M < ${min_quote_vol/1e6:.1f}M USDT)")
@@ -408,11 +411,12 @@ class NoTradeZoneEngine:
 
             if is_btc_ntz:
                 reason_str = btc_shield_info.get("reason", "BTC Volatility Squeeze / Coiling Consolidation")
-                reasons.append(f"Macro BTC No Trade Zone Active: {reason_str}")
-                if primary_code == NoTradeZoneReason.CLEAR:
-                    primary_code = NoTradeZoneReason.CHOP_CONSOLIDATION
-                    primary_label = f"🛑 NO TRADE ZONE (BTC Macro Volatility Squeeze: {reason_str})"
-                    badge = "MACRO NTZ"
+                if not is_exempt_strategy:
+                    reasons.append(f"Macro BTC No Trade Zone Active: {reason_str}")
+                    if primary_code == NoTradeZoneReason.CLEAR:
+                        primary_code = NoTradeZoneReason.CHOP_CONSOLIDATION
+                        primary_label = f"🛑 NO TRADE ZONE (BTC Macro Volatility Squeeze: {reason_str})"
+                        badge = "MACRO NTZ"
             elif is_btc_dump and direction.upper() in ["LONG", "BULLISH"]:
                 reason_str = btc_shield_info.get("reason", "BTC Flash Dump Active")
                 reasons.append(f"BTC Shield Active: {reason_str}")

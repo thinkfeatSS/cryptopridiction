@@ -294,8 +294,28 @@ class SignalGenerationSystem:
             decision=canonical_strategy
         )
         is_asset_ntz = ntz_eval.get("is_ntz", False)
-        is_ntz_active = is_macro_ntz or is_asset_ntz
-        ntz_reason = macro_ntz_reason if is_macro_ntz else (
+
+        # In micro-volatility / macro squeeze, hold back on middle chop to preserve capital,
+        # but allow validated structural boundary touches and coiling breakout setups
+        is_macro_dump = (
+            btc_shield_state.get("regime") == "FLASH_DUMP" or
+            btc_shield_state.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "ALERT_DUMP", "FLASH_DUMP"] or
+            "DEFENSIVE_CASH_ONLY" in str(btc_shield_state.get("altcoin_posture", ""))
+        )
+        is_boundary_or_coiling = bool(
+            is_ob_setup or
+            any(k in str(canonical_strategy).upper() for k in [
+                "ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "RANGE_SUPPORT",
+                "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT", "RANGE_BOUNCE"
+            ])
+        )
+
+        effective_macro_ntz = is_macro_ntz
+        if is_macro_ntz and not is_macro_dump and is_boundary_or_coiling:
+            effective_macro_ntz = False
+
+        is_ntz_active = effective_macro_ntz or is_asset_ntz
+        ntz_reason = macro_ntz_reason if effective_macro_ntz else (
             ntz_eval.get("reasons", ["Asset in No Trade Zone"])[0] if ntz_eval.get("reasons") else "Asset in No Trade Zone"
         )
 
@@ -1631,21 +1651,39 @@ class SignalGenerationSystem:
                     suppressed_sig["is_trade_active"] = False
                     suppressed_sig["ineligible_reason"] = f"HORIZON_{hz_label}_SUPPRESSED_IN_EXPERIMENT_1"
 
-        # Check macro NTZ status
+        # Check macro NTZ status: Flash Dump halts all signals; Squeeze/Micro-volatility exempts boundary & coiling alpha
         is_macro_ntz, macro_ntz_reason = self.is_macro_no_trade_zone(btc_shield_state)
-        if is_macro_ntz:
+        is_macro_dump = (
+            btc_shield_state.get("regime") == "FLASH_DUMP" or
+            btc_shield_state.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "ALERT_DUMP", "FLASH_DUMP"] or
+            "DEFENSIVE_CASH_ONLY" in str(btc_shield_state.get("altcoin_posture", ""))
+        )
+        if is_macro_dump:
             qualified_signals.clear()
+        elif is_macro_ntz:
+            # Squeeze / micro-volatility NTZ: Hold back middle chop to preserve capital, preserve boundary & coiling setups
+            for hz in list(qualified_signals.keys()):
+                sig_obj = qualified_signals[hz]
+                is_boundary_or_coiling = bool(
+                    sig_obj.get("is_ob_setup") or
+                    any(k in str(sig_obj.get("decision", "")).upper() for k in [
+                        "ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "RANGE_SUPPORT",
+                        "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT", "RANGE_BOUNCE"
+                    ])
+                )
+                if not is_boundary_or_coiling:
+                    qualified_signals.pop(hz)
 
         is_trade_active = len(qualified_signals) > 0
         qualified_horizons = list(qualified_signals.keys())
 
         # Check if asset was vetoed by No Trade Zone or Negative News
         ntz_vetoed = [s for s in all_candidate_signals.values() if s.get("is_ntz_active")]
-        is_asset_in_ntz = is_macro_ntz or (len(ntz_vetoed) > 0)
-        ntz_active_reason = macro_ntz_reason if is_macro_ntz else (
+        is_asset_in_ntz = (is_macro_dump or (is_macro_ntz and len(qualified_signals) == 0) or (len(ntz_vetoed) > 0 and len(qualified_signals) == 0))
+        ntz_active_reason = macro_ntz_reason if (is_macro_dump or (is_macro_ntz and len(qualified_signals) == 0)) else (
             ntz_vetoed[0].get("ntz_reason", "Asset in No Trade Zone") if ntz_vetoed else None
         )
-        ntz_active_badge = "MACRO NTZ" if is_macro_ntz else (
+        ntz_active_badge = "MACRO NTZ" if (is_macro_dump or (is_macro_ntz and len(qualified_signals) == 0)) else (
             ntz_vetoed[0].get("ntz_badge", "NO TRADE ZONE") if ntz_vetoed else "TRADE ZONE APPROVED"
         )
 

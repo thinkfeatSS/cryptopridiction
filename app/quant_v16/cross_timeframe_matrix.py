@@ -155,7 +155,7 @@ class CrossTimeframeMatrixEngine:
         p_1d_chop = getattr(p_1d, "chop_index", 50.0)
         p_15m_adx = getattr(p_15m, "adx", 20.0)
 
-        is_coiling_spring = bool((htf_bullish or htf_bearish) and ltf_coiling)
+        is_coiling_spring = bool((htf_bullish or htf_bearish or htf_ranging) and ltf_coiling)
         is_strong_secular_trend = bool(
             ((htf_bullish and ltf_bullish) or (htf_bearish and ltf_bearish)) and
             p_1d_adx >= 25.0 and p_15m_adx >= 25.0 and p_1d_chop < 42.0
@@ -276,20 +276,30 @@ class CrossTimeframeMatrixEngine:
                         "rationale": f"Vetoed by 1D Range Extreme: Only {headroom_to_low:.1f}% headroom remaining before hitting range floor.",
                     }
 
-        # PRIORITY 3: Coiling Spring / Breakout Preparation (HTF Trending + LTF Coiling Squeeze)
-        # 15M is compressed in an Inside Bar/NR7/BBW squeeze ready to erupt into the HTF trend
-        elif (htf_bullish or htf_bearish) and ltf_coiling:
-            direction = "LONG" if htf_bullish else "SHORT"
+        # PRIORITY 3: Coiling Spring / Breakout Preparation (HTF Trending or Ranging + LTF Coiling Squeeze)
+        # 15M is compressed in an Inside Bar/NR7/BBW squeeze ready to erupt
+        elif (htf_bullish or htf_bearish or htf_ranging) and ltf_coiling:
+            if htf_bullish:
+                direction = "LONG"
+                headroom = headroom_to_high
+            elif htf_bearish:
+                direction = "SHORT"
+                headroom = headroom_to_low
+            else:
+                # Squeeze inside macro range box: directed towards opposite boundary with ample headroom
+                direction = "LONG" if range_pos < 0.50 else "SHORT"
+                headroom = headroom_to_high if direction == "LONG" else headroom_to_low
+
             return {
                 "archetype": InstitutionalArchetype.ARCHETYPE_B_COILING_BREAKOUT.value,
                 "trade_permitted": True,
                 "strategy": "COILING_VOLATILITY_BREAKOUT",
                 "dominant_direction": direction,
                 "allocation_pct": 85.0,
-                "headroom_pct": headroom_to_high if direction == "LONG" else headroom_to_low,
+                "headroom_pct": headroom,
                 "htf_range_high": htf_high,
                 "htf_range_low": htf_low,
-                "rationale": f"Spring-loaded coiling compression on 15M (Inside Bar/NR7/BBW Squeeze) ready to expand in 1D {direction} trend direction.",
+                "rationale": f"Spring-loaded coiling compression on 15M (Inside Bar/NR7/BBW Squeeze) ready to expand {direction} with {headroom:.1f}% headroom.",
             }
 
         # PRIORITY 4: Secular Super-Trend Expansion (Both HTF and LTF Trending in Same Direction)
