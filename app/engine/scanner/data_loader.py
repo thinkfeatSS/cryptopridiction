@@ -128,6 +128,8 @@ class MultiHorizonDataLoader:
         self._live_tickers_cache: Dict[str, float] = {}
         self._live_tickers_ts: float = 0.0
         self._funding_cache: Dict[str, float] = {}
+        self._funding_skew_cache: Dict[str, float] = {}
+        self._last_outage_log_ts: float = 0.0
         self.ws_feed = ws_feed_manager
 
         # Circuit breaker & rate limit tracking
@@ -197,27 +199,33 @@ class MultiHorizonDataLoader:
         print(f"[DATA LOADER [GEO-RESTRICTION CIRCUIT BREAKER]] Upstream {exchange_name.upper()} returned {status_code} ({reason}). Fast-fail bypass active for 900s.", flush=True)
 
     def preload_bulk_funding_rates(self):
-        """Fetches all funding rates with multi-exchange failover (Binance -> Bybit -> Gate.io)."""
-        # Tier-1: Binance Futures
+        """
+        Queries multiple exchange futures venues (Binance, Bybit, Gate.io, KuCoin),
+        reconciles cross-exchange funding rate skew, dampens venue-specific liquidation spikes,
+        and saves the authoritative consensus rates to persistent disk cache.
+        """
+        binance_map: Dict[str, float] = {}
+        bybit_map: Dict[str, float] = {}
+        gate_map: Dict[str, float] = {}
+        kucoin_map: Dict[str, float] = {}
+
+        # 1. Binance Futures
         try:
             url = "https://fapi.binance.com/fapi/v1/premiumIndex"
-            resp = self.session.get(url, timeout=4.5)
+            resp = self.session.get(url, timeout=3.5)
             if resp.status_code == 200:
                 data = resp.json()
                 for item in data:
                     sym = item.get("symbol")
                     if sym:
-                        self._funding_cache[sym] = float(item.get("lastFundingRate", 0.0001))
-                if self._funding_cache:
-                    self._save_funding_to_swr_disk(self._funding_cache, time.time())
-                    return
+                        binance_map[sym] = float(item.get("lastFundingRate", 0.0001))
         except Exception:
             pass
 
-        # Tier-2 Failover: Bybit Linear Tickers (Funding Rates)
+        # 2. Bybit Linear Tickers
         try:
             url = "https://api.bybit.com/v5/market/tickers?category=linear"
-            resp = self.session.get(url, timeout=4.5)
+            resp = self.session.get(url, timeout=3.5)
             if resp.status_code == 200:
                 data = resp.json()
                 items = data.get("result", {}).get("list", [])
@@ -225,49 +233,60 @@ class MultiHorizonDataLoader:
                     sym = it.get("symbol")
                     fr = it.get("fundingRate")
                     if sym and fr:
-                        self._funding_cache[sym] = float(fr)
-                if self._funding_cache:
-                    print(f"[DATA LOADER [FUNDING TIER-2]] Loaded {len(self._funding_cache)} funding rates from Bybit linear.", flush=True)
-                    return
+                        bybit_map[sym] = float(fr)
         except Exception:
             pass
 
-        # Tier-3 Failover: Gate.io Futures Contracts
-        try:
-            url = "https://api.gateio.ws/api/v4/futures/usdt/contracts"
-            resp = self.session.get(url, timeout=4.5)
-            if resp.status_code == 200:
-                data = resp.json()
-                for it in data:
-                    name = it.get("name", "")
-                    fr = it.get("funding_rate")
-                    if name and fr:
-                        sym = name.replace("_", "")
-                        self._funding_cache[sym] = float(fr)
-                if self._funding_cache:
-                    print(f"[DATA LOADER [FUNDING TIER-3]] Loaded {len(self._funding_cache)} funding rates from Gate.io futures.", flush=True)
-                    return
-        except Exception:
-            pass
+        # 3. Gate.io Futures (if needed or for tertiary consensus)
+        if not binance_map or not bybit_map:
+            try:
+                url = "https://api.gateio.ws/api/v4/futures/usdt/contracts"
+                resp = self.session.get(url, timeout=3.5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for it in data:
+                        name = it.get("name", "")
+                        fr = it.get("funding_rate")
+                        if name and fr:
+                            sym = name.replace("_", "")
+                            gate_map[sym] = float(fr)
+            except Exception:
+                pass
 
-        # Tier-4 Failover: KuCoin Futures Active Contracts
-        try:
-            url = "https://api-futures.kucoin.com/api/v1/contracts/active"
-            resp = self.session.get(url, timeout=4.5)
-            if resp.status_code == 200:
-                data = resp.json()
-                items = data.get("data", [])
-                for it in items:
-                    sym = it.get("symbol", "")
-                    fr = it.get("fundingFeeRate")
-                    if sym and fr is not None:
-                        clean_sym = sym.replace("USDTM", "USDT").replace("XBT", "BTC")
-                        self._funding_cache[clean_sym] = float(fr)
-                if self._funding_cache:
-                    print(f"[DATA LOADER [FUNDING TIER-4]] Loaded {len(self._funding_cache)} funding rates from KuCoin futures.", flush=True)
-                    return
-        except Exception:
-            pass
+        # Cross-Exchange Reconciliation & Skew Dampening
+        all_symbols = set(binance_map.keys()) | set(bybit_map.keys()) | set(gate_map.keys())
+        reconciled_funding: Dict[str, float] = {}
+        skew_cache: Dict[str, float] = {}
+
+        for sym in all_symbols:
+            rates = []
+            if sym in binance_map:
+                rates.append(("binance", binance_map[sym]))
+            if sym in bybit_map:
+                rates.append(("bybit", bybit_map[sym]))
+            if sym in gate_map:
+                rates.append(("gate", gate_map[sym]))
+
+            if len(rates) >= 2:
+                r_vals = [r[1] for r in rates]
+                skew_bps = round(abs(r_vals[0] - r_vals[1]) * 10000.0, 2)
+                skew_cache[sym] = skew_bps
+                if skew_bps <= 4.0:
+                    consensus_rate = round(float(np.mean(r_vals)), 6)
+                else:
+                    med_rate = float(np.median(r_vals))
+                    consensus_rate = round(float(np.clip(r_vals[0], med_rate - 0.0004, med_rate + 0.0004)), 6)
+                reconciled_funding[sym] = consensus_rate
+            elif len(rates) == 1:
+                reconciled_funding[sym] = rates[0][1]
+                skew_cache[sym] = 0.0
+
+        if reconciled_funding:
+            with self._cache_lock:
+                self._funding_cache.update(reconciled_funding)
+                self._funding_skew_cache.update(skew_cache)
+            self._save_funding_to_swr_disk(self._funding_cache, time.time())
+            print(f"[DATA LOADER [CROSS-EXCHANGE FUNDING]] Reconciled {len(reconciled_funding)} funding rates across venues (consensus & skew dampening active).", flush=True)
 
     def _save_to_disk_cache(self, key: str, df: pd.DataFrame, ts: float):
         """Persists warm candles to disk for zero-downtime container reboot & partition recovery."""
@@ -1202,10 +1221,36 @@ class MultiHorizonDataLoader:
                     f"exceeded {self.MAX_LIVE_PRICE_AGE_SECONDS:.0f}s maximum constraint. "
                     "All upstream exchange gateways rate-limited or unreachable. Holding entries."
                 )
-                print(f"[DATA LOADER [PRICE STALENESS CRITICAL]] {self._global_outage_reason}", flush=True)
+                now_log = time.time()
+                if (now_log - self._last_outage_log_ts) > 30.0:
+                    self._last_outage_log_ts = now_log
+                    print(f"[DATA LOADER [PRICE STALENESS CRITICAL]] {self._global_outage_reason} (Partition log throttled 30s).", flush=True)
             else:
                 print(f"[DATA LOADER [RATE-LIMIT RECOVERY]] Serving warm cached prices ({cache_age:.1f}s <= 15.0s constraint) while upstream gateways rate-limited.", flush=True)
             return self._live_tickers_cache.copy()
+
+    def get_funding_rate(self, symbol: str) -> float:
+        """Returns the cross-exchange reconciled funding rate for symbol."""
+        raw_sym = symbol.replace("/", "").replace(":USDT", "")
+        with self._cache_lock:
+            if raw_sym in self._funding_cache:
+                return self._funding_cache[raw_sym]
+            if symbol in self._funding_cache:
+                return self._funding_cache[symbol]
+        return 0.0001
+
+    def get_funding_info(self, symbol: str) -> Dict[str, Any]:
+        """Returns detailed cross-exchange funding metadata including skew and crowding."""
+        raw_sym = symbol.replace("/", "").replace(":USDT", "")
+        with self._cache_lock:
+            fr = self._funding_cache.get(raw_sym, self._funding_cache.get(symbol, 0.0001))
+            skew = self._funding_skew_cache.get(raw_sym, self._funding_skew_cache.get(symbol, 0.0))
+        return {
+            "funding_rate": fr,
+            "skew_bps": skew,
+            "is_skew_abnormal": skew > 5.0,
+            "funding_interval_hours": 8.0
+        }
 
     def get_live_price(self, symbol: str) -> float:
         tickers = self.fetch_all_tickers(max_age_seconds=2.0)

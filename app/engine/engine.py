@@ -30,7 +30,7 @@ class UnifiedCryptoEngine:
         print("[ENGINE 🚀] Initializing Unified 9-Horizon Quantitative Engine...")
         self.scanner = MultiHorizonScanner(top_n=top_n)
         self.data_loader = self.scanner.loader
-        self.signal_system = SignalGenerationSystem()
+        self.signal_system = SignalGenerationSystem(data_loader=self.data_loader)
         self.paper_bot = PaperTradingBot(ledger_file=os.path.join(self.export_dir, "paper_trading_ledger.json"))
 
         # Macro No Trade Zone (NTZ) State Tracking

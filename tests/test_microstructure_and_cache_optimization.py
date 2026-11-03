@@ -581,6 +581,133 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
         self.assertIsNotNone(scanner.loader)
         self.assertIsNotNone(scanner.btc_shield)
 
+    def test_cross_exchange_funding_skew_reconciliation(self):
+        """
+        Verifies cross-exchange funding rate reconciliation and venue skew dampening.
+        1. When skew <= 4.0 bps, rate is mean consensus.
+        2. When skew > 4.0 bps, rate is median-clamped and flagged as abnormal skew.
+        3. SignalGenerationSystem retrieves and propagates dynamic funding metadata.
+        """
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        from unittest.mock import MagicMock
+
+        loader = MultiHorizonDataLoader()
+
+        # Mock requests to return skewed rates
+        mock_binance_resp = MagicMock()
+        mock_binance_resp.status_code = 200
+        mock_binance_resp.json.return_value = [
+            {"symbol": "BTCUSDT", "lastFundingRate": "0.0008"},
+            {"symbol": "ETHUSDT", "lastFundingRate": "0.00012"},
+        ]
+
+        mock_bybit_resp = MagicMock()
+        mock_bybit_resp.status_code = 200
+        mock_bybit_resp.json.return_value = {
+            "result": {
+                "list": [
+                    {"symbol": "BTCUSDT", "fundingRate": "0.0002"},
+                    {"symbol": "ETHUSDT", "fundingRate": "0.00010"},
+                ]
+            }
+        }
+
+        def mock_get(url, *args, **kwargs):
+            if "binance" in url:
+                return mock_binance_resp
+            if "bybit" in url:
+                return mock_bybit_resp
+            mock_404 = MagicMock()
+            mock_404.status_code = 404
+            return mock_404
+
+        loader.session.get = mock_get
+        loader.preload_bulk_funding_rates()
+
+        # 1. Verify ETH (skew = 0.2 bps <= 4.0 bps) -> Mean consensus: 0.00011
+        eth_info = loader.get_funding_info("ETH/USDT")
+        self.assertAlmostEqual(eth_info["funding_rate"], 0.00011, places=5)
+        self.assertAlmostEqual(eth_info["skew_bps"], 0.2, places=1)
+        self.assertFalse(eth_info["is_skew_abnormal"])
+
+        # 2. Verify BTC (skew = 6.0 bps > 4.0 bps) -> Clamped around median (0.0005)
+        btc_info = loader.get_funding_info("BTC/USDT")
+        self.assertAlmostEqual(btc_info["skew_bps"], 6.0, places=1)
+        self.assertTrue(btc_info["is_skew_abnormal"])
+        self.assertLessEqual(btc_info["funding_rate"], 0.0009)
+
+        # 3. Verify SignalGenerationSystem integration with loader
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+        sig_sys = SignalGenerationSystem(data_loader=loader)
+        self.assertIsNotNone(sig_sys.data_loader)
+        self.assertEqual(sig_sys.data_loader.get_funding_rate("ETH/USDT"), eth_info["funding_rate"])
+
+    def test_sub_second_tick_jitter_dampening_on_partition(self):
+        """
+        Verifies that during upstream network partitions or price staleness:
+        1. Standalone tick watcher does NOT redundantly call ticker_fetch_fn during partition.
+        2. Applies adaptive backoff and desynchronization jitter.
+        3. Instantly restores normal sub-second polling when partition clears.
+        """
+        import tempfile
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger_file = os.path.join(tmpdir, "test_ledger.json")
+            bot = PaperTradingBot(ledger_file=ledger_file)
+
+            # Seed an open position so the tick watcher activates
+            bot.data["open_positions"] = [{
+                "symbol": "BTC/USDT",
+                "entry_price": 65000.0,
+                "current_price": 65000.0,
+                "direction": "LONG",
+                "position_size": 0.1,
+                "margin_allocated": 1300.0,
+                "leverage": 5,
+                "desk": "scalp",
+                "horizon": "15M",
+                "stop_loss": 64000.0,
+                "take_profit_1": 66000.0,
+                "take_profit_2": 67000.0,
+                "take_profit_3": 68000.0,
+                "tp1_hit": False,
+                "tp2_hit": False,
+                "tp3_hit": False,
+                "tier0_breakeven_activated": False,
+                "opened_at": "2026-03-30T12:00:00Z"
+            }]
+
+            fetch_calls = []
+            def mock_ticker_fetch():
+                fetch_calls.append(time.time())
+                return {"BTC/USDT": 65100.0}
+
+            is_partition = [True]
+            def mock_partition_check():
+                return is_partition[0]
+
+            # Start daemon with short interval
+            bot.start_tick_daemon(
+                ticker_fetch_fn=mock_ticker_fetch,
+                interval_seconds=0.1,
+                partition_check_fn=mock_partition_check
+            )
+
+            # Let it run for 0.4s while partition is TRUE
+            time.sleep(0.4)
+            # While partitioned, ticker_fetch_fn should NOT have been called
+            self.assertEqual(len(fetch_calls), 0, "ticker_fetch_fn must not be called during partition")
+
+            # Now resolve partition
+            is_partition[0] = False
+            # Wait for backoff to complete and normal tick to execute
+            time.sleep(1.8)
+            bot.stop_tick_daemon()
+
+            # ticker_fetch_fn should now have been called once partition cleared
+            self.assertGreaterEqual(len(fetch_calls), 1, "ticker_fetch_fn should resume once partition heals")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -153,7 +153,8 @@ class SignalGenerationSystem:
     - Resolves multi-horizon dominance to emit qualified trade signals strictly for 15M, 1H, and 24H.
     """
 
-    def __init__(self):
+    def __init__(self, data_loader=None):
+        self.data_loader = data_loader
         self.feature_extractor = CandleDynamicsFeatureExtractor()
         self.model_registry = PerCoinModelRegistry()
         self.meta_labeler = CoinSpecificMetaLabeler()
@@ -305,11 +306,15 @@ class SignalGenerationSystem:
         # ---------------------------------------------------------------------
         # 2b. Asset-Level No Trade Zone Check on active timeframe with strategy context
         # ---------------------------------------------------------------------
+        funding_info = self.data_loader.get_funding_info(symbol) if self.data_loader else None
+        current_funding_rate = float(funding_info.get("funding_rate", 0.0001)) if funding_info else 0.0001
+
         ntz_eval = no_trade_zone_engine.evaluate_asset_ntz(
             df=df_active,
             current_price=current_price,
             anchor_tf=tf_key,
             btc_shield_info=btc_shield_state,
+            funding_info=funding_info,
             stats_24h={"quoteVolume": volume_24h_usd} if (volume_24h_usd and volume_24h_usd > 0) else None,
             ob_setup=order_block_setup,
             alignment_score=float(alignment_score),
@@ -539,7 +544,7 @@ class SignalGenerationSystem:
             market_type="futures",
             observed_spread_bps=spread_bps,
             est_holding_hours=holding_hours,
-            current_funding_rate=0.0001,
+            current_funding_rate=current_funding_rate,
             assumption=ExecutionAssumption.BASE,
             position_size_usd=1000.0,
             volume_24h_usd=vol_24h_usd
@@ -877,6 +882,7 @@ class SignalGenerationSystem:
                 "funding_pct": cost_breakdown.funding_pct,
                 "total_cost_pct": cost_breakdown.total_cost_pct
             },
+            "funding_info": funding_info,
             "passes_ev_hurdle": ev_result.passes_ev_hurdle,
             "ev_decision_reason": ev_result.decision_reason,
             "tp1_price": tp1_price,
