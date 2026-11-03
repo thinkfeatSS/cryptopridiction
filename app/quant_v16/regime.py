@@ -466,6 +466,15 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
     if curr_status in ["ALERT_DUMP", "FLASH_DUMP", "BEAR_CASCADE_BLACKOUT"] or curr_reg == "FLASH_DUMP":
         return shield
 
+    # If prolonged multi-day micro-volatility is active, preserve capital preservation NTZ
+    if shield.get("is_prolonged_micro_volatility"):
+        shield["status_code"] = "NO_TRADE_ZONE"
+        shield["regime"] = "RANGE_SQUEEZE"
+        shield["regime_label"] = "🛑 PROLONGED MULTI-DAY MICRO-VOLATILITY (NO TRADE ZONE ACTIVE)"
+        shield["altcoin_posture"] = "NO_TRADE_ZONE_CAPITAL_PRESERVATION"
+        shield["is_ntz_active"] = True
+        return shield
+
     # Synchronize authoritative V16 regime properties
     shield["regime"] = v16_reg
     shield["status_code"] = v16_reg

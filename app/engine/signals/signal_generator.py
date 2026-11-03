@@ -331,13 +331,33 @@ class SignalGenerationSystem:
             btc_shield_state.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "ALERT_DUMP", "FLASH_DUMP"] or
             "DEFENSIVE_CASH_ONLY" in str(btc_shield_state.get("altcoin_posture", ""))
         )
-        is_boundary_or_coiling = bool(
-            is_ob_setup or
-            any(k in str(canonical_strategy).upper() for k in [
-                "ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "RANGE_SUPPORT",
-                "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT", "RANGE_BOUNCE"
-            ])
+        is_prolonged_micro = bool(
+            btc_shield_state.get("is_prolonged_micro_volatility") or
+            "MICRO_VOLATILITY" in str(btc_shield_state.get("status_code", "")) or
+            "MICRO_VOLATILITY" in str(btc_shield_state.get("reason", ""))
         )
+
+        range_pos = 50.0
+        if "1h" in dfs_9 and not dfs_9["1h"].empty:
+            df_r = dfs_9["1h"]
+            rh = float(df_r["high"].rolling(20).max().iloc[-1])
+            rl = float(df_r["low"].rolling(20).min().iloc[-1])
+            if (rh - rl) > 1e-8:
+                range_pos = float(np.clip(((current_price - rl) / (rh - rl)) * 100.0, 0.0, 100.0))
+
+        is_extreme_boundary = (range_pos <= 20.0 and direction == "LONG") or (range_pos >= 80.0 and direction == "SHORT")
+        is_breakout_coiling = any(k in str(canonical_strategy).upper() for k in ["COILING", "EXPANSION", "BREAKOUT", "SQUEEZE_BREAKOUT"])
+
+        if is_prolonged_micro:
+            is_boundary_or_coiling = bool(is_ob_setup or is_extreme_boundary or is_breakout_coiling)
+        else:
+            is_boundary_or_coiling = bool(
+                is_ob_setup or
+                any(k in str(canonical_strategy).upper() for k in [
+                    "ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "RANGE_SUPPORT",
+                    "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT", "RANGE_BOUNCE"
+                ])
+            )
 
         effective_macro_ntz = is_macro_ntz
         if is_macro_ntz and not is_macro_dump and is_boundary_or_coiling:
@@ -1755,16 +1775,29 @@ class SignalGenerationSystem:
         if is_macro_dump:
             qualified_signals.clear()
         elif is_macro_ntz:
+            is_prolonged_micro = bool(
+                btc_shield_state.get("is_prolonged_micro_volatility") or
+                "MICRO_VOLATILITY" in str(btc_shield_state.get("status_code", "")) or
+                "MICRO_VOLATILITY" in str(btc_shield_state.get("reason", ""))
+            )
             # Squeeze / micro-volatility NTZ: Hold back middle chop to preserve capital, preserve boundary & coiling setups
             for hz in list(qualified_signals.keys()):
                 sig_obj = qualified_signals[hz]
-                is_boundary_or_coiling = bool(
-                    sig_obj.get("is_ob_setup") or
-                    any(k in str(sig_obj.get("decision", "")).upper() for k in [
-                        "ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "RANGE_SUPPORT",
-                        "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT", "RANGE_BOUNCE", "SQUEEZE"
-                    ])
-                )
+                is_ob = sig_obj.get("is_ob_setup")
+                dec_str = str(sig_obj.get("decision", "")).upper()
+                if is_prolonged_micro:
+                    is_boundary_or_coiling = bool(
+                        is_ob or
+                        any(k in dec_str for k in ["ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "COILING", "EXPANSION", "BREAKOUT", "SQUEEZE_BREAKOUT"])
+                    )
+                else:
+                    is_boundary_or_coiling = bool(
+                        is_ob or
+                        any(k in dec_str for k in [
+                            "ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "RANGE_SUPPORT",
+                            "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT", "RANGE_BOUNCE", "SQUEEZE"
+                        ])
+                    )
                 if not is_boundary_or_coiling:
                     qualified_signals.pop(hz)
 

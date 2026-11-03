@@ -129,6 +129,7 @@ class MultiHorizonDataLoader:
         self._live_tickers_ts: float = 0.0
         self._funding_cache: Dict[str, float] = {}
         self._funding_skew_cache: Dict[str, float] = {}
+        self._funding_interval_cache: Dict[str, float] = {}
         self._last_outage_log_ts: float = 0.0
         self.ws_feed = ws_feed_manager
 
@@ -201,13 +202,14 @@ class MultiHorizonDataLoader:
     def preload_bulk_funding_rates(self):
         """
         Queries multiple exchange futures venues (Binance, Bybit, Gate.io, KuCoin),
+        normalizes asymmetric funding settlement intervals (4h, 2h -> 8h basis points),
         reconciles cross-exchange funding rate skew, dampens venue-specific liquidation spikes,
         and saves the authoritative consensus rates to persistent disk cache.
         """
-        binance_map: Dict[str, float] = {}
-        bybit_map: Dict[str, float] = {}
-        gate_map: Dict[str, float] = {}
-        kucoin_map: Dict[str, float] = {}
+        binance_map: Dict[str, Tuple[float, float, float]] = {}  # sym -> (norm_8h_rate, interval_h, raw_rate)
+        bybit_map: Dict[str, Tuple[float, float, float]] = {}
+        gate_map: Dict[str, Tuple[float, float, float]] = {}
+        kucoin_map: Dict[str, Tuple[float, float, float]] = {}
 
         # 1. Binance Futures
         try:
@@ -218,7 +220,10 @@ class MultiHorizonDataLoader:
                 for item in data:
                     sym = item.get("symbol")
                     if sym:
-                        binance_map[sym] = float(item.get("lastFundingRate", 0.0001))
+                        raw_fr = float(item.get("lastFundingRate", 0.0001))
+                        interval_h = float(item.get("fundingIntervalHours", 8.0) or 8.0)
+                        norm_fr = raw_fr * (8.0 / max(1.0, interval_h))
+                        binance_map[sym] = (norm_fr, interval_h, raw_fr)
         except Exception:
             pass
 
@@ -233,7 +238,10 @@ class MultiHorizonDataLoader:
                     sym = it.get("symbol")
                     fr = it.get("fundingRate")
                     if sym and fr:
-                        bybit_map[sym] = float(fr)
+                        raw_fr = float(fr)
+                        interval_h = float(it.get("fundingIntervalHour", 8.0) or 8.0)
+                        norm_fr = raw_fr * (8.0 / max(1.0, interval_h))
+                        bybit_map[sym] = (norm_fr, interval_h, raw_fr)
         except Exception:
             pass
 
@@ -249,7 +257,11 @@ class MultiHorizonDataLoader:
                         fr = it.get("funding_rate")
                         if name and fr:
                             sym = name.replace("_", "")
-                            gate_map[sym] = float(fr)
+                            raw_fr = float(fr)
+                            interval_sec = float(it.get("funding_interval", 28800) or 28800)
+                            interval_h = max(1.0, interval_sec / 3600.0)
+                            norm_fr = raw_fr * (8.0 / interval_h)
+                            gate_map[sym] = (norm_fr, interval_h, raw_fr)
             except Exception:
                 pass
 
@@ -257,15 +269,22 @@ class MultiHorizonDataLoader:
         all_symbols = set(binance_map.keys()) | set(bybit_map.keys()) | set(gate_map.keys())
         reconciled_funding: Dict[str, float] = {}
         skew_cache: Dict[str, float] = {}
+        interval_cache: Dict[str, float] = {}
 
         for sym in all_symbols:
             rates = []
+            native_intervals = []
             if sym in binance_map:
-                rates.append(("binance", binance_map[sym]))
+                rates.append(("binance", binance_map[sym][0]))
+                native_intervals.append(binance_map[sym][1])
             if sym in bybit_map:
-                rates.append(("bybit", bybit_map[sym]))
+                rates.append(("bybit", bybit_map[sym][0]))
+                native_intervals.append(bybit_map[sym][1])
             if sym in gate_map:
-                rates.append(("gate", gate_map[sym]))
+                rates.append(("gate", gate_map[sym][0]))
+                native_intervals.append(gate_map[sym][1])
+
+            interval_cache[sym] = native_intervals[0] if native_intervals else 8.0
 
             if len(rates) >= 2:
                 r_vals = [r[1] for r in rates]
@@ -285,6 +304,7 @@ class MultiHorizonDataLoader:
             with self._cache_lock:
                 self._funding_cache.update(reconciled_funding)
                 self._funding_skew_cache.update(skew_cache)
+                self._funding_interval_cache.update(interval_cache)
             self._save_funding_to_swr_disk(self._funding_cache, time.time())
             print(f"[DATA LOADER [CROSS-EXCHANGE FUNDING]] Reconciled {len(reconciled_funding)} funding rates across venues (consensus & skew dampening active).", flush=True)
 
@@ -1240,16 +1260,20 @@ class MultiHorizonDataLoader:
         return 0.0001
 
     def get_funding_info(self, symbol: str) -> Dict[str, Any]:
-        """Returns detailed cross-exchange funding metadata including skew and crowding."""
+        """Returns detailed cross-exchange funding metadata including skew, crowding, and asymmetric settlement interval."""
         raw_sym = symbol.replace("/", "").replace(":USDT", "")
         with self._cache_lock:
             fr = self._funding_cache.get(raw_sym, self._funding_cache.get(symbol, 0.0001))
             skew = self._funding_skew_cache.get(raw_sym, self._funding_skew_cache.get(symbol, 0.0))
+            native_interval = self._funding_interval_cache.get(raw_sym, self._funding_interval_cache.get(symbol, 8.0))
         return {
             "funding_rate": fr,
+            "raw_funding_rate": round(fr * (native_interval / 8.0), 6),
             "skew_bps": skew,
             "is_skew_abnormal": skew > 5.0,
-            "funding_interval_hours": 8.0
+            "funding_interval_hours": native_interval,
+            "is_asymmetric_interval": native_interval != 8.0,
+            "standardized_interval_hours": 8.0
         }
 
     def get_live_price(self, symbol: str) -> float:

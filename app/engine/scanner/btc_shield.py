@@ -85,6 +85,41 @@ class BtcPredictiveMarketShield:
             ret_24h = (c_now - float(df_1d["close"].iloc[-2])) / (float(df_1d["close"].iloc[-2]) + 1e-10)
             ema50_1d = float(df_1d["close"].ewm(span=50, adjust=False).mean().iloc[-1])
 
+        # Multi-day 48H micro-volatility calculation
+        btc_atr_48h_pct = 1.0
+        try:
+            if df_1h is not None and len(df_1h) >= 24:
+                window_h = min(48, len(df_1h))
+                sub_h = df_1h.iloc[-window_h:]
+                tr_48 = np.maximum(
+                    sub_h["high"] - sub_h["low"],
+                    np.maximum((sub_h["high"] - sub_h["close"].shift(1)).abs(),
+                               (sub_h["low"] - sub_h["close"].shift(1)).abs())
+                )
+                atr_48 = float(tr_48.mean())
+                btc_atr_48h_pct = float((atr_48 / (c_now + 1e-10)) * 100.0)
+            elif df_4h is not None and len(df_4h) >= 6:
+                window_4h = min(12, len(df_4h))
+                sub_4h = df_4h.iloc[-window_4h:]
+                tr_48 = np.maximum(
+                    sub_4h["high"] - sub_4h["low"],
+                    np.maximum((sub_4h["high"] - sub_4h["close"].shift(1)).abs(),
+                               (sub_4h["low"] - sub_4h["close"].shift(1)).abs())
+                )
+                atr_48 = float(tr_48.mean())
+                btc_atr_48h_pct = float((atr_48 / (c_now + 1e-10)) * 100.0)
+            elif df_1d is not None and len(df_1d) >= 2:
+                sub_1d = df_1d.iloc[-2:]
+                tr_48 = np.maximum(
+                    sub_1d["high"] - sub_1d["low"],
+                    np.maximum((sub_1d["high"] - sub_1d["close"].shift(1)).abs(),
+                               (sub_1d["low"] - sub_1d["close"].shift(1)).abs())
+                )
+                atr_48 = float(tr_48.mean())
+                btc_atr_48h_pct = float((atr_48 / (c_now + 1e-10)) * 100.0)
+        except Exception:
+            btc_atr_48h_pct = 1.0
+
         # 15M Squeeze & Volatility
         c_series = df_15m["close"]
         h_series = df_15m["high"]
@@ -155,6 +190,8 @@ class BtcPredictiveMarketShield:
         bbw_pctile = float(metrics.get("bb_width_percentile", 15.0))
         # Severe flatline stagnation: Extreme dead market (ADX < 12 or BBW <= 3%ile)
         is_dead_flatline = is_squeeze and ((adx_val < 12.0) or (bbw_pctile <= 3.0))
+        # Prolonged Multi-Day Micro-Volatility: Ultra-tight band (< 0.50% ATR over 48 hours)
+        is_prolonged_micro_vol = (btc_atr_48h_pct > 0.0 and btc_atr_48h_pct < 0.50)
         # Flash dump cascade: Extreme liquidation event
         is_dump_cascade = (ret_15m <= -0.025) or (ret_1h <= -0.05) or (c_now < ema50_1h * 0.95)
 
@@ -172,6 +209,19 @@ class BtcPredictiveMarketShield:
             predicted_trend = "BEAR_CASCADE"
             pred_target = round(c_now * 0.97, 2)
             breakout_pred = "🔻 CRITICAL FLUSH"
+        elif is_prolonged_micro_vol:
+            status_code = "NO_TRADE_ZONE"
+            regime = "RANGE_SQUEEZE"
+            regime_label = "🛑 PROLONGED MULTI-DAY MICRO-VOLATILITY (NO TRADE ZONE ACTIVE)"
+            reason = f"NO TRADE ZONE ACTIVE: Prolonged Multi-Day Micro-Volatility (BTC 48h ATR: {btc_atr_48h_pct:.2f}% < 0.50%). Capital preservation mode active for middle chop; structural boundary touches and coiling breakouts authorized."
+            alt_longs = True
+            alt_shorts = True
+            alt_posture = "NO_TRADE_ZONE_CAPITAL_PRESERVATION"
+            shield_active = False
+            is_ntz_active = True
+            predicted_trend = "SQUEEZE_COILING"
+            pred_target = round(c_now, 2)
+            breakout_pred = "💤 MICRO-VOL SQUEEZE"
         elif is_dead_flatline:
             status_code = "NO_TRADE_ZONE"
             regime = "RANGE_SQUEEZE"
@@ -313,6 +363,8 @@ class BtcPredictiveMarketShield:
             "v16_regime": regime_v16,
             "adx": round(adx_val, 1),
             "bbw_percentile": round(bbw_pctile, 1),
+            "is_prolonged_micro_volatility": is_prolonged_micro_vol,
+            "btc_atr_48h_pct": round(btc_atr_48h_pct, 2),
             "expansion_readiness": expansion_readiness,
             "last_updated_ts": now_ts
         }

@@ -57,6 +57,7 @@ class ExecutionCostEngine:
         assumption: ExecutionAssumption = ExecutionAssumption.BASE,
         position_size_usd: Optional[float] = None,
         volume_24h_usd: Optional[float] = None,
+        funding_interval_hours: float = 8.0,
     ) -> CostBreakdown:
         """
         Estimates total roundtrip costs under specified scenario.
@@ -116,8 +117,9 @@ class ExecutionCostEngine:
         # 4. Funding rate drag (Futures only)
         calc_funding = 0.0
         if is_futures and est_holding_hours > 0:
-            # 1 funding cycle per 8 hours
-            funding_cycles = est_holding_hours / 8.0
+            # Normalized funding cycle duration (standard 8h cycle, or custom if specified)
+            cycle_duration = max(1.0, float(funding_interval_hours))
+            funding_cycles = est_holding_hours / cycle_duration
             calc_funding = abs(current_funding_rate * 100.0) * funding_cycles
 
         fee_pct = round(calc_fee, 4)

@@ -708,6 +708,199 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
             # ticker_fetch_fn should now have been called once partition cleared
             self.assertGreaterEqual(len(fetch_calls), 1, "ticker_fetch_fn should resume once partition heals")
 
+    def test_prolonged_multi_day_micro_volatility_middle_chop_suppression(self):
+        """
+        Verifies that when Bitcoin enters prolonged multi-day micro-volatility (<0.50% ATR over 48h):
+        1. BtcPredictiveMarketShield triggers PROLONGED_MICRO_VOLATILITY NTZ with capital preservation.
+        2. NoTradeZoneEngine strictly vetoes middle chop (20% < range_pos < 80%) for generic strategies.
+        3. Structural boundary touches (range_pos <= 20% or >= 80%), Order Block retests, and coiling breakouts are authorized.
+        """
+        from app.engine.scanner.btc_shield import BtcPredictiveMarketShield
+        from app.quant_v16.no_trade_zone import no_trade_zone_engine, NoTradeZoneReason
+
+        shield = BtcPredictiveMarketShield()
+
+        # Generate 48 hours of 1H BTC candles with ultra-tight 0.25% ATR (micro-volatility band)
+        # Price: 65,000, 1H candle range: 100-150 ($125 / $65000 = ~0.19% ATR)
+        np.random.seed(42)
+        n_bars = 50
+        base_price = 65000.0
+        c_series = [base_price + (i % 3) * 20.0 for i in range(n_bars)]
+        h_series = [c + 60.0 for c in c_series]
+        l_series = [c - 60.0 for c in c_series]
+        v_series = [100.0] * n_bars
+
+        btc_1h_df = pd.DataFrame({
+            "open": c_series,
+            "high": h_series,
+            "low": l_series,
+            "close": c_series,
+            "volume": v_series
+        })
+
+        # 15M candles for fast technicals
+        c_15m = [base_price + (i % 2) * 10.0 for i in range(30)]
+        btc_15m_df = pd.DataFrame({
+            "open": c_15m,
+            "high": [c + 30.0 for c in c_15m],
+            "low": [c - 30.0 for c in c_15m],
+            "close": c_15m,
+            "volume": [50.0] * 30
+        })
+
+        btc_dfs = {
+            "15m": btc_15m_df,
+            "1h": btc_1h_df
+        }
+
+        shield_state = shield.evaluate_regime(btc_dfs, live_btc_price=base_price)
+
+        # 1. Verify BtcPredictiveMarketShield flags prolonged multi-day micro-volatility
+        self.assertTrue(shield_state.get("is_prolonged_micro_volatility"), "Shield must detect prolonged micro-volatility")
+        self.assertTrue(shield_state.get("is_ntz_active"), "Macro NTZ must be active")
+        self.assertEqual(shield_state.get("altcoin_posture"), "NO_TRADE_ZONE_CAPITAL_PRESERVATION")
+        self.assertLess(shield_state.get("btc_atr_48h_pct", 1.0), 0.50)
+
+        # 2. Test Asset in Middle Chop: range_pos = 50.0% (dead middle), generic Range Bounce
+        # Create asset df with current_price dead center in range
+        asset_closes = [100.0, 100.0, 100.0, 100.0] * 6
+        asset_df = pd.DataFrame({
+            "open": [100.0] * 24,
+            "high": [110.0] * 24,
+            "low": [90.0] * 24,
+            "close": [100.0] * 24,  # Dead center: (100 - 90)/(110 - 90) = 50%
+            "volume": [500000.0] * 24
+        })
+
+        middle_chop_eval = no_trade_zone_engine.evaluate_asset_ntz(
+            df=asset_df,
+            current_price=100.0,
+            anchor_tf="1h",
+            btc_shield_info=shield_state,
+            direction="LONG",
+            decision="RANGE_BOUNCE_LONG"
+        )
+        self.assertTrue(middle_chop_eval["is_ntz"], "Middle chop must be strictly vetoed in prolonged micro-volatility")
+        self.assertEqual(middle_chop_eval["code"], NoTradeZoneReason.PROLONGED_MICRO_VOLATILITY.value)
+        self.assertEqual(middle_chop_eval["badge"], "MICRO-VOL CHOP")
+
+        # 3. Test Structural Boundary Touch: range_pos <= 20.0% (extreme support boundary)
+        c_list = [90.0, 110.0] * 12
+        c_list[-1] = 82.0
+        boundary_asset_df = pd.DataFrame({
+            "open": c_list,
+            "high": [c + 5.0 for c in c_list],
+            "low": [c - 5.0 for c in c_list],
+            "close": c_list,
+            "volume": [500000.0] * 24
+        })
+
+        boundary_eval = no_trade_zone_engine.evaluate_asset_ntz(
+            df=boundary_asset_df,
+            current_price=82.0,
+            anchor_tf="1h",
+            btc_shield_info=shield_state,
+            alignment_score=0.8,
+            meta_win_prob=0.65,
+            direction="LONG",
+            decision="RANGE_SUPPORT_LONG"
+        )
+        self.assertFalse(boundary_eval["is_ntz"], "Structural boundary touch at support must be authorized")
+
+        # 4. Test Institutional Order Block Retest in middle: has_fresh_ob = True
+        ob_middle_eval = no_trade_zone_engine.evaluate_asset_ntz(
+            df=asset_df,
+            current_price=100.0,
+            anchor_tf="1h",
+            btc_shield_info=shield_state,
+            ob_setup={"setup_detected": True, "in_order_block_zone": True, "is_touching": True, "ob_zone_high": 100.5, "ob_zone_low": 99.5},
+            alignment_score=0.8,
+            meta_win_prob=0.65,
+            direction="LONG",
+            decision="ORDER_BLOCK_LONG"
+        )
+        self.assertFalse(ob_middle_eval["is_ntz"], "Institutional Order Block setup must be authorized")
+
+        # 5. Test Coiling Breakout with volume expansion: decision = "SQUEEZE_BREAKOUT"
+        breakout_eval = no_trade_zone_engine.evaluate_asset_ntz(
+            df=asset_df,
+            current_price=100.0,
+            anchor_tf="1h",
+            btc_shield_info=shield_state,
+            alignment_score=0.8,
+            meta_win_prob=0.65,
+            direction="LONG",
+            decision="SQUEEZE_BREAKOUT_LONG"
+        )
+        self.assertFalse(breakout_eval["is_ntz"], "Coiling breakout setup must be authorized")
+
+    def test_asymmetric_funding_interval_normalization(self):
+        """
+        Verifies cross-exchange funding normalization when venues have asymmetric settlement intervals.
+        1. Normalizes 4h or 2h funding settlement rates to 8h equivalent basis points.
+        2. Eliminates false cross-exchange skew caused by disparate interval lengths.
+        3. ExecutionCostEngine accurately deducts equivalent friction regardless of interval representation.
+        """
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        from app.quant_v16.costs import ExecutionCostEngine
+        from unittest.mock import MagicMock
+
+        loader = MultiHorizonDataLoader()
+
+        # Mock: Binance settles every 8h with 0.0004 (4 bps)
+        # Bybit settles every 4h with 0.0002 (2 bps per 4h = 4 bps per 8h equivalent)
+        mock_binance = MagicMock()
+        mock_binance.status_code = 200
+        mock_binance.json.return_value = [
+            {"symbol": "BTCUSDT", "lastFundingRate": "0.0004", "fundingIntervalHours": 8}
+        ]
+
+        mock_bybit = MagicMock()
+        mock_bybit.status_code = 200
+        mock_bybit.json.return_value = {
+            "result": {
+                "list": [
+                    {"symbol": "BTCUSDT", "fundingRate": "0.0002", "fundingIntervalHour": 4}
+                ]
+            }
+        }
+
+        def mock_get(url, *args, **kwargs):
+            if "binance" in url:
+                return mock_binance
+            if "bybit" in url:
+                return mock_bybit
+            mock_404 = MagicMock()
+            mock_404.status_code = 404
+            return mock_404
+
+        loader.session.get = mock_get
+        loader.preload_bulk_funding_rates()
+
+        # 1. Verify cross-exchange skew is ZERO because 0.0002 (4h) == 0.0004 (8h)
+        info = loader.get_funding_info("BTC/USDT")
+        self.assertAlmostEqual(info["funding_rate"], 0.0004, places=6)
+        self.assertAlmostEqual(info["skew_bps"], 0.0, places=2)
+        self.assertFalse(info["is_skew_abnormal"])
+
+        # 2. Verify metadata reports asymmetric interval awareness
+        self.assertEqual(info["standardized_interval_hours"], 8.0)
+
+        # 3. Verify ExecutionCostEngine friction calculation
+        cost_engine = ExecutionCostEngine()
+
+        # Holding 4 hours under 4h cycle of 0.0002 (0.02%):
+        # Friction = 0.02%
+        # Standardized 8h rate (0.0004) holding 4h: (4 / 8) * 0.04% = 0.02%
+        costs = cost_engine.estimate_costs(
+            market_type="futures",
+            observed_spread_bps=4.0,
+            est_holding_hours=4.0,
+            current_funding_rate=info["funding_rate"],
+            funding_interval_hours=8.0
+        )
+        self.assertAlmostEqual(costs.funding_pct, 0.02, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

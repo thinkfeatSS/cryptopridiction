@@ -26,6 +26,7 @@ class NoTradeZoneReason(str, Enum):
     EXTREME_FUNDING_CROWD = "EXTREME_FUNDING_CROWD"
     DEAD_ZONE_ALIGNMENT = "DEAD_ZONE_ALIGNMENT"
     STALE_PRICE_FEED = "STALE_PRICE_FEED"
+    PROLONGED_MICRO_VOLATILITY = "PROLONGED_MICRO_VOLATILITY"
 
 
 class NoTradeZoneEngine:
@@ -113,7 +114,7 @@ class NoTradeZoneEngine:
             return 1.0
 
     @staticmethod
-    def compute_bollinger_range_position(df: pd.DataFrame, period: int = 20, nb_dev: float = 2.0) -> tuple:
+    def compute_bollinger_range_position(df: pd.DataFrame, period: int = 20, nb_dev: float = 2.0, live_price: Optional[float] = None) -> tuple:
         """
         Returns (range_pos_pct, bbw_pct):
         - range_pos_pct: (close - lower) / (upper - lower) * 100. (50% is exact midline)
@@ -127,10 +128,16 @@ class NoTradeZoneEngine:
             std = float(close.rolling(period).std().iloc[-1])
             upper = mid + (std * nb_dev)
             lower = mid - (std * nb_dev)
-            c_now = float(close.iloc[-1])
+            c_now = float(live_price) if (live_price is not None and live_price > 0) else float(close.iloc[-1])
 
             width = upper - lower
             if width <= 0 or mid <= 0:
+                if 'high' in df.columns and 'low' in df.columns:
+                    hi_max = float(df['high'].rolling(period).max().iloc[-1])
+                    lo_min = float(df['low'].rolling(period).min().iloc[-1])
+                    if (hi_max - lo_min) > 0:
+                        pos_pct = max(0.0, min(100.0, ((c_now - lo_min) / (hi_max - lo_min)) * 100.0))
+                        return round(pos_pct, 1), 3.0
                 return 50.0, 3.0
 
             pos_pct = max(0.0, min(100.0, ((c_now - lower) / width) * 100.0))
@@ -167,7 +174,7 @@ class NoTradeZoneEngine:
         chop = self.compute_chop_index(df, period=14)
         adx = self.compute_adx(df, period=14)
         rvol = self.compute_rvol(df, period=20)
-        range_pos, bbw = self.compute_bollinger_range_position(df, period=20)
+        range_pos, bbw = self.compute_bollinger_range_position(df, period=20, live_price=current_price)
 
         # 2. Candle Wick Anatomy (Check for Wick Fakeouts on completed candle iloc[-2])
         upper_wick_ratio = 0.0
@@ -386,6 +393,23 @@ class NoTradeZoneEngine:
 
         # Exception: don't block if there is a verified institutional Order Block retest at the current price
         has_fresh_ob = bool(ob_setup and ob_setup.get("setup_detected"))
+
+        # Prolonged Multi-Day Micro-Volatility: strictly hold back middle chop (20% < range_pos < 80%)
+        is_prolonged_micro = bool(
+            (btc_shield_info and btc_shield_info.get("is_prolonged_micro_volatility")) or
+            (btc_shield_info and "MICRO_VOLATILITY" in str(btc_shield_info.get("status_code", ""))) or
+            (btc_shield_info and "MICRO_VOLATILITY" in str(btc_shield_info.get("reason", "")))
+        )
+        if is_prolonged_micro:
+            is_extreme_boundary = (range_pos <= 20.0 and direction.upper() in ["LONG", "BULLISH"]) or (range_pos >= 80.0 and direction.upper() in ["SHORT", "BEARISH"])
+            is_breakout_coiling = any(k in decision_str for k in ["COILING", "EXPANSION", "BREAKOUT", "SQUEEZE_BREAKOUT"])
+            is_authorized = has_fresh_ob or is_extreme_boundary or is_breakout_coiling
+            if not is_authorized and (20.0 < range_pos < 80.0):
+                reasons.append(f"Prolonged Multi-Day Micro-Volatility: Middle chop suppressed ({range_pos:.1f}% inside range; only boundary touches or coiling breaks authorized)")
+                if primary_code == NoTradeZoneReason.CLEAR:
+                    primary_code = NoTradeZoneReason.PROLONGED_MICRO_VOLATILITY
+                    primary_label = "🛑 NO TRADE ZONE (Prolonged Micro-Volatility Middle Chop)"
+                    badge = "MICRO-VOL CHOP"
 
         if is_range_regime and is_mid_range and not is_exempt_strategy:
             reasons.append(f"Dead Mid-Range Position ({range_pos:.1f}% inside Bollinger Band)")
