@@ -334,12 +334,36 @@ class NoTradeZoneEngine:
         is_dry_breakout = (rvol < effective_rvol_thresh and any(k in decision.upper() for k in ["BREAKOUT", "PUMP", "MOMENTUM", "CHASE"]))
         is_dry_volume_lull = (not is_exempt_strategy) and (rvol < effective_rvol_thresh and (chop >= chop_squeeze_thresh or adx < adx_severe_thresh))
 
+        # Intraday Flash Liquidity Drain: Acute volume collapse on recent candles (< 12% of 20-period avg or < $5k turnover)
+        is_flash_drain = False
+        flash_drain_detail = ""
+        if df is not None and "volume" in df.columns and len(df) >= 10:
+            try:
+                hist_v = df["volume"].iloc[:-1] if len(df) >= 2 else df["volume"]
+                mean_vol_20 = float(hist_v.iloc[-20:].mean()) if len(hist_v) >= 5 else 0.0
+                curr_bar_vol = float(df["volume"].iloc[-1])
+                curr_to = curr_bar_vol * current_price
+                if mean_vol_20 > 0 and (curr_bar_vol / mean_vol_20 < 0.12):
+                    is_flash_drain = True
+                    flash_drain_detail = f"RVOL {curr_bar_vol/mean_vol_20:.2f}x < 0.12x"
+                elif 0 < curr_to < 5000.0:
+                    is_flash_drain = True
+                    flash_drain_detail = f"turnover ${curr_to:,.0f} < $5,000"
+            except Exception:
+                is_flash_drain = False
+
         if is_sub_liquidity:
             reasons.append(f"Sub-Threshold Illiquidity (${vol_24h_quote/1e6:.2f}M < ${effective_min_vol/1e6:.1f}M USDT). Trading halted to eliminate slippage traps on thin books.")
             if primary_code == NoTradeZoneReason.CLEAR:
                 primary_code = NoTradeZoneReason.DRY_VOLUME_ILLIQUID
                 primary_label = f"🛑 NO TRADE ZONE (SUB-THRESHOLD ILLIQUIDITY - {tf_label})"
                 badge = f"ILLIQUID (${vol_24h_quote/1e6:.1f}M)"
+        elif is_flash_drain:
+            reasons.append(f"Intraday Flash Liquidity Drain on {tf_label} ({flash_drain_detail}). Acute volume vacuum; trading halted to prevent depth slippage.")
+            if primary_code == NoTradeZoneReason.CLEAR:
+                primary_code = NoTradeZoneReason.DRY_VOLUME_ILLIQUID
+                primary_label = f"🛑 NO TRADE ZONE (FLASH LIQUIDITY DRAIN - {tf_label})"
+                badge = f"FLASH-DRAIN-{tf_label}"
         elif is_dry_breakout:
             reasons.append(f"Dry Volume Breakout Deficit on {tf_label} (RVOL: {rvol:.2f}x < {effective_rvol_thresh}x)")
             if primary_code == NoTradeZoneReason.CLEAR:

@@ -170,6 +170,20 @@ class MultiHorizonDataLoader:
         except Exception:
             pass
 
+        # Zero-Cold-Start Disk Pre-Warm: Load hot tickers and funding rates on instant boot
+        try:
+            swr_ticks, swr_ts = self._load_tickers_from_swr_disk()
+            if swr_ticks:
+                self._live_tickers_cache = swr_ticks
+                self._live_tickers_ts = swr_ts
+                for s in swr_ticks:
+                    self._symbol_price_timestamps[s] = swr_ts
+            swr_fund, _ = self._load_funding_from_swr_disk()
+            if swr_fund:
+                self._funding_cache = swr_fund
+        except Exception:
+            pass
+
     def _is_exchange_geo_blocked(self, exchange_name: str) -> bool:
         """Returns True if the upstream exchange is currently in a geo-restriction / cloud IP ban cooldown."""
         with self._cache_lock:
@@ -195,6 +209,7 @@ class MultiHorizonDataLoader:
                     if sym:
                         self._funding_cache[sym] = float(item.get("lastFundingRate", 0.0001))
                 if self._funding_cache:
+                    self._save_funding_to_swr_disk(self._funding_cache, time.time())
                     return
         except Exception:
             pass
@@ -302,6 +317,53 @@ class MultiHorizonDataLoader:
         except Exception:
             pass
         return {}, 0.0
+
+    def _save_funding_to_swr_disk(self, funding_map: Dict[str, float], ts: float):
+        """Persists live funding rates atomically to disk for resilient SWR fallback."""
+        if not funding_map:
+            return
+        try:
+            cache_file = os.path.join(self._disk_cache_dir, "funding_rates_swr.json")
+            tmp_file = f"{cache_file}.tmp_{os.getpid()}_{threading.get_ident()}"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump({"timestamp": ts, "funding": funding_map}, f)
+            os.replace(tmp_file, cache_file)
+        except Exception:
+            pass
+
+    def _load_funding_from_swr_disk(self) -> Tuple[Dict[str, float], float]:
+        """Loads cached funding rates from persistent disk."""
+        try:
+            cache_file = os.path.join(self._disk_cache_dir, "funding_rates_swr.json")
+            if os.path.exists(cache_file):
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("funding", {}), float(data.get("timestamp", 0.0))
+        except Exception:
+            pass
+        return {}, 0.0
+
+    def seed_live_tickers(self, tickers: Dict[str, float], ts: Optional[float] = None):
+        """
+        Seeds live market tickers immediately from discovered universe pairs.
+        Eliminates the first-tick SWR fallback window on daemon cold start.
+        """
+        if not tickers:
+            return
+        now_ts = ts or time.time()
+        with self._cache_lock:
+            for s, p in tickers.items():
+                if p > 0:
+                    self._live_tickers_cache[s] = float(p)
+                    self._symbol_price_timestamps[s] = now_ts
+                    clean_s = s.replace("/", "").replace(":USDT", "")
+                    self._live_tickers_cache[clean_s] = float(p)
+                    self._symbol_price_timestamps[clean_s] = now_ts
+            self._live_tickers_ts = now_ts
+            self._is_price_fresh_15s = True
+            self._price_freshness_age = 0.0
+            self._is_global_outage = False
+        self._save_tickers_to_swr_disk(self._live_tickers_cache, now_ts)
 
     def _fetch_okx_tickers(self) -> Dict[str, float]:
         """Tier-1.5 Failover: Bulk fetches spot tickers from OKX with mirror support and geo-restriction detection."""

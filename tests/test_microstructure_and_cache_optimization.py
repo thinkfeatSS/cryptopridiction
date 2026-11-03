@@ -456,6 +456,131 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
         self.assertFalse(is_conf_s, "Bear trap liquidity sweep absorption must be rejected for SHORT")
         self.assertIn("Bear Trap Liquidity Sweep Absorption", reason_s)
 
+    def test_intraday_flash_liquidity_drain_detection(self):
+        """
+        Verify that an altcoin experiencing an intraday flash liquidity drain
+        (volume vacuum < 12% of baseline, turnover < $5k, or flash spread blowout)
+        is strictly rejected by EntryConfirmationEngine, vetoed by NTZ Pillar 2,
+        and assigned HOLD_VETOED_BY_FLASH_LIQUIDITY_DRAIN in SignalGenerationSystem.
+        """
+        from app.quant_v16.entry_confirmation import EntryConfirmationEngine
+        from app.quant_v16.no_trade_zone import no_trade_zone_engine, NoTradeZoneReason
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+
+        # 1. Acute volume vacuum on active bar (50 units vs 1000 units baseline = 0.05x RVOL)
+        rows_vacuum = [
+            {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1000.0}
+            for _ in range(20)
+        ]
+        # Bar 21: Volume collapses to 50.0 (5% of 1000.0 avg)
+        rows_vacuum.append({
+            "open": 100.5, "high": 101.5, "low": 100.2, "close": 101.2, "volume": 50.0
+        })
+        # Forming live bar
+        rows_vacuum.append({
+            "open": 101.2, "high": 101.4, "low": 101.1, "close": 101.3, "volume": 10.0
+        })
+        df_vacuum = pd.DataFrame(rows_vacuum)
+
+        # A. EntryConfirmationEngine verification
+        is_conf, reason, metrics = EntryConfirmationEngine.validate_candle_trigger(
+            df_vacuum, direction="LONG", current_price=101.3, spread_bps=5.0
+        )
+        self.assertFalse(is_conf, "Intraday flash volume vacuum must be rejected by candle confirmation")
+        self.assertTrue(metrics.get("is_flash_liquidity_drain"))
+        self.assertIn("Intraday Flash Liquidity Drain", reason)
+
+        # B. NTZ Pillar 2 verification
+        ntz_res = no_trade_zone_engine.evaluate_asset_ntz(
+            df=df_vacuum,
+            current_price=101.3,
+            anchor_tf="15m",
+            stats_24h={"quoteVolume": 25_000_000.0}, # Healthy 24h volume
+            decision="MOMENTUM_TREND_EXPANSION"
+        )
+        self.assertTrue(ntz_res["is_ntz"], "Intraday flash liquidity drain must trigger NTZ")
+        self.assertEqual(ntz_res["code"], NoTradeZoneReason.DRY_VOLUME_ILLIQUID.value)
+        self.assertTrue(any("Flash Liquidity Drain" in r for r in ntz_res["reasons"]))
+
+        # C. SignalGenerationSystem verification
+        sig_sys = SignalGenerationSystem()
+        dfs_9 = {
+            tf: df_vacuum.copy() for tf in ["5m", "15m", "1h", "4h", "12h", "1d", "1w", "15d", "1M"]
+        }
+        sig = sig_sys._build_single_horizon_signal(
+            symbol="DRAINED/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=101.3,
+            dfs_9=dfs_9,
+            horizon_prediction={"consensus_probability": 0.70, "predicted_change_pct": 2.5, "predicted_target_price": 103.5},
+            btc_shield_state={"status_code": "NORMAL", "altcoin_longs_allowed": True, "altcoin_shorts_allowed": True},
+            aligned_horizons=["15m", "1h"],
+            volume_24h_usd=25_000_000.0,
+            spread_bps=5.0
+        )
+        self.assertFalse(sig["is_trade_active"], "Flash liquidity drain signal must not be active")
+        self.assertEqual(sig["signal_status"], "HOLD_VETOED_BY_FLASH_LIQUIDITY_DRAIN")
+        self.assertIn("FLASH LIQUIDITY DRAIN", sig["quality_grade"])
+
+        # D. Flash Spread Expansion Blowout (> 20.0 bps on 15M)
+        sig_spread = sig_sys._build_single_horizon_signal(
+            symbol="DRAINED/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=101.3,
+            dfs_9={tf: pd.DataFrame({"open": [100.0]*25, "high": [101.0]*25, "low": [99.0]*25, "close": [100.5]*25, "volume": [1000.0]*25}) for tf in ["5m", "15m", "1h", "4h", "12h", "1d", "1w", "15d", "1M"]},
+            horizon_prediction={"consensus_probability": 0.70, "predicted_change_pct": 2.5, "predicted_target_price": 103.5},
+            btc_shield_state={"status_code": "NORMAL", "altcoin_longs_allowed": True, "altcoin_shorts_allowed": True},
+            aligned_horizons=["15m", "1h"],
+            volume_24h_usd=25_000_000.0,
+            spread_bps=24.5 # Blowout on 15M scalp (> 20 bps)
+        )
+        self.assertFalse(sig_spread["is_trade_active"])
+        self.assertEqual(sig_spread["signal_status"], "HOLD_VETOED_BY_FLASH_LIQUIDITY_DRAIN")
+        self.assertIn("Flash spread blowout", sig_spread["quality_grade"])
+
+    def test_first_tick_scanner_boot_zero_cold_start(self):
+        """
+        Verify that MultiHorizonDataLoader and MultiHorizonScanner support instant,
+        zero-cold-start initialization via seed_live_tickers and asynchronous pre-warming.
+        """
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        from app.engine.scanner.horizon_scanner import MultiHorizonScanner
+
+        loader = MultiHorizonDataLoader()
+        hot_universe = {
+            "BTC/USDT": 78950.0,
+            "ETH/USDT": 2950.0,
+            "SOL/USDT": 185.0
+        }
+        loader.seed_live_tickers(hot_universe)
+
+        # 1. Verify instant live price resolution without waiting for secondary network calls
+        self.assertEqual(loader.get_live_price("BTC/USDT"), 78950.0)
+        self.assertEqual(loader.get_live_price("ETH/USDT"), 2950.0)
+        self.assertEqual(loader.get_live_price("SOL/USDT"), 185.0)
+
+        # 2. Verify freshness tracking is 0.0s and active
+        self.assertTrue(loader._is_price_fresh_15s)
+        self.assertLessEqual(loader._price_freshness_age, 0.5)
+        self.assertFalse(loader._is_global_outage)
+
+        # 3. Verify funding disk persistence and recovery
+        test_funding = {"BTCUSDT": 0.0001, "ETHUSDT": 0.00015}
+        loader._save_funding_to_swr_disk(test_funding, time.time())
+        recovered_funding, rec_ts = loader._load_funding_from_swr_disk()
+        self.assertEqual(recovered_funding.get("BTCUSDT"), 0.0001)
+        self.assertEqual(recovered_funding.get("ETHUSDT"), 0.00015)
+        self.assertGreater(rec_ts, 0.0)
+
+        # 4. Verify MultiHorizonScanner eager boot
+        scanner = MultiHorizonScanner(eager_boot=True)
+        self.assertIsNotNone(scanner.loader)
+        self.assertIsNotNone(scanner.btc_shield)
+
 
 if __name__ == "__main__":
     unittest.main()

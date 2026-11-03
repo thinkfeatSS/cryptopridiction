@@ -610,10 +610,45 @@ class SignalGenerationSystem:
                 is_news_vetoed = True
                 news_veto_reason = f"⚠️ Pre-Catalyst Accumulation Runup: <10d to {cat_title[:50]}"
 
+        # Intraday Flash Liquidity Drain & Dynamic Spread Gating
+        is_flash_drain = False
+        flash_drain_reason = ""
+        max_allowed_spread = 20.0 if horizon_label == "15M" else (28.0 if horizon_label == "1H" else 35.0)
+        if float(spread_bps) > max_allowed_spread:
+            is_flash_drain = True
+            flash_drain_reason = f"Flash spread blowout ({spread_bps:.1f} bps > {max_allowed_spread:.1f} bps limit)"
+        elif candle_metrics and candle_metrics.get("is_flash_liquidity_drain"):
+            is_flash_drain = True
+            flash_drain_reason = str(candle_metrics.get("flash_drain_reason", "Acute volume vacuum on trigger bar"))
+        elif df_active is not None and "volume" in df_active.columns and len(df_active) >= 10:
+            try:
+                hist_v = df_active["volume"].iloc[:-1] if len(df_active) >= 2 else df_active["volume"]
+                base_v = float(hist_v.iloc[-20:].mean()) if len(hist_v) >= 5 else 0.0
+                curr_v = float(df_active["volume"].iloc[-1])
+                curr_to = curr_v * current_price
+                if base_v > 0 and (curr_v / base_v < 0.12):
+                    is_flash_drain = True
+                    flash_drain_reason = f"Acute volume collapse ({curr_v/base_v:.2f}x avg < 0.12x)"
+                elif 0 < curr_to < 5000.0:
+                    is_flash_drain = True
+                    flash_drain_reason = f"Sub-threshold turnover (${curr_to:,.0f} < $5,000 on candle)"
+            except Exception:
+                is_flash_drain = False
+
         if volume_24h_usd and 0 < volume_24h_usd < 1_000_000.0:
             status = "HOLD_VETOED_BY_SUB_THRESHOLD_ILLIQUIDITY"
             trade_active = False
             grade = f"Grade C (SUB-THRESHOLD ILLIQUIDITY: ${volume_24h_usd/1e6:.2f}M < $1.00M minimum volume)"
+            conviction = 0.0
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
+        elif is_flash_drain:
+            status = "HOLD_VETOED_BY_FLASH_LIQUIDITY_DRAIN"
+            trade_active = False
+            grade = f"Grade C (FLASH LIQUIDITY DRAIN: {flash_drain_reason})"
             conviction = 0.0
             tp1_price = cand_tp1
             tp2_price = cand_tp2

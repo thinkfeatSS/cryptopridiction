@@ -156,6 +156,21 @@ class EntryConfirmationEngine:
             except Exception:
                 volume_surge_ratio = 1.0
 
+        # Intraday Flash Liquidity Drain Detection (Acute volume collapse or vacuum on active candle)
+        is_flash_liquidity_drain = False
+        flash_drain_reason = ""
+        c_turnover = c_vol * c_close
+        if len(df) >= 10:
+            if "volume" in df.columns and robust_base_vol > 0 and volume_surge_ratio < 0.12:
+                is_flash_liquidity_drain = True
+                flash_drain_reason = f"Acute volume vacuum ({volume_surge_ratio*100:.0f}% of 20-bar avg < 12%)"
+            elif "volume" in df.columns and (0 < c_turnover < 5000.0):
+                is_flash_liquidity_drain = True
+                flash_drain_reason = f"Sub-threshold turnover (${c_turnover:,.0f} < $5,000 on candle)"
+            elif spread_val > 25.0:
+                is_flash_liquidity_drain = True
+                flash_drain_reason = f"Flash spread expansion ({spread_val:.1f} bps > 25.0 bps limit)"
+
         # Multi-candle Institutional Patterns: Engulfing Momentum Flip
         is_engulfing = False
         if len(df) >= 3:
@@ -289,7 +304,9 @@ class EntryConfirmationEngine:
             "is_vwap_bounce": is_vwap_bounce,
             "is_squeeze_expansion": is_squeeze_expansion,
             "is_range_resistance_rejection": bool((not is_long) and (upper_wick_ratio >= 0.30 and close_pos_in_range <= 0.60)),
-            "is_range_support_rejection": bool(is_long and (lower_wick_ratio >= 0.30 and close_pos_in_range >= 0.40))
+            "is_range_support_rejection": bool(is_long and (lower_wick_ratio >= 0.30 and close_pos_in_range >= 0.40)),
+            "is_flash_liquidity_drain": is_flash_liquidity_drain,
+            "flash_drain_reason": flash_drain_reason
         }
         if swept_price is not None:
             metrics["swept_price"] = swept_price
@@ -302,6 +319,10 @@ class EntryConfirmationEngine:
         # 1. LONG ENTRY CONFIRMATION
         # ----------------------------------------------------------------------
         if dir_upper in ["LONG", "BULLISH", "BUY"]:
+            # Rejection of Long: Intraday Flash Liquidity Drain
+            if is_flash_liquidity_drain:
+                return False, f"Intraday Flash Liquidity Drain: {flash_drain_reason}. Trading halted to eliminate slippage traps on thin books.", metrics
+
             # Rejection of Long: Heavy Red Marubozu (Waterfall knife catch)
             # Low lower wick (<15%) and close at bottom quartile (<= 25% of range)
             if is_red and lower_wick_ratio < 0.15 and close_pos_in_range <= 0.25 and body_ratio >= 0.65:
@@ -373,6 +394,10 @@ class EntryConfirmationEngine:
         # 2. SHORT ENTRY CONFIRMATION
         # ----------------------------------------------------------------------
         elif dir_upper in ["SHORT", "BEARISH", "SELL"]:
+            # Rejection of Short: Intraday Flash Liquidity Drain
+            if is_flash_liquidity_drain:
+                return False, f"Intraday Flash Liquidity Drain: {flash_drain_reason}. Trading halted to eliminate slippage traps on thin books.", metrics
+
             # Rejection of Short: Heavy Green Marubozu (Ramping pump candle)
             # Low upper wick (<15%) and close at top quartile (>= 75% of range)
             if is_green and upper_wick_ratio < 0.15 and close_pos_in_range >= 0.75 and body_ratio >= 0.65:

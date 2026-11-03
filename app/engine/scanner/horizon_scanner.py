@@ -18,13 +18,27 @@ class MultiHorizonScanner:
     - Computes real-time BTC Market Beta Shield.
     """
 
-    def __init__(self, max_asset_workers: int = 12, top_n: Optional[int] = None):
+    def __init__(self, max_asset_workers: int = 12, top_n: Optional[int] = None, eager_boot: bool = True):
         self.max_asset_workers = max_asset_workers
         self.top_n = top_n or TOP_N_UNIVERSE
         self.loader = MultiHorizonDataLoader()
         self.btc_shield = BtcPredictiveMarketShield()
         self.last_universe: List[Dict[str, Any]] = []
         self.last_scan_ts: float = 0.0
+        if eager_boot:
+            self._prewarm_boot_cache_async()
+
+    def _prewarm_boot_cache_async(self):
+        """Asynchronously pre-warms bulk funding rates and live tickers at initialization."""
+        import threading
+        def _worker():
+            try:
+                self.loader.preload_bulk_funding_rates()
+                self.loader.fetch_all_tickers(max_age_seconds=2.0)
+            except Exception:
+                pass
+        t = threading.Thread(target=_worker, name="ScannerBootPrewarmer", daemon=True)
+        t.start()
 
     def scan_universe(self) -> Dict[str, Any]:
         """
@@ -38,6 +52,14 @@ class MultiHorizonScanner:
         # 1. Discover Top clean institutional pairs
         universe_assets = UniverseFilter.get_top_40_universe(self.loader.session, top_n=self.top_n)
         self.last_universe = universe_assets
+
+        # Zero-Cold-Start Seed: Seed loader immediately from fresh 24h ticker responses
+        discovered_prices = {}
+        for a in universe_assets:
+            if a.get("price", 0.0) > 0:
+                discovered_prices[a["symbol"]] = float(a["price"])
+        if discovered_prices:
+            self.loader.seed_live_tickers(discovered_prices)
 
         # 2. Preload bulk tickers & funding rates in 1 single call
         self.loader.preload_bulk_funding_rates()
