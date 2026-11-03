@@ -714,10 +714,37 @@ class SignalGenerationSystem:
             is_excessive_slippage = True
             slippage_reason = f"Modeled slippage {cost_breakdown.slippage_pct:.3f}% exceeds 35% of TP1 distance ({target_dist_pct:.2f}%)"
 
+        # Prolonged Single-Side Order Book Void Sentinel
+        is_order_book_void = False
+        order_book_void_reason = ""
+        if bid_price > 0.0 or ask_price > 0.0:
+            if bid_price <= 1e-8 or ask_price <= 1e-8:
+                is_order_book_void = True
+                order_book_void_reason = f"Missing quote side (bid={bid_price:.6f}, ask={ask_price:.6f})"
+            elif current_price > 0.0 and (bid_price < current_price * 0.85 or ask_price > current_price * 1.15):
+                is_order_book_void = True
+                order_book_void_reason = f"Severe quote dislocation >15% off market (bid={bid_price:.4f}, ask={ask_price:.4f}, last={current_price:.4f})"
+            elif (ask_price - bid_price) / max(1e-8, ask_price) > 0.05:
+                is_order_book_void = True
+                order_book_void_reason = f"Order book spread blowout {((ask_price - bid_price) / ask_price * 10000.0):.1f} bps > 500 bps limit"
+        if not is_order_book_void and float(spread_bps) > 500.0:
+            is_order_book_void = True
+            order_book_void_reason = f"Modeled book spread blowout ({spread_bps:.1f} bps > 500 bps limit)"
+
         if volume_24h_usd and 0 < volume_24h_usd < 1_000_000.0:
             status = "HOLD_VETOED_BY_SUB_THRESHOLD_ILLIQUIDITY"
             trade_active = False
             grade = f"Grade C (SUB-THRESHOLD ILLIQUIDITY: ${volume_24h_usd/1e6:.2f}M < $1.00M minimum volume)"
+            conviction = 0.0
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
+        elif is_order_book_void:
+            status = "HOLD_VETOED_BY_ORDER_BOOK_VOID"
+            trade_active = False
+            grade = f"Grade C (ORDER BOOK VOID: {order_book_void_reason})"
             conviction = 0.0
             tp1_price = cand_tp1
             tp2_price = cand_tp2
@@ -976,6 +1003,8 @@ class SignalGenerationSystem:
             "asymmetry_reason": asymmetry_reason if is_breakout_spread_asymmetric else None,
             "is_excessive_slippage": is_excessive_slippage,
             "slippage_reason": slippage_reason if is_excessive_slippage else None,
+            "is_order_book_void": is_order_book_void,
+            "order_book_void_reason": order_book_void_reason if is_order_book_void else None,
             "breakout_spread_cushion_bps": breakout_spread_cushion_bps,
             "effective_spread_bps": round(effective_spread_bps, 2),
             "execution_assumption": exec_assumption.value,

@@ -1181,8 +1181,9 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
                             with patch.object(loader, "_fetch_mexc_tickers", return_value=None):
                                 with patch.object(loader, "_fetch_coincap_tickers", return_value=None):
                                     with patch.object(loader, "_fetch_coinpaprika_tickers", return_value=None):
-                                        with patch.object(loader, "_load_tickers_from_swr_disk", return_value=(loader._live_tickers_cache, now - 30.0)):
-                                            loader.fetch_all_tickers(max_age_seconds=0.0)
+                                        with patch.object(loader, "_fetch_bitget_tickers", return_value=None):
+                                            with patch.object(loader, "_load_tickers_from_swr_disk", return_value=(loader._live_tickers_cache, now - 30.0)):
+                                                loader.fetch_all_tickers(max_age_seconds=0.0)
 
         self.assertTrue(loader.is_partition_stale_active())
         self.assertTrue(loader.get_partition_status()["is_global_outage"])
@@ -1306,6 +1307,264 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
         closed = bot.data["closed_trades"][0]
         # On a $2M coin with latency, slippage drag must be higher than base 0.04% ($0.40)
         self.assertGreater(closed["slippage_drag_usd"], 0.40)
+
+    def test_single_side_order_book_void_rejection_and_safeguard(self):
+        """
+        Validates Single-Side Order Book Void Protection across:
+        1. UniverseFilter (is_valid_crypto_pair): rejects zero-bid, zero-ask, extreme spread >500bps, and >15% quote dislocation.
+        2. SignalGenerationSystem: vetoes candidate signal with HOLD_VETOED_BY_ORDER_BOOK_VOID and 0 conviction.
+        3. PaperTradingBot (on_tick): cancels resting limits with CANCELLED_ORDER_BOOK_VOID and freezes open positions in SAFEGUARD_HOLD.
+        """
+        from app.engine.scanner.filters import UniverseFilter
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+        from datetime import datetime, timezone
+        import tempfile, json
+
+        # 1. UniverseFilter Order Book Void checks
+        self.assertTrue(UniverseFilter.is_valid_crypto_pair("BTC/USDT", price=65000.0, bid_price=64995.0, ask_price=65005.0, spread_bps=1.5))
+        # Missing bid (bid=0)
+        self.assertFalse(UniverseFilter.is_valid_crypto_pair("BTC/USDT", price=65000.0, bid_price=0.0, ask_price=65005.0))
+        # Missing ask (ask=0)
+        self.assertFalse(UniverseFilter.is_valid_crypto_pair("BTC/USDT", price=65000.0, bid_price=64995.0, ask_price=0.0))
+        # Severe spread blowout (>500 bps = >5%)
+        self.assertFalse(UniverseFilter.is_valid_crypto_pair("BTC/USDT", price=65000.0, bid_price=60000.0, ask_price=65000.0, spread_bps=800.0))
+        # Severe price dislocation (>15% off market)
+        self.assertFalse(UniverseFilter.is_valid_crypto_pair("BTC/USDT", price=65000.0, bid_price=50000.0, ask_price=65000.0))
+
+        # 2. SignalGenerationSystem Order Book Void Veto
+        sig_gen = SignalGenerationSystem()
+        dummy_df = pd.DataFrame({
+            "timestamp": [1700000000000 + i * 3600000 for i in range(50)],
+            "open": [100.0 + i * 0.1 for i in range(50)],
+            "high": [101.0 + i * 0.1 for i in range(50)],
+            "low": [99.0 + i * 0.1 for i in range(50)],
+            "close": [100.5 + i * 0.1 for i in range(50)],
+            "volume": [10000.0 for _ in range(50)],
+        })
+        dummy_dfs = {"15m": dummy_df, "1h": dummy_df, "1d": dummy_df}
+        shield_state = {"altcoin_longs_allowed": True, "altcoin_shorts_allowed": True, "regime": "BULL_TREND", "is_ntz_active": False}
+
+        # Veto by zero bid quote
+        sig_void = sig_gen._build_single_horizon_signal(
+            symbol="TEST/USDT",
+            horizon_label="1H",
+            tf_key="1h",
+            direction="LONG",
+            current_price=105.0,
+            dfs_9=dummy_dfs,
+            horizon_prediction=None,
+            btc_shield_state=shield_state,
+            aligned_horizons=["1H"],
+            volume_24h_usd=50_000_000.0,
+            bid_price=0.0,
+            ask_price=105.1,
+            spread_bps=5.0
+        )
+        self.assertEqual(sig_void["signal_status"], "HOLD_VETOED_BY_ORDER_BOOK_VOID")
+        self.assertFalse(sig_void["is_trade_active"])
+        self.assertEqual(sig_void["conviction"], 0.0)
+        self.assertTrue(sig_void["is_order_book_void"])
+        self.assertIn("ORDER BOOK VOID", sig_void["quality_grade"])
+
+        # Veto by modeled book spread blowout (>500 bps)
+        sig_spread_void = sig_gen._build_single_horizon_signal(
+            symbol="TEST/USDT",
+            horizon_label="1H",
+            tf_key="1h",
+            direction="LONG",
+            current_price=105.0,
+            dfs_9=dummy_dfs,
+            horizon_prediction=None,
+            btc_shield_state=shield_state,
+            aligned_horizons=["1H"],
+            volume_24h_usd=50_000_000.0,
+            bid_price=104.9,
+            ask_price=105.1,
+            spread_bps=550.0
+        )
+        self.assertEqual(sig_spread_void["signal_status"], "HOLD_VETOED_BY_ORDER_BOOK_VOID")
+        self.assertTrue(sig_spread_void["is_order_book_void"])
+
+        # 3. PaperTradingBot Void Sentinel
+        with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as f:
+            temp_path = f.name
+            init_data = {
+                "open_positions": [],
+                "closed_trades": [],
+                "cancelled_orders": [],
+                "realized_pnl_usd": 0.0,
+                "current_balance_usd": 10000.0,
+                "total_trades": 0,
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "breakeven_trades": 0
+            }
+            json.dump(init_data, f)
+
+        bot = PaperTradingBot(ledger_file=temp_path)
+        # Setup A: Resting limit order must cancel on book void
+        resting_pos = {
+            "trade_id": "RESTING_001",
+            "symbol": "SOL/USDT",
+            "direction": "LONG",
+            "status": "RESTING_LIMIT",
+            "is_limit_resting": True,
+            "entry_price": 140.0,
+            "optimal_entry_limit": 140.0,
+            "sl_price": 135.0,
+            "tp1_price": 145.0,
+            "leverage": 1,
+            "initial_position_size_usd": 500.0,
+            "remaining_position_size_usd": 500.0,
+            "opened_at_utc": datetime.now(timezone.utc).isoformat()
+        }
+        # Setup B: Open position must freeze in SAFEGUARD_HOLD (not stop out falsely)
+        open_pos = {
+            "trade_id": "OPEN_001",
+            "symbol": "ETH/USDT",
+            "direction": "LONG",
+            "status": "OPEN",
+            "is_limit_resting": False,
+            "entry_price": 3000.0,
+            "current_price": 3000.0,
+            "sl_price": 2900.0,
+            "tp1_price": 3200.0,
+            "leverage": 1,
+            "initial_position_size_usd": 1000.0,
+            "remaining_position_size_usd": 1000.0,
+            "opened_at_utc": datetime.now(timezone.utc).isoformat()
+        }
+        bot.data["open_positions"] = [resting_pos, open_pos]
+
+        # Trigger tick with book void on SOL and ETH
+        voids_map = {
+            "SOL/USDT": {"is_void": True, "reason": "Zero bid liquidity"},
+            "ETH/USDT": {"is_void": True, "reason": "Severe quote dislocation >15%"}
+        }
+        # Even though ETH price is reported at 2850 (below SL 2900), void safeguard must freeze it
+        bot.on_tick({"SOL/USDT": 140.0, "ETH/USDT": 2850.0}, order_book_voids=voids_map)
+
+        # Verify resting limit was cancelled
+        self.assertEqual(len(bot.data["cancelled_orders"]), 1)
+        self.assertEqual(bot.data["cancelled_orders"][0]["cancellation_reason"], "CANCELLED_ORDER_BOOK_VOID")
+
+        # Verify open position was frozen in SAFEGUARD_HOLD and NOT closed
+        self.assertEqual(len(bot.data["closed_trades"]), 0)
+        self.assertEqual(len(bot.data["open_positions"]), 1)
+        eth_p = bot.data["open_positions"][0]
+        self.assertEqual(eth_p["safeguard_state"], "SAFEGUARD_HOLD")
+        self.assertEqual(eth_p["safeguard_reason"], "ORDER_BOOK_VOID_ACTIVE")
+
+        # Verify void recovery restores ACTIVE_MONITORING
+        bot.on_tick({"ETH/USDT": 3010.0}, order_book_voids={"ETH/USDT": {"is_void": False}})
+        self.assertEqual(eth_p["safeguard_state"], "ACTIVE_MONITORING")
+        self.assertIsNone(eth_p.get("safeguard_reason"))
+
+        # Verify emergency liquidation on explicit action
+        bot.on_tick({"ETH/USDT": 3010.0}, order_book_voids={"ETH/USDT": {"is_void": True, "emergency_liquidation": True}})
+        self.assertEqual(len(bot.data["closed_trades"]), 1)
+        self.assertEqual(bot.data["closed_trades"][0]["exit_reason"], "CLOSED_ORDER_BOOK_VOID_EMERGENCY_LIQUIDATION")
+        self.assertEqual(len(bot.data["open_positions"]), 0)
+
+    def test_public_rest_rate_limit_exponential_backoff_and_tier6_7_failover(self):
+        """
+        Validates Public Multi-Exchange REST Rate-Limiting Protections:
+        1. Dynamic exponential backoff on CoinCap HTTP 429 scaling from 60s base to 180s.
+        2. Dynamic exponential backoff on Coinpaprika HTTP 429.
+        3. Tier-6.7 Bitget public spot ticker gateway integration.
+        4. Cascading failover through Tier-6.7 before SWR step-down.
+        """
+        from unittest.mock import patch, MagicMock
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        loader = MultiHorizonDataLoader()
+
+        # 1. CoinCap Exponential Backoff
+        call_429_count = 0
+        def mock_coincap_get(url, timeout=3.5):
+            class Mock429:
+                status_code = 429
+                def json(self):
+                    return {"error": "Rate limit exceeded"}
+            return Mock429()
+
+        loader.session.get = mock_coincap_get
+        now = time.time()
+        loader._coincap_rates_ts = 0.0
+
+        # First 429: consecutive = 1 -> backoff >= 60.0s
+        loader._fetch_coincap_tickers()
+        self.assertEqual(loader._coincap_consecutive_429, 1)
+        self.assertGreaterEqual(loader._coincap_throttled_until, now + 58.0)
+
+        # Force next 429: consecutive = 2 -> backoff >= 90.0s
+        loader._coincap_throttled_until = 0.0
+        loader._coincap_rates_ts = 0.0
+        loader._fetch_coincap_tickers()
+        self.assertEqual(loader._coincap_consecutive_429, 2)
+        self.assertGreaterEqual(loader._coincap_throttled_until, now + 88.0)
+
+        # HTTP 200 resets consecutive counter
+        def mock_coincap_200(url, timeout=3.5):
+            class Mock200:
+                status_code = 200
+                def json(self):
+                    return {"data": [{"symbol": "BTC", "rateUsd": "66000.0"}]}
+            return Mock200()
+        loader.session.get = mock_coincap_200
+        loader._coincap_throttled_until = 0.0
+        loader._coincap_rates_ts = 0.0
+        ticks_200 = loader._fetch_coincap_tickers()
+        self.assertEqual(loader._coincap_consecutive_429, 0)
+        self.assertEqual(ticks_200["BTC/USDT"], 66000.0)
+
+        # 2. Coinpaprika Exponential Backoff
+        loader.session.get = mock_coincap_get
+        loader._paprika_rates_ts = 0.0
+        loader._paprika_throttled_until = 0.0
+        loader._fetch_coinpaprika_tickers()
+        self.assertEqual(loader._paprika_consecutive_429, 1)
+        self.assertGreaterEqual(loader._paprika_throttled_until, now + 58.0)
+
+        # 3. Bitget Tier-6.7 Public Ticker Gateway
+        def mock_bitget_200(url, timeout=3.5):
+            class MockBitget:
+                status_code = 200
+                def json(self):
+                    return {
+                        "code": "00000",
+                        "data": [
+                            {"symbol": "BTCUSDT", "lastPr": "67500.5", "bidPr": "67500.0", "askPr": "67501.0"},
+                            {"symbol": "ETHUSDT", "lastPr": "3550.0", "bidPr": "3549.5", "askPr": "3550.5"}
+                        ]
+                    }
+            return MockBitget()
+
+        loader.session.get = mock_bitget_200
+        loader._bitget_rates_ts = 0.0
+        loader._bitget_throttled_until = 0.0
+        bitget_ticks = loader._fetch_bitget_tickers()
+        self.assertIn("BTC/USDT", bitget_ticks)
+        self.assertEqual(bitget_ticks["BTC/USDT"], 67500.5)
+        self.assertEqual(bitget_ticks["ETH/USDT"], 3550.0)
+
+        # 4. Cascading failover in fetch_all_tickers through Tier-6.7 Bitget
+        with patch.object(loader, "ws_feed", None), \
+             patch.object(loader, "_fetch_bybit_tickers", return_value={}), \
+             patch.object(loader, "_fetch_okx_tickers", return_value={}), \
+             patch.object(loader, "_fetch_gateio_tickers", return_value={}), \
+             patch.object(loader, "_fetch_kucoin_tickers", return_value={}), \
+             patch.object(loader, "_fetch_mexc_tickers", return_value={}), \
+             patch.object(loader, "_fetch_coincap_tickers", return_value={}), \
+             patch.object(loader, "_fetch_coinpaprika_tickers", return_value={}), \
+             patch.object(loader, "_fetch_bitget_tickers", return_value={"SOL/USDT": 160.0}):
+            loader._binance_ip_throttled_until = time.time() + 999.0
+            loader._live_tickers_cache = {}
+            loader._live_tickers_ts = 0.0
+            ticks_failover = loader.fetch_all_tickers(max_age_seconds=1.0)
+            self.assertEqual(ticks_failover.get("SOL/USDT"), 160.0)
+            self.assertTrue(loader._is_price_fresh_15s)
+            self.assertFalse(loader._is_global_outage)
 
 
 

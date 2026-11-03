@@ -232,7 +232,15 @@ TIER_1_ALPHA_COINS = {
     "SOL/USDT", "BNB/USDT", "NEAR/USDT", "SUPER/USDT", "SAGA/USDT", "SUI/USDT", "AVAX/USDT"
 }
 
-def is_valid_crypto_pair(symbol: str, price: float = None, high: float = None, low: float = None) -> bool:
+def is_valid_crypto_pair(
+    symbol: str,
+    price: float = None,
+    high: float = None,
+    low: float = None,
+    bid_price: float = None,
+    ask_price: float = None,
+    spread_bps: float = None
+) -> bool:
     if not symbol or not isinstance(symbol, str):
         return False
     clean_sym = symbol.strip().upper().replace(':USDT', '')
@@ -288,6 +296,19 @@ def is_valid_crypto_pair(symbol: str, price: float = None, high: float = None, l
             else:
                 if 0.99 <= price <= 1.01:
                     return False
+
+    # 7. Single-Side Order Book Void Filter
+    if bid_price is not None and ask_price is not None:
+        if (bid_price <= 1e-8 and ask_price > 0) or (ask_price <= 1e-8 and bid_price > 0):
+            return False
+        if bid_price > 0 and ask_price > 0:
+            if (ask_price - bid_price) / max(1e-8, ask_price) > 0.05:
+                return False
+            if price is not None and price > 0:
+                if bid_price < price * 0.85 or ask_price > price * 1.15:
+                    return False
+    if spread_bps is not None and spread_bps > 500.0:
+        return False
 
     return True
 

@@ -2,6 +2,7 @@ import os
 import time
 import json
 import threading
+import random
 import requests
 from urllib3.util import Retry
 import numpy as np
@@ -120,7 +121,9 @@ class MultiHorizonDataLoader:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         self.session.headers.update({
-            "User-Agent": "QuantEdge-MultiHorizon-Engine/16.1 (Institutional High-Throughput)"
+            "User-Agent": "QuantEdge-MultiHorizon-Engine/16.1 (Institutional High-Throughput)",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate"
         })
 
         self._candle_cache: Dict[str, Tuple[pd.DataFrame, float]] = {}  # key: f"{sym}_{tf}" -> (df, ts)
@@ -145,6 +148,12 @@ class MultiHorizonDataLoader:
         self._global_outage_reason: str = ""
         self._stale_timeframes_count: int = 0
         self._binance_ip_throttled_until: float = 0.0
+        self._coincap_consecutive_429: int = 0
+        self._paprika_consecutive_429: int = 0
+        self._bitget_rates_cache: Dict[str, float] = {}
+        self._bitget_rates_ts: float = 0.0
+        self._bitget_throttled_until: float = 0.0
+        self._bitget_consecutive_429: int = 0
 
         # Strict 15-second price freshness constraint tracking
         self.MAX_LIVE_PRICE_AGE_SECONDS: float = 15.0
@@ -873,16 +882,19 @@ class MultiHorizonDataLoader:
     def _fetch_coincap_tickers(self) -> Dict[str, float]:
         """
         Tier-6.5 Failover: Global decentralized price aggregator (CoinCap API) when all CEX endpoints are geo-fenced.
-        Operates without API key; strictly throttled to <= 1 call per 2.0s with 60s backoff on HTTP 429.
+        Operates without API key; strictly throttled to <= 1 call per 2.0s with dynamic exponential backoff on HTTP 429.
         """
         now = time.time()
         # 1. Enforce public rate limit cooldown: <= 1 call per 2.0s
         if (now - getattr(self, '_coincap_rates_ts', 0.0)) < getattr(self, 'COINCAP_MIN_INTERVAL_SECONDS', 2.0) and getattr(self, '_coincap_rates_cache', None):
             return self._coincap_rates_cache.copy()
 
-        # 2. Check 429 backoff cooldown (60 seconds)
+        # 2. Check 429 backoff cooldown
         if now < getattr(self, '_coincap_throttled_until', 0.0):
-            return getattr(self, '_coincap_rates_cache', {}).copy()
+            if getattr(self, '_coincap_rates_cache', None):
+                return self._coincap_rates_cache.copy()
+            swr_ticks, _ = self._load_tickers_from_swr_disk()
+            return swr_ticks or {}
 
         res = {}
         try:
@@ -901,11 +913,17 @@ class MultiHorizonDataLoader:
                 if res:
                     self._coincap_rates_cache = res
                     self._coincap_rates_ts = now
+                    self._coincap_consecutive_429 = 0
                     print(f"[DATA LOADER [TIER-6.5]] Engaged CoinCap Global Rates Aggregator ({len(res)} prices).", flush=True)
             elif resp.status_code == 429:
-                self._coincap_throttled_until = now + 60.0
-                print(f"[DATA LOADER [TIER-6.5]] CoinCap public endpoint rate-limited (HTTP 429). 60s backoff active.", flush=True)
-                return getattr(self, '_coincap_rates_cache', {}).copy()
+                self._coincap_consecutive_429 = getattr(self, '_coincap_consecutive_429', 0) + 1
+                base_backoff = 60.0 * (1.5 ** min(self._coincap_consecutive_429 - 1, 4))
+                jitter = random.uniform(0.0, 3.0)
+                backoff = min(180.0, max(60.0, base_backoff + jitter))
+                self._coincap_throttled_until = now + backoff
+                print(f"[DATA LOADER [TIER-6.5]] CoinCap public endpoint rate-limited (HTTP 429). Exponential backoff {backoff:.1f}s active.", flush=True)
+                swr_ticks, _ = self._load_tickers_from_swr_disk()
+                return swr_ticks or getattr(self, '_coincap_rates_cache', {}).copy()
         except Exception:
             pass
 
@@ -917,7 +935,7 @@ class MultiHorizonDataLoader:
         """
         Tier-6.6 Failover: Coinpaprika Global Price Aggregator (2000+ USD pairs).
         Engaged when CEX endpoints and Tier-6.5 CoinCap are rate-limited or experiencing network drops.
-        Gracefully steps down to SWR disk cache during upstream quota exhaustion.
+        Gracefully steps down to SWR disk cache during upstream quota exhaustion with dynamic exponential backoff on HTTP 429.
         """
         now = time.time()
         if (now - getattr(self, '_paprika_rates_ts', 0.0)) < 3.0 and getattr(self, '_paprika_rates_cache', None):
@@ -946,11 +964,16 @@ class MultiHorizonDataLoader:
                 if res:
                     self._paprika_rates_cache = res
                     self._paprika_rates_ts = now
+                    self._paprika_consecutive_429 = 0
                     self._save_tickers_to_swr_disk(res, now)
                     print(f"[DATA LOADER [TIER-6.6]] Engaged Coinpaprika Global Rates Aggregator ({len(res)} prices).", flush=True)
             elif resp.status_code == 429:
-                self._paprika_throttled_until = now + 60.0
-                print(f"[DATA LOADER [TIER-6.6 SWR]] Coinpaprika rate-limited (HTTP 429). Gracefully stepping down to SWR disk cache until cooldown expires.", flush=True)
+                self._paprika_consecutive_429 = getattr(self, '_paprika_consecutive_429', 0) + 1
+                base_backoff = 60.0 * (1.5 ** min(self._paprika_consecutive_429 - 1, 4))
+                jitter = random.uniform(0.0, 3.0)
+                backoff = min(180.0, max(60.0, base_backoff + jitter))
+                self._paprika_throttled_until = now + backoff
+                print(f"[DATA LOADER [TIER-6.6 SWR]] Coinpaprika rate-limited (HTTP 429). Exponential backoff {backoff:.1f}s active. Gracefully stepping down to SWR disk cache until cooldown expires.", flush=True)
                 swr_ticks, _ = self._load_tickers_from_swr_disk()
                 return swr_ticks or getattr(self, '_paprika_rates_cache', {}).copy()
         except Exception:
@@ -959,6 +982,63 @@ class MultiHorizonDataLoader:
         if not res:
             swr_ticks, _ = self._load_tickers_from_swr_disk()
             return swr_ticks or getattr(self, '_paprika_rates_cache', {}).copy()
+
+        return res
+
+    def _fetch_bitget_tickers(self) -> Dict[str, float]:
+        """
+        Tier-6.7 Failover: Bitget Global Spot Tickers (Public endpoint, 3500+ pairs).
+        Engaged when CEX endpoints, Tier-6.5 CoinCap, and Tier-6.6 Coinpaprika are throttled or experiencing drops.
+        Operates without API key; enforces exponential jittered backoff on HTTP 429.
+        """
+        now = time.time()
+        if (now - getattr(self, '_bitget_rates_ts', 0.0)) < 3.0 and getattr(self, '_bitget_rates_cache', None):
+            return self._bitget_rates_cache.copy()
+
+        if now < getattr(self, '_bitget_throttled_until', 0.0):
+            if getattr(self, '_bitget_rates_cache', None):
+                return self._bitget_rates_cache.copy()
+            swr_ticks, _ = self._load_tickers_from_swr_disk()
+            return swr_ticks or {}
+
+        res = {}
+        try:
+            url = "https://api.bitget.com/api/v2/spot/market/tickers"
+            resp = self.session.get(url, timeout=3.5)
+            if resp.status_code == 200:
+                data = resp.json()
+                raw_list = data.get("data", []) if isinstance(data, dict) else []
+                for it in raw_list:
+                    sym = it.get("symbol")
+                    last_pr = it.get("lastPr")
+                    if sym and last_pr and float(last_pr) > 0:
+                        p = float(last_pr)
+                        res[sym] = p
+                        if sym.endswith("USDT"):
+                            base = sym[:-4]
+                            res[f"{base}/USDT"] = p
+                            res[f"{base}/USDT:USDT"] = p
+                if res:
+                    self._bitget_rates_cache = res
+                    self._bitget_rates_ts = now
+                    self._bitget_consecutive_429 = 0
+                    self._save_tickers_to_swr_disk(res, now)
+                    print(f"[DATA LOADER [TIER-6.7]] Engaged Bitget Global Spot Tickers ({len(res)} prices).", flush=True)
+            elif resp.status_code == 429:
+                self._bitget_consecutive_429 = getattr(self, '_bitget_consecutive_429', 0) + 1
+                base_backoff = 60.0 * (1.5 ** min(self._bitget_consecutive_429 - 1, 4))
+                jitter = random.uniform(0.0, 3.0)
+                backoff = min(180.0, max(60.0, base_backoff + jitter))
+                self._bitget_throttled_until = now + backoff
+                print(f"[DATA LOADER [TIER-6.7]] Bitget rate-limited (HTTP 429). Exponential backoff {backoff:.1f}s active.", flush=True)
+                swr_ticks, _ = self._load_tickers_from_swr_disk()
+                return swr_ticks or getattr(self, '_bitget_rates_cache', {}).copy()
+        except Exception:
+            pass
+
+        if not res:
+            swr_ticks, _ = self._load_tickers_from_swr_disk()
+            return swr_ticks or getattr(self, '_bitget_rates_cache', {}).copy()
 
         return res
 
@@ -1200,7 +1280,7 @@ class MultiHorizonDataLoader:
 
         # Tier-6.6 Failover: Coinpaprika Global Rates Aggregator (Fallback on CoinCap 429/DNS drops)
         paprika_ticks = self._fetch_coinpaprika_tickers()
-        if paprika_ticks:
+        if paprika_ticks and now >= getattr(self, '_paprika_throttled_until', 0.0):
             with self._cache_lock:
                 self._live_tickers_cache = paprika_ticks
                 self._live_tickers_ts = now
@@ -1210,6 +1290,19 @@ class MultiHorizonDataLoader:
                 for s in paprika_ticks:
                     self._symbol_price_timestamps[s] = now
             return paprika_ticks
+
+        # Tier-6.7 Failover: Bitget Global Spot Tickers (Public endpoint, 3500+ pairs)
+        bitget_ticks = self._fetch_bitget_tickers()
+        if bitget_ticks and now >= getattr(self, '_bitget_throttled_until', 0.0):
+            with self._cache_lock:
+                self._live_tickers_cache = bitget_ticks
+                self._live_tickers_ts = now
+                self._is_price_fresh_15s = True
+                self._price_freshness_age = 0.0
+                self._is_global_outage = False
+                for s in bitget_ticks:
+                    self._symbol_price_timestamps[s] = now
+            return bitget_ticks
 
         # Catastrophic Global Multi-Exchange Outage / Multi-Exchange Rate Limiting
         cache_age = max(0.0, now - self._live_tickers_ts) if self._live_tickers_ts > 0 else 999.0

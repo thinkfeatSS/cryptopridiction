@@ -601,7 +601,7 @@ class PaperTradingBot:
         print(f"[PAPER BOT [CANCEL] CANCELLED] {rec['symbol']} Resting Limit Cancelled: {rec['cancellation_reason']} ({rec['cancellation_detail']})")
         self.sync_cancelled_order_to_tracker(rec)
 
-    def on_tick(self, live_prices: Dict[str, float], is_market_partition_active: bool = False, btc_shield_state: Optional[Dict[str, Any]] = None, tick_latency_ms: float = 0.0):
+    def on_tick(self, live_prices: Dict[str, float], is_market_partition_active: bool = False, btc_shield_state: Optional[Dict[str, Any]] = None, tick_latency_ms: float = 0.0, order_book_voids: Optional[Dict[str, Any]] = None):
         """Evaluates live prices against open positions and resting limits with sub-second latency and impulse shields."""
         with self._lock:
             if not self.data["open_positions"]:
@@ -630,7 +630,7 @@ class PaperTradingBot:
                         pass
 
                 for pos in self.data["open_positions"]:
-                    if pos.get("safeguard_state") == "SAFEGUARD_HOLD":
+                    if pos.get("safeguard_state") == "SAFEGUARD_HOLD" and pos.get("safeguard_reason") == "GLOBAL_OUTAGE_SHIELD_ACTIVE":
                         pos["safeguard_state"] = "ACTIVE_MONITORING"
                         pos.pop("safeguard_reason", None)
 
@@ -662,6 +662,46 @@ class PaperTradingBot:
                 direction = pos["direction"]
                 leverage = pos["leverage"]
                 norm_h = pos.get("signal_horizon") or pos.get("horizon", "1H")
+
+                # Single-Side Order Book Void Sentinel
+                is_void = False
+                void_reason = ""
+                is_emergency_liq = False
+                if order_book_voids:
+                    v_entry = order_book_voids.get(sym) or order_book_voids.get(sym.replace("/", "").replace(":USDT", ""))
+                    if isinstance(v_entry, dict):
+                        if v_entry.get("is_void") or v_entry.get("is_order_book_void"):
+                            is_void = True
+                            void_reason = v_entry.get("reason") or v_entry.get("order_book_void_reason") or "Single-side order book void detected"
+                            is_emergency_liq = bool(v_entry.get("emergency_liquidation") or v_entry.get("action") == "EMERGENCY_LIQUIDATION")
+                    elif bool(v_entry):
+                        is_void = True
+                        void_reason = "Single-side order book void detected"
+                elif live_prices.get(f"{sym}_book_void"):
+                    is_void = True
+                    void_reason = "Order book void reported in live ticker feed"
+
+                if is_void:
+                    if pos.get("is_limit_resting") or pos.get("status") == "RESTING_LIMIT":
+                        canc_rec = self._create_cancellation_record(
+                            pos,
+                            "CANCELLED_ORDER_BOOK_VOID",
+                            f"Order book void active: {void_reason}"
+                        )
+                        self._archive_cancelled_order(canc_rec, pos.get("desk"))
+                        continue
+                    elif is_emergency_liq:
+                        pass # Liquidated below
+                    else:
+                        pos["safeguard_state"] = "SAFEGUARD_HOLD"
+                        pos["safeguard_reason"] = "ORDER_BOOK_VOID_ACTIVE"
+                        pos["safeguard_detail"] = void_reason
+                        remaining_positions.append(pos)
+                        continue
+                elif pos.get("safeguard_state") == "SAFEGUARD_HOLD" and pos.get("safeguard_reason") == "ORDER_BOOK_VOID_ACTIVE":
+                    pos["safeguard_state"] = "ACTIVE_MONITORING"
+                    pos.pop("safeguard_reason", None)
+                    pos.pop("safeguard_detail", None)
 
                 # Calculate elapsed time and duration
                 opened_dt = None
@@ -1022,9 +1062,14 @@ class PaperTradingBot:
                 hit_tp1_final = is_tp1 and (not has_multi_tp or policy == "SINGLE_TARGET_TP1")
                 hit_tp = hit_tp3 or hit_tp2_final or hit_tp1_final
 
-                # Check Exit Triggers (TP, SL, Horizon Expiry, or Emergency Macro Impulse)
-                if hit_tp or hit_sl or hit_expiry or hit_emergency_exit:
-                    if hit_emergency_exit:
+                hit_order_book_void_exit = is_void and is_emergency_liq
+
+                # Check Exit Triggers (TP, SL, Horizon Expiry, Emergency Macro Impulse, or Order Book Void Emergency Liquidation)
+                if hit_tp or hit_sl or hit_expiry or hit_emergency_exit or hit_order_book_void_exit:
+                    if hit_order_book_void_exit:
+                        exit_reason = "CLOSED_ORDER_BOOK_VOID_EMERGENCY_LIQUIDATION"
+                        exit_p = curr_p if curr_p > 0 else entry_p
+                    elif hit_emergency_exit:
                         exit_reason = "EMERGENCY_MACRO_IMPULSE_EXIT"
                         exit_p = curr_p
                     elif hit_tp3:
@@ -1071,13 +1116,13 @@ class PaperTradingBot:
                     spread_bps = float(pos.get("spread_bps") or 4.0)
                     entry_was_limit = bool(pos.get("optimal_entry_limit") and not pos.get("is_limit_resting"))
                     entry_spread_usd = 0.0 if entry_was_limit else (spread_bps / 20000.0) * rem_notional
-                    exit_spread_usd = 0.0 if hit_tp else (spread_bps / 20000.0) * rem_notional
+                    exit_spread_usd = 0.0 if (hit_tp or hit_order_book_void_exit) else (spread_bps / 20000.0) * rem_notional
                     spread_drag_usd = entry_spread_usd + exit_spread_usd
 
                     # 3. Execution Slippage Drag
                     dyn_entry_slip_rate, dyn_exit_slip_rate = _calc_tick_slip_rates(pos)
                     entry_slip_usd = 0.0 if entry_was_limit else (dyn_entry_slip_rate * rem_notional)
-                    exit_slip_usd = 0.0 if hit_tp else (dyn_exit_slip_rate * rem_notional)
+                    exit_slip_usd = 0.0 if (hit_tp or hit_order_book_void_exit) else (dyn_exit_slip_rate * rem_notional)
                     slippage_drag_usd = entry_slip_usd + exit_slip_usd
 
                     # 4. Accrued Funding Rate Drag (Pro-rated per 8-hour cycle)
@@ -1757,7 +1802,7 @@ class PaperTradingBot:
                     d_val["active_slots"] = sum(1 for p in valid_positions if p.get("desk") == d_key)
                 self.save_ledger()
 
-    def start_tick_daemon(self, ticker_fetch_fn, interval_seconds: float = 0.5, partition_check_fn = None, latency_fetch_fn = None):
+    def start_tick_daemon(self, ticker_fetch_fn, interval_seconds: float = 0.5, partition_check_fn = None, latency_fetch_fn = None, order_book_voids_fn = None):
         """Starts the decoupled 24/7 high-speed sub-second position monitoring thread with latency and outage awareness."""
         if self._running:
             return
@@ -1772,6 +1817,7 @@ class PaperTradingBot:
                     if self.data["open_positions"]:
                         is_partition = partition_check_fn() if partition_check_fn else False
                         latency_ms = latency_fetch_fn() if latency_fetch_fn else 0.0
+                        voids = order_book_voids_fn() if order_book_voids_fn else None
 
                         if is_partition:
                             consecutive_partitions += 1
@@ -1779,13 +1825,13 @@ class PaperTradingBot:
                             jitter = random.uniform(-0.1, 0.1)
                             current_interval = min(4.0, max(1.5, 1.5 + (consecutive_partitions * 0.5))) + jitter
                             # Pass empty dict to avoid redundant ticker_fetch_fn calls during active partition
-                            self.on_tick({}, is_market_partition_active=True, tick_latency_ms=latency_ms)
+                            self.on_tick({}, is_market_partition_active=True, tick_latency_ms=latency_ms, order_book_voids=voids)
                         else:
                             consecutive_partitions = 0
                             current_interval = interval_seconds
                             prices = ticker_fetch_fn()
                             if prices:
-                                self.on_tick(prices, is_market_partition_active=False, tick_latency_ms=latency_ms)
+                                self.on_tick(prices, is_market_partition_active=False, tick_latency_ms=latency_ms, order_book_voids=voids)
                 except Exception as e:
                     pass
                 time.sleep(max(0.1, current_interval))
