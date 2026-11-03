@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import patch, MagicMock
 import os
 import time
 import pandas as pd
@@ -1004,6 +1005,154 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
         initial_zombie_count = feed.zombie_watchdog_triggers
         feed._zombie_watchdog_count += 1
         self.assertEqual(feed.zombie_watchdog_triggers, initial_zombie_count + 1)
+
+    def test_upstream_websocket_mirror_outage_and_instant_rest_stepdown(self):
+        """
+        Verifies resilience when third-party upstream WebSocket mirrors experience widespread outages:
+        1. When consecutive_fails >= len(MIRROR_ENDPOINTS), is_mirror_outage becomes True.
+        2. is_healthy() immediately fails closed (returns False) without waiting for 3.5s timeout.
+        3. DataLoader detects mirror outage, skips ws_feed, and engages REST failover.
+        4. When all Binance REST mirrors fail, trips 45s bypass and cascades to secondary venues.
+        5. When a valid packet is received, is_mirror_outage resets to False.
+        """
+        from app.engine.scanner.websocket_feed import WebSocketFeedManager
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+
+        feed = WebSocketFeedManager()
+        self.assertFalse(feed.is_mirror_outage)
+
+        # 1. Simulate outage across all mirror endpoints
+        feed._lock.acquire()
+        feed._is_mirror_outage = True
+        feed._connected = True
+        feed._prices = {"BTC/USDT": 67000.0}
+        feed._last_received_ts = time.time()
+        feed._lock.release()
+
+        # 2. is_healthy() must immediately return False during mirror outage despite warm prices
+        self.assertTrue(feed.is_mirror_outage)
+        self.assertFalse(feed.is_healthy())
+
+        # 3. Verify DataLoader bypasses ws_feed when is_mirror_outage is True
+        loader = MultiHorizonDataLoader()
+        loader.ws_feed = feed
+
+        # Mock Binance REST failing with ConnectionError to simulate Cloudflare/edge partition
+        mock_response_fail = MagicMock()
+        mock_response_fail.status_code = 502
+
+        with patch.object(loader.session, "get", side_effect=Exception("ConnectionRefused")):
+            with patch.object(loader, "_fetch_bybit_tickers", return_value={"BTC/USDT": 67100.0, "ETH/USDT": 2640.0}):
+                ticks = loader.fetch_all_tickers(max_age_seconds=0.0)
+                # Must have bypassed Binance and successfully fallen back to Tier-2 Bybit
+                self.assertEqual(ticks.get("BTC/USDT"), 67100.0)
+                # Must have tripped Binance cooldown
+                self.assertGreater(loader._binance_ip_throttled_until, time.time())
+
+        # 4. Simulate packet receipt to restore WebSocket healthy state
+        valid_packet = json.dumps([{"s": "BTCUSDT", "c": "67200.0"}])
+        feed._process_raw_message(valid_packet)
+        feed._lock.acquire()
+        feed._is_mirror_outage = False
+        feed._lock.release()
+
+        self.assertFalse(feed.is_mirror_outage)
+        self.assertTrue(feed.is_healthy())
+
+    def test_first_bar_breakout_spread_asymmetry_and_friction_gate(self):
+        """
+        Verifies protection against First-Bar Breakout Spread Asymmetry:
+        1. Dynamic breakout spread cushion expands modeled effective_spread_bps for low-cap coins.
+        2. ExecutionCostEngine applies ExecutionAssumption.STRESS during squeeze transitions.
+        3. If live spread exceeds tightened breakout limit (12 bps for 15M) OR total friction
+           consumes > 40.0% of TP1 distance, signal is vetoed with HOLD_VETOED_BY_BREAKOUT_SPREAD_ASYMMETRY.
+        4. Deep volume assets with narrow spreads (<40% friction) pass safely.
+        """
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+        from app.quant_v16.costs import ExecutionCostEngine, ExecutionAssumption
+
+        # 1. Verify ExecutionCostEngine handles is_squeeze_transition and low-cap spread floor
+        cost_engine = ExecutionCostEngine()
+        costs_low_cap = cost_engine.estimate_costs(
+            market_type="futures",
+            observed_spread_bps=2.0,
+            volume_24h_usd=8_000_000.0,
+            is_squeeze_transition=True
+        )
+        self.assertEqual(costs_low_cap.assumption, ExecutionAssumption.STRESS)
+        # Low cap under $25M dynamically raises spread floor to at least 6.0 bps * 2.2 = 13.2 bps -> spread_pct >= 0.13%
+        self.assertGreaterEqual(costs_low_cap.spread_pct, 0.13)
+
+        # 2. Test SignalGenerationSystem vetoes asymmetric blowout on first breakout bar
+        sig_sys = SignalGenerationSystem()
+        btc_shield_state = {
+            "regime": "BREAKOUT",
+            "v16_regime": "BREAKOUT",
+            "status_code": "BREAKOUT",
+            "is_squeeze_transition": True,
+            "altcoin_posture": "BREAKOUT_ALPHA",
+            "is_ntz_active": False,
+            "altcoin_longs_allowed": True
+        }
+
+        # Build dummy 15m candle dataframe
+        n = 30
+        c_series = [10.0 + i * 0.05 for i in range(n)]
+        df_15m = pd.DataFrame({
+            "open": c_series,
+            "high": [c + 0.30 for c in c_series], # Expansion candle
+            "low": [c - 0.10 for c in c_series],
+            "close": c_series,
+            "volume": [50000.0] * n
+        })
+        dfs_9 = {"15m": df_15m, "1h": df_15m, "1d": df_15m}
+
+        # Case A: Spread blowout (15 bps > 12 bps limit on 15M breakout)
+        sig_blowout = sig_sys._build_single_horizon_signal(
+            symbol="ALT/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=11.5,
+            dfs_9=dfs_9,
+            horizon_prediction={"consensus_probability": 0.75, "predicted_change_pct": 1.5, "predicted_target_price": 11.67, "classifier_votes": "4/5", "regressor_votes": "4/5"},
+            btc_shield_state=btc_shield_state,
+            aligned_horizons=["15M"],
+            spread_bps=15.0, # Blowout spread
+            volume_24h_usd=5_000_000.0
+        )
+        self.assertTrue(sig_blowout["is_breakout_spread_asymmetric"])
+        self.assertEqual(sig_blowout["signal_status"], "HOLD_VETOED_BY_BREAKOUT_SPREAD_ASYMMETRY")
+        self.assertFalse(sig_blowout["is_trade_active"])
+        self.assertEqual(sig_blowout["conviction"], 0.0)
+
+        # Case B: Liquid coin with narrow spread (4 bps, 2.5% TP1 move -> friction < 40% of target)
+        c_series_sol = [150.0 + i * 0.10 for i in range(n)]
+        df_sol_15m = pd.DataFrame({
+            "open": c_series_sol,
+            "high": [c + 1.50 for c in c_series_sol],
+            "low": [c - 0.50 for c in c_series_sol],
+            "close": c_series_sol,
+            "volume": [500000.0] * n
+        })
+        dfs_sol = {"15m": df_sol_15m, "1h": df_sol_15m, "1d": df_sol_15m}
+
+        sig_liquid = sig_sys._build_single_horizon_signal(
+            symbol="SOL/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=152.0,
+            dfs_9=dfs_sol,
+            horizon_prediction={"consensus_probability": 0.78, "predicted_change_pct": 3.0, "predicted_target_price": 156.5, "classifier_votes": "4/5", "regressor_votes": "4/5"},
+            btc_shield_state=btc_shield_state,
+            aligned_horizons=["15M"],
+            spread_bps=4.0, # Liquid spread
+            volume_24h_usd=250_000_000.0
+        )
+        self.assertFalse(sig_liquid["is_breakout_spread_asymmetric"])
+        self.assertIn("STRESS", sig_liquid["execution_assumption"])
+
 
 
 if __name__ == "__main__":

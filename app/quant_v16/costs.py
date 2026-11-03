@@ -58,12 +58,16 @@ class ExecutionCostEngine:
         position_size_usd: Optional[float] = None,
         volume_24h_usd: Optional[float] = None,
         funding_interval_hours: float = 8.0,
+        is_squeeze_transition: bool = False,
     ) -> CostBreakdown:
         """
         Estimates total roundtrip costs under specified scenario.
         Includes EXT-02 non-linear square-root market impact slippage when position size
         and 24h volume are provided.
         """
+        if is_squeeze_transition:
+            assumption = ExecutionAssumption.STRESS
+
         is_futures = market_type.lower() in ["futures", "perp", "swap"]
         
         # 1. Base Trading Fees (Roundtrip entry taker + exit taker/maker blended)
@@ -79,6 +83,9 @@ class ExecutionCostEngine:
 
         # 2. Spread (bps to %)
         spread_bps = max(1.0, observed_spread_bps)
+        if is_squeeze_transition and volume_24h_usd is not None and 0 < float(volume_24h_usd) < 25_000_000.0:
+            # Low-cap altcoins face sudden order-book depth voids on breakout transitions
+            spread_bps = max(spread_bps, 6.0)
         
         # 3. Slippage (bps to %)
         slip_bps = historical_slippage_bps if historical_slippage_bps is not None else self.default_slippage_bps

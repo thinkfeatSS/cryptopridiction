@@ -22,7 +22,8 @@ class WebSocketFeedManager:
     PRIMARY_WS = "wss://data-stream.binance.vision/ws/!miniTicker@arr"
     FALLBACK_WS = "wss://stream.binance.com:9443/ws/!miniTicker@arr"
     MIRROR_WS = "wss://stream.binance.com:443/ws/!miniTicker@arr"
-    MIRROR_ENDPOINTS = [PRIMARY_WS, FALLBACK_WS, MIRROR_WS]
+    ALT_MIRROR_WS = "wss://stream.binance.com/ws/!miniTicker@arr"
+    MIRROR_ENDPOINTS = [PRIMARY_WS, FALLBACK_WS, MIRROR_WS, ALT_MIRROR_WS]
 
     def __init__(self, ping_interval: float = 20.0, ping_timeout: float = 10.0):
         self.ping_interval = ping_interval
@@ -41,6 +42,18 @@ class WebSocketFeedManager:
         self._total_packets_received: int = 0
         self._is_reconnecting: bool = False
         self._zombie_watchdog_count: int = 0
+        self._is_mirror_outage: bool = False
+        self._mirror_outage_count: int = 0
+
+    @property
+    def is_mirror_outage(self) -> bool:
+        with self._lock:
+            return self._is_mirror_outage
+
+    @property
+    def mirror_outage_count(self) -> int:
+        with self._lock:
+            return self._mirror_outage_count
 
     @property
     def is_reconnecting(self) -> bool:
@@ -61,9 +74,9 @@ class WebSocketFeedManager:
             return self._last_received_ts
 
     def is_healthy(self, max_staleness_seconds: float = 3.5) -> bool:
-        """Returns True if the WebSocket connection is active and received ticks recently."""
+        """Returns True if the WebSocket connection is active, healthy, and not experiencing an upstream mirror outage."""
         with self._lock:
-            if not self._connected or not self._prices:
+            if self._is_mirror_outage or not self._connected or not self._prices:
                 return False
             return (time.time() - self._last_received_ts) <= max_staleness_seconds
 
@@ -152,6 +165,9 @@ class WebSocketFeedManager:
                     with self._lock:
                         self._connected = True
                         self._is_reconnecting = False
+                        if self._is_mirror_outage:
+                            self._is_mirror_outage = False
+                            print(f"[WEBSOCKET FEED ⚡] Upstream WebSocket connection established via {stream_url}. Restored sub-second Tier-0 tick ingestion.", flush=True)
                     consecutive_fails = 0
 
                     while self._is_running:
@@ -172,6 +188,14 @@ class WebSocketFeedManager:
                     self._is_reconnecting = self._is_running
                 self._reconnect_count += 1
                 consecutive_fails += 1
+
+                # Track mirror outage when all mirrors have consecutively failed
+                if consecutive_fails >= len(self.MIRROR_ENDPOINTS):
+                    with self._lock:
+                        if not self._is_mirror_outage:
+                            self._is_mirror_outage = True
+                            self._mirror_outage_count += 1
+                            print(f"[WEBSOCKET FEED 🚨] Upstream WebSocket mirror outage active across all {len(self.MIRROR_ENDPOINTS)} mirrors. Instant stepdown to Multi-Venue REST Fallback Hierarchy active.", flush=True)
 
                 # Fast recovery on initial drops (<300ms) to stay within 3.5s freshness SLA
                 if consecutive_fails <= 1:

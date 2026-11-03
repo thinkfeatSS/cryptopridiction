@@ -1,4 +1,5 @@
 import time
+import math
 import threading
 import numpy as np
 import pandas as pd
@@ -562,22 +563,42 @@ class SignalGenerationSystem:
         holding_hours = 0.25 if horizon_label == "15M" else (1.0 if horizon_label == "1H" else 24.0)
 
         # EXT-02: Non-Linear Liquidity Market Impact Slippage
-        vol_24h_usd = None
-        if "1d" in dfs_9 and not dfs_9["1d"].empty and "volume" in dfs_9["1d"].columns:
+        vol_24h_usd = volume_24h_usd if (volume_24h_usd is not None and float(volume_24h_usd) > 0) else None
+        if vol_24h_usd is None and "1d" in dfs_9 and not dfs_9["1d"].empty and "volume" in dfs_9["1d"].columns:
             last_vol = float(dfs_9["1d"]["volume"].iloc[-1])
             vol_24h_usd = last_vol * current_price if current_price > 0 else None
+
+        # Dynamic Breakout Spread Cushion & First-Bar Asymmetry Modeling
+        effective_spread_bps = float(spread_bps)
+        breakout_spread_cushion_bps = 0.0
+        if is_squeeze_trans:
+            candle_expansion_pct = 1.0
+            if df_active is not None and len(df_active) > 0 and "close" in df_active.columns:
+                c_c = float(df_active["close"].iloc[-1])
+                c_h = float(df_active["high"].iloc[-1]) if "high" in df_active.columns else c_c
+                c_l = float(df_active["low"].iloc[-1]) if "low" in df_active.columns else c_c
+                candle_expansion_pct = max(0.5, ((c_h - c_l) / max(1e-8, c_c)) * 100.0)
+
+            vol_ref = float(vol_24h_usd) if (vol_24h_usd and vol_24h_usd > 0) else 5_000_000.0
+            liquidity_scarcity_factor = max(1.0, math.sqrt(50_000_000.0 / max(1_000_000.0, vol_ref)))
+            expansion_factor = max(0.2, candle_expansion_pct / 1.5)
+
+            cushion = min(35.0, spread_bps * (1.0 + 0.5 * expansion_factor * (liquidity_scarcity_factor - 1.0)))
+            effective_spread_bps = max(spread_bps, cushion)
+            breakout_spread_cushion_bps = round(effective_spread_bps - spread_bps, 2)
 
         exec_assumption = ExecutionAssumption.STRESS if is_squeeze_trans else ExecutionAssumption.BASE
 
         cost_breakdown = self.cost_engine.estimate_costs(
             market_type="futures",
-            observed_spread_bps=spread_bps,
+            observed_spread_bps=effective_spread_bps,
             est_holding_hours=holding_hours,
             current_funding_rate=current_funding_rate,
             assumption=exec_assumption,
             position_size_usd=1000.0,
             volume_24h_usd=vol_24h_usd,
-            funding_interval_hours=8.0
+            funding_interval_hours=8.0,
+            is_squeeze_transition=is_squeeze_trans
         )
 
         ev_result = self.expectancy_engine.evaluate(
@@ -670,6 +691,21 @@ class SignalGenerationSystem:
             except Exception:
                 is_flash_drain = False
 
+        # First-Bar Breakout Spread Asymmetry Breaker & Risk Gate
+        is_breakout_spread_asymmetric = False
+        asymmetry_reason = ""
+        if is_squeeze_trans:
+            target_dist_pct = abs(cand_tp1 - entry_analysis["optimal_entry_price"]) / max(1e-8, entry_analysis["optimal_entry_price"]) * 100.0
+            friction_to_tp1_ratio = cost_breakdown.total_cost_pct / max(0.01, target_dist_pct)
+            max_allowed_breakout_spread = 12.0 if horizon_label == "15M" else (16.0 if horizon_label == "1H" else 22.0)
+
+            if float(spread_bps) > max_allowed_breakout_spread:
+                is_breakout_spread_asymmetric = True
+                asymmetry_reason = f"Breakout spread blowout ({spread_bps:.1f} bps > {max_allowed_breakout_spread:.1f} bps limit)"
+            elif friction_to_tp1_ratio > 0.40:
+                is_breakout_spread_asymmetric = True
+                asymmetry_reason = f"Friction consumes {friction_to_tp1_ratio*100:.1f}% of TP1 target (> 40.0% limit)"
+
         if volume_24h_usd and 0 < volume_24h_usd < 1_000_000.0:
             status = "HOLD_VETOED_BY_SUB_THRESHOLD_ILLIQUIDITY"
             trade_active = False
@@ -684,6 +720,16 @@ class SignalGenerationSystem:
             status = "HOLD_VETOED_BY_FLASH_LIQUIDITY_DRAIN"
             trade_active = False
             grade = f"Grade C (FLASH LIQUIDITY DRAIN: {flash_drain_reason})"
+            conviction = 0.0
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
+        elif is_breakout_spread_asymmetric:
+            status = "HOLD_VETOED_BY_BREAKOUT_SPREAD_ASYMMETRY"
+            trade_active = False
+            grade = f"Grade C (BREAKOUT SPREAD ASYMMETRY: {asymmetry_reason})"
             conviction = 0.0
             tp1_price = cand_tp1
             tp2_price = cand_tp2
@@ -905,6 +951,10 @@ class SignalGenerationSystem:
             "ev_net": ev_result.expected_net_return_pct,
             "ev_gross": ev_result.ev_gross_pct,
             "is_squeeze_transition": is_squeeze_trans,
+            "is_breakout_spread_asymmetric": is_breakout_spread_asymmetric,
+            "asymmetry_reason": asymmetry_reason if is_breakout_spread_asymmetric else None,
+            "breakout_spread_cushion_bps": breakout_spread_cushion_bps,
+            "effective_spread_bps": round(effective_spread_bps, 2),
             "execution_assumption": exec_assumption.value,
             "costs_total_pct": ev_result.costs_total_pct,
             "cost_breakdown": {

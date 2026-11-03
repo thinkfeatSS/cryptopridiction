@@ -1042,7 +1042,7 @@ class MultiHorizonDataLoader:
         """Fetches all live prices with ultra-low latency: Tier-0 WebSocket -> Tier-1 Binance REST -> Tier-1.5 OKX -> Bybit -> MEXC -> Gate.io -> KuCoin -> Cache."""
         now = time.time()
         # Tier-0: Real-Time WebSocket stream (<500ms latency, 0ms HTTP round-trip)
-        if self.ws_feed and self.ws_feed.is_healthy():
+        if self.ws_feed and not getattr(self.ws_feed, "is_mirror_outage", False) and self.ws_feed.is_healthy():
             ws_ticks = self.ws_feed.get_prices()
             if ws_ticks and len(ws_ticks) > 10:
                 with self._cache_lock:
@@ -1073,31 +1073,30 @@ class MultiHorizonDataLoader:
                 "https://api3.binance.com/api/v3/ticker/price",
                 "https://fapi.binance.com/fapi/v1/ticker/price"
             ]
-            all_rate_limited = True
+            mirrors_attempted = 0
+            mirrors_failed = 0
             for u in urls:
                 # Skip mirror if currently in host cooldown
                 if now < self._host_cooldowns.get(u, 0.0):
                     continue
+                mirrors_attempted += 1
                 try:
                     r = self.session.get(u, timeout=1.8)
                     if r.status_code == 200:
                         data = r.json()
-                        all_rate_limited = False
                         break
-                    elif r.status_code in [403, 418, 429]:
-                        # Cooldown only this specific mirror, then try remaining mirrors (including futures!)
-                        self._host_cooldowns[u] = now + 45.0
-                        continue
                     else:
-                        all_rate_limited = False
+                        self._host_cooldowns[u] = now + 45.0
+                        mirrors_failed += 1
                 except Exception:
-                    all_rate_limited = False
-                    continue
+                    self._host_cooldowns[u] = now + 45.0
+                    mirrors_failed += 1
 
-            # Only trip total Binance IP ban if ALL mirrors were rate-limited or blocked
-            if all_rate_limited and not data:
+            # Trip temporary Binance bypass if all attempted mirrors failed or were in cooldown
+            if mirrors_attempted > 0 and mirrors_failed == mirrors_attempted and not data:
                 with self._weight_lock:
-                    self._binance_ip_throttled_until = now + 90.0
+                    self._binance_ip_throttled_until = now + 45.0
+                print(f"[DATA LOADER [UPSTREAM OUTAGE]] All {mirrors_failed} Binance REST mirrors failed or in cooldown. Bypassing Binance for 45s; cascading directly to Bybit / OKX / Gate.io.", flush=True)
 
         if data and isinstance(data, list):
             res = {}
