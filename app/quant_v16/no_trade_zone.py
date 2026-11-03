@@ -298,12 +298,29 @@ class NoTradeZoneEngine:
         vol_24h_quote = 0.0
         if stats_24h:
             try:
-                vol_24h_quote = float(stats_24h.get('quoteVolume', 0.0) or 0.0)
+                if isinstance(stats_24h, (int, float)):
+                    vol_24h_quote = float(stats_24h)
+                elif isinstance(stats_24h, dict):
+                    vol_24h_quote = float(stats_24h.get('quoteVolume') or stats_24h.get('volume_24h_usd') or stats_24h.get('volume_24h') or 0.0)
             except Exception:
                 vol_24h_quote = 0.0
 
-        effective_min_vol = (min_quote_vol * 0.50) if is_exempt_strategy else min_quote_vol
+        # Strict Tier-2 Liquidity Floor: $1.0M USDT baseline
+        # Even for exempt strategies, trading below $1M incurs severe slippage and wide spread
+        effective_min_vol = max(1_000_000.0, (min_quote_vol * 0.50) if is_exempt_strategy else min_quote_vol)
         is_sub_liquidity = (vol_24h_quote > 0 and vol_24h_quote < effective_min_vol)
+
+        # Multi-day rolling volume check: If rolling volume across recent daily history is dry (< $1M)
+        if (not is_sub_liquidity) and df is not None and "volume" in df.columns and len(df) >= 3:
+            try:
+                tf_clean_str = str(anchor_tf or "").lower()
+                if any(k in tf_clean_str for k in ["1d", "daily", "24h", "1w", "15d"]):
+                    rolling_daily_usd = float((df["volume"].iloc[-3:] * df["close"].iloc[-3:]).mean())
+                    if 0 < rolling_daily_usd < 1_000_000.0:
+                        is_sub_liquidity = True
+                        vol_24h_quote = rolling_daily_usd
+            except Exception:
+                pass
         # Dynamically adapt RVOL floor: relax during quiet sessions if verified OB trigger, coiling compression, or boundary setup exists
         effective_rvol_thresh = rvol_dry_thresh
         if is_exempt_strategy:
@@ -318,11 +335,11 @@ class NoTradeZoneEngine:
         is_dry_volume_lull = (not is_exempt_strategy) and (rvol < effective_rvol_thresh and (chop >= chop_squeeze_thresh or adx < adx_severe_thresh))
 
         if is_sub_liquidity:
-            reasons.append(f"Low Liquidity (${vol_24h_quote/1e6:.1f}M < ${min_quote_vol/1e6:.1f}M USDT)")
+            reasons.append(f"Sub-Threshold Illiquidity (${vol_24h_quote/1e6:.2f}M < ${effective_min_vol/1e6:.1f}M USDT). Trading halted to eliminate slippage traps on thin books.")
             if primary_code == NoTradeZoneReason.CLEAR:
                 primary_code = NoTradeZoneReason.DRY_VOLUME_ILLIQUID
-                primary_label = f"🛑 NO TRADE ZONE (LOW LIQUIDITY - {tf_label})"
-                badge = f"ILLIQUID (${vol_24h_quote/1e6:.1f}M Vol)"
+                primary_label = f"🛑 NO TRADE ZONE (SUB-THRESHOLD ILLIQUIDITY - {tf_label})"
+                badge = f"ILLIQUID (${vol_24h_quote/1e6:.1f}M)"
         elif is_dry_breakout:
             reasons.append(f"Dry Volume Breakout Deficit on {tf_label} (RVOL: {rvol:.2f}x < {effective_rvol_thresh}x)")
             if primary_code == NoTradeZoneReason.CLEAR:

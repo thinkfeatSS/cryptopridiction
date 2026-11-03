@@ -257,9 +257,15 @@ class EntryConfirmationEngine:
                 atr20 = float((h20 - l20).mean())
                 kc_upper = ma20 + (1.5 * atr20)
                 kc_lower = ma20 - (1.5 * atr20)
-                if is_long and c_close > kc_upper and is_green and body_ratio >= 0.50:
+                # Anti-Whipsaw Guard:
+                # 1. Real body must be decisive (body_ratio >= 0.50).
+                # 2. Rejection wick in expansion direction must be minimal (upper_wick <= 0.28 for Long, lower_wick <= 0.28 for Short).
+                # 3. Candle must close firmly at extreme (close_pos >= 0.70 for Long, <= 0.30 for Short).
+                # 4. Volatility expansion confirmation: std20 >= (0.70 * atr20) confirms Bollinger Bands are expanding outside compression.
+                is_vol_expanding = (std20 >= (0.70 * atr20))
+                if is_long and c_close > kc_upper and is_green and body_ratio >= 0.50 and upper_wick_ratio <= 0.28 and close_pos_in_range >= 0.70 and is_vol_expanding:
                     is_squeeze_expansion = True
-                elif not is_long and c_close < kc_lower and is_red and body_ratio >= 0.50:
+                elif not is_long and c_close < kc_lower and is_red and body_ratio >= 0.50 and lower_wick_ratio <= 0.28 and close_pos_in_range <= 0.30 and is_vol_expanding:
                     is_squeeze_expansion = True
             except Exception:
                 is_squeeze_expansion = False
@@ -301,8 +307,15 @@ class EntryConfirmationEngine:
             if is_red and lower_wick_ratio < 0.15 and close_pos_in_range <= 0.25 and body_ratio >= 0.65:
                 return False, f"Bearish Marubozu Waterfall: No buyer absorption (lower wick {lower_wick_ratio*100:.0f}%, close at bottom {close_pos_in_range*100:.0f}%)", metrics
 
+            # Rejection of Long: Bull Trap Liquidity Sweep / Fakeout Rejection at High
+            if len(df) >= 5:
+                prior_high_window = df.iloc[max(0, len(df) - 12):max(1, len(df) - 2)]
+                prior_swing_high = float(prior_high_window["high"].max())
+                if c_high > prior_swing_high and c_close <= prior_swing_high and upper_wick_ratio >= 0.25:
+                    return False, f"Bull Trap Liquidity Sweep Fakeout: Price swept prior high ({prior_swing_high:.4f}) but closed below with {upper_wick_ratio*100:.0f}% rejection wick", metrics
+
             # Rejection of Long: Extreme upper wick rejection fakeout on green candle
-            if is_green and upper_wick_ratio >= 0.55 and close_pos_in_range < 0.45:
+            if is_green and upper_wick_ratio >= 0.40 and close_pos_in_range < 0.50:
                 return False, f"Long Upper Wick Blow-off Rejection: Exhaustion wick ({upper_wick_ratio*100:.0f}%) rejected higher prices", metrics
 
             # Institutional Setup 1: Bullish Engulfing Momentum Flip
@@ -365,8 +378,15 @@ class EntryConfirmationEngine:
             if is_green and upper_wick_ratio < 0.15 and close_pos_in_range >= 0.75 and body_ratio >= 0.65:
                 return False, f"Bullish Marubozu Ramp: No seller rejection (upper wick {upper_wick_ratio*100:.0f}%, close at top {close_pos_in_range*100:.0f}%)", metrics
 
+            # Rejection of Short: Bear Trap Liquidity Sweep / Fakeout Rebound at Low
+            if len(df) >= 5:
+                prior_low_window = df.iloc[max(0, len(df) - 12):max(1, len(df) - 2)]
+                prior_swing_low = float(prior_low_window["low"].min())
+                if c_low < prior_swing_low and c_close >= prior_swing_low and lower_wick_ratio >= 0.25:
+                    return False, f"Bear Trap Liquidity Sweep Absorption: Price swept prior low ({prior_swing_low:.4f}) but closed above with {lower_wick_ratio*100:.0f}% absorption wick", metrics
+
             # Rejection of Short: Extreme lower wick absorption fakeout on red candle
-            if is_red and lower_wick_ratio >= 0.55 and close_pos_in_range > 0.55:
+            if is_red and lower_wick_ratio >= 0.40 and close_pos_in_range > 0.50:
                 return False, f"Short Lower Wick Absorption: Strong buyer floor ({lower_wick_ratio*100:.0f}%) absorbed selling", metrics
 
             # Institutional Setup 1: Bearish Engulfing Momentum Flip
