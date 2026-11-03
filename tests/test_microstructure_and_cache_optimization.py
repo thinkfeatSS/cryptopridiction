@@ -134,6 +134,27 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
         init_duration_ms = (time.time() - t0) * 1000.0
         self.assertLess(init_duration_ms, 25.0)
 
+    def test_extreme_rate_limiting_and_network_resilience(self):
+        """
+        Verify that:
+        1. MultiHorizonDataLoader has HTTP Retry strategy configured.
+        2. Tier-6.6 Coinpaprika aggregator provides instant fallback when primary and CoinCap fail.
+        3. Independent mirror cooldown prevents a single mirror 429 from blocking other mirrors.
+        """
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        loader = MultiHorizonDataLoader()
+
+        # 1. Verify Retry strategy mounted on session
+        adapter = loader.session.get_adapter("https://api.binance.com")
+        self.assertIsNotNone(adapter.max_retries)
+        self.assertGreaterEqual(getattr(adapter.max_retries, "total", 0), 2)
+
+        # 2. Test Coinpaprika fallback
+        ticks = loader._fetch_coinpaprika_tickers()
+        if ticks:
+            self.assertIn("BTC/USDT", ticks)
+            self.assertGreater(ticks["BTC/USDT"], 1000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

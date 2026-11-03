@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import requests
+from urllib3.util import Retry
 import numpy as np
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -105,7 +106,16 @@ class MultiHorizonDataLoader:
     def __init__(self, max_workers: int = 9):
         self.max_workers = max_workers
         self.session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=2)
+        retry_strategy = Retry(
+            total=3,
+            connect=3,
+            read=2,
+            backoff_factor=0.25,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET", "HEAD"],
+            raise_on_status=False
+        )
+        adapter = requests.adapters.HTTPAdapter(pool_connections=64, pool_maxsize=64, max_retries=retry_strategy)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         self.session.headers.update({
@@ -146,6 +156,11 @@ class MultiHorizonDataLoader:
         self._coincap_rates_ts: float = 0.0
         self._coincap_throttled_until: float = 0.0
         self.COINCAP_MIN_INTERVAL_SECONDS: float = 2.0
+
+        # Tier-6.6 Coinpaprika global rates cache (fallback on CoinCap 429/DNS drops)
+        self._paprika_rates_cache: Dict[str, float] = {}
+        self._paprika_rates_ts: float = 0.0
+        self._paprika_throttled_until: float = 0.0
 
         # Persistent disk cache setup
         self._disk_cache_dir = os.path.join(os.environ.get("EXPORT_DIR", "export_app_data"), "candle_cache")
@@ -771,6 +786,45 @@ class MultiHorizonDataLoader:
             return res
         return getattr(self, '_coincap_rates_cache', {}).copy()
 
+    def _fetch_coinpaprika_tickers(self) -> Dict[str, float]:
+        """
+        Tier-6.6 Failover: Coinpaprika Global Price Aggregator (2000+ USD pairs).
+        Engaged when CEX endpoints and Tier-6.5 CoinCap are rate-limited or experiencing network drops.
+        """
+        now = time.time()
+        if (now - getattr(self, '_paprika_rates_ts', 0.0)) < 3.0 and getattr(self, '_paprika_rates_cache', None):
+            return self._paprika_rates_cache.copy()
+
+        if now < getattr(self, '_paprika_throttled_until', 0.0):
+            return getattr(self, '_paprika_rates_cache', {}).copy()
+
+        res = {}
+        try:
+            url = "https://api.coinpaprika.com/v1/tickers"
+            resp = self.session.get(url, timeout=3.5)
+            if resp.status_code == 200:
+                data = resp.json()
+                for it in data:
+                    sym = it.get("symbol")
+                    p_usd = it.get("quotes", {}).get("USD", {}).get("price")
+                    if sym and p_usd and float(p_usd) > 0:
+                        p = float(p_usd)
+                        res[f"{sym}USDT"] = p
+                        res[f"{sym}/USDT"] = p
+                        res[f"{sym}/USDT:USDT"] = p
+                if res:
+                    self._paprika_rates_cache = res
+                    self._paprika_rates_ts = now
+                    print(f"[DATA LOADER [TIER-6.6]] Engaged Coinpaprika Global Rates Aggregator ({len(res)} prices).", flush=True)
+            elif resp.status_code == 429:
+                self._paprika_throttled_until = now + 60.0
+                return getattr(self, '_paprika_rates_cache', {}).copy()
+        except Exception:
+            pass
+
+        return res or getattr(self, '_paprika_rates_cache', {}).copy()
+
+
     def _backfill_historical_macro_candles(self, symbol: str, tf: str, df_binance: pd.DataFrame) -> pd.DataFrame:
         """
         Backfills pre-listing historical candles from secondary gateways (Bybit, MEXC)
@@ -881,18 +935,31 @@ class MultiHorizonDataLoader:
                 "https://api3.binance.com/api/v3/ticker/price",
                 "https://fapi.binance.com/fapi/v1/ticker/price"
             ]
+            all_rate_limited = True
             for u in urls:
+                # Skip mirror if currently in host cooldown
+                if now < self._host_cooldowns.get(u, 0.0):
+                    continue
                 try:
                     r = self.session.get(u, timeout=1.8)
                     if r.status_code == 200:
                         data = r.json()
+                        all_rate_limited = False
                         break
                     elif r.status_code in [403, 418, 429]:
-                        with self._weight_lock:
-                            self._binance_ip_throttled_until = now + 180.0
-                        break
+                        # Cooldown only this specific mirror, then try remaining mirrors (including futures!)
+                        self._host_cooldowns[u] = now + 45.0
+                        continue
+                    else:
+                        all_rate_limited = False
                 except Exception:
+                    all_rate_limited = False
                     continue
+
+            # Only trip total Binance IP ban if ALL mirrors were rate-limited or blocked
+            if all_rate_limited and not data:
+                with self._weight_lock:
+                    self._binance_ip_throttled_until = now + 90.0
 
         if data and isinstance(data, list):
             res = {}
@@ -992,6 +1059,19 @@ class MultiHorizonDataLoader:
                 for s in coincap_ticks:
                     self._symbol_price_timestamps[s] = now
             return coincap_ticks
+
+        # Tier-6.6 Failover: Coinpaprika Global Rates Aggregator (Fallback on CoinCap 429/DNS drops)
+        paprika_ticks = self._fetch_coinpaprika_tickers()
+        if paprika_ticks:
+            with self._cache_lock:
+                self._live_tickers_cache = paprika_ticks
+                self._live_tickers_ts = now
+                self._is_price_fresh_15s = True
+                self._price_freshness_age = 0.0
+                self._is_global_outage = False
+                for s in paprika_ticks:
+                    self._symbol_price_timestamps[s] = now
+            return paprika_ticks
 
         # Catastrophic Global Multi-Exchange Outage / Multi-Exchange Rate Limiting
         cache_age = max(0.0, now - self._live_tickers_ts) if self._live_tickers_ts > 0 else 999.0
