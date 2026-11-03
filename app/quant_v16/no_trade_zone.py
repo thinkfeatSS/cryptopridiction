@@ -249,22 +249,22 @@ class NoTradeZoneEngine:
         # ----------------------------------------------------------------------
         # PILLAR 1: CONSOLIDATION & CHOPPINESS (Dead sideways drift per timeframe)
         # ----------------------------------------------------------------------
-        # Condition A: Severe Chop combined with non-trending ADX on this timeframe
-        is_severe_chop = (chop >= chop_severe_thresh and adx < adx_severe_thresh)
-        # Condition B: High Chop + weak ADX + tight BBW squeeze
-        is_coiled_squeeze = (chop >= chop_squeeze_thresh and adx < adx_squeeze_thresh and bbw < bbw_squeeze_thresh)
-
-        # Institutional Exemption: Order block touches, Range rotations, Liquidity sweeps, FVG retests, and VWAP bounces
+        # Institutional Exemption: Order block touches, Range rotations, Liquidity sweeps, FVG retests, VWAP bounces, and Squeeze Expansions
         # actively trade structural reaction levels with positive edge and should not be suppressed as generic chop.
         has_fresh_ob = bool(ob_setup and ob_setup.get("setup_detected"))
         exempt_strategies = [
             "BREAKOUT", "EXPANSION", "ORDER_BLOCK", "BREAKER",
             "RANGE_BOUNCE", "RANGE_ROTATION", "RANGE_SUPPORT", "RANGE_RESISTANCE",
             "SUB_RANGE", "MEAN_REVERSION", "SWEEP", "RECLAIM", "FVG", "VWAP",
-            "DIP_BUY", "RALLY_FADE", "COILING", "TURTLE_SOUP", "INSIDE_BAR"
+            "DIP_BUY", "RALLY_FADE", "COILING", "TURTLE_SOUP", "INSIDE_BAR", "SQUEEZE"
         ]
         decision_str = str(decision).upper() if decision else ""
         is_exempt_strategy = has_fresh_ob or any(k in decision_str for k in exempt_strategies)
+
+        # Condition A: Severe Chop combined with non-trending ADX on this timeframe (exempting institutional setups)
+        is_severe_chop = ((not is_exempt_strategy) and chop >= chop_severe_thresh and adx < adx_severe_thresh)
+        # Condition B: High Chop + weak ADX + tight BBW squeeze without institutional setup/expansion
+        is_coiled_squeeze = ((not is_exempt_strategy) and chop >= chop_squeeze_thresh and adx < adx_squeeze_thresh and bbw < bbw_squeeze_thresh)
 
         # Condition C: Middle 50% Range Box Chop (25% < range_pos < 75%) with non-trending ADX (exempting institutional setups)
         is_middle_chop = (

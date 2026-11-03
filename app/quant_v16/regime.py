@@ -234,7 +234,9 @@ class MarketRegimeClassifier:
                 "ORDER_BLOCK_LONG", "ORDER_BLOCK_SHORT",
                 "BREAKER_BLOCK_LONG", "BREAKER_BLOCK_SHORT",
                 "DIP_BUY_LONG", "RALLY_FADE_SHORT",
-                "TOP_REVERSAL_SHORT", "BOTTOM_REVERSAL_LONG"
+                "TOP_REVERSAL_SHORT", "BOTTOM_REVERSAL_LONG",
+                "SQUEEZE_EXPANSION_LONG", "SQUEEZE_EXPANSION_SHORT",
+                "SQUEEZE_BREAKOUT_LONG", "SQUEEZE_BREAKOUT_SHORT"
             ]
 
         self.last_regime = regime

@@ -315,13 +315,20 @@ class CrossTimeframeMatrixEngine:
                 headroom = headroom_to_low
             else:
                 # Squeeze inside macro range box:
-                # Only take LONG breakout near support (range_pos <= 0.35) towards resistance,
-                # or SHORT breakout near resistance (range_pos >= 0.65) towards support.
-                # In the middle 30% chop (0.35 < range_pos < 0.65), suppress to preserve capital.
+                # 1. Take LONG breakout near support (range_pos <= 0.35) towards resistance.
+                # 2. Take SHORT breakout near resistance (range_pos >= 0.65) towards support.
+                # 3. In middle range (0.35 < range_pos < 0.65), allow directional breakout preparation if LTF momentum is established.
+                # 4. Otherwise, suppress to preserve capital against generic dead chop.
                 if range_pos <= 0.35 and headroom_to_high >= min_sub_headroom:
                     direction = "LONG"
                     headroom = headroom_to_high
                 elif range_pos >= 0.65 and headroom_to_low >= min_sub_headroom:
+                    direction = "SHORT"
+                    headroom = headroom_to_low
+                elif ltf_bullish and headroom_to_high >= min_sub_headroom:
+                    direction = "LONG"
+                    headroom = headroom_to_high
+                elif ltf_bearish and headroom_to_low >= min_sub_headroom:
                     direction = "SHORT"
                     headroom = headroom_to_low
                 else:
@@ -334,7 +341,7 @@ class CrossTimeframeMatrixEngine:
                         "headroom_pct": min(headroom_to_high, headroom_to_low),
                         "htf_range_high": htf_high,
                         "htf_range_low": htf_low,
-                        "rationale": f"Coiling squeeze located in mid-range chop ({range_pos*100.0:.1f}%). Section 35 gate locked for capital preservation.",
+                        "rationale": f"Coiling squeeze located in mid-range chop ({range_pos*100.0:.1f}%) without directional momentum. Section 35 gate locked for capital preservation.",
                     }
 
             return {

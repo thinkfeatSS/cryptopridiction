@@ -274,6 +274,79 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
 
 
 
+    def test_prolonged_macro_squeeze_trigger_qualification(self):
+        """
+        Verify that during a prolonged macro squeeze (BTC in SQUEEZE or RANGE),
+        an altcoin with a verified Keltner-Bollinger squeeze expansion trigger
+        qualifies for trading with SQUEEZE_EXPANSION strategy rather than being vetoed.
+        """
+        from app.engine.signals.signal_generator import SignalGenerationSystem, map_canonical_strategy
+        from app.quant_v16.strategies import StrategyArchetype
+        from app.quant_v16.no_trade_zone import no_trade_zone_engine
+
+        # 1. Verify Squeeze Expansion exemption in NTZ
+        df_tight = pd.DataFrame({
+            "open": [10.0] * 30,
+            "high": [10.05] * 30,
+            "low": [9.95] * 30,
+            "close": [10.0] * 30,
+            "volume": [1000.0] * 30
+        })
+        ntz_res = no_trade_zone_engine.evaluate_asset_ntz(
+            df=df_tight,
+            current_price=10.0,
+            anchor_tf="15m",
+            alignment_score=65.0,
+            meta_win_prob=0.70,
+            direction="LONG",
+            decision="SQUEEZE_EXPANSION_LONG"
+        )
+        self.assertFalse(ntz_res["is_ntz"], "SQUEEZE_EXPANSION must not be vetoed by coiled squeeze NTZ")
+
+        # 2. Verify Canonical Strategy Mapping
+        strat = map_canonical_strategy("COILING_VOLATILITY_BREAKOUT", "LONG", candle_metrics={"is_squeeze_expansion": True})
+        self.assertEqual(strat, StrategyArchetype.SQUEEZE_EXPANSION_LONG.value)
+
+        # 3. Verify evaluate_multi_horizon_gates with coiling breakout
+        sig_sys = SignalGenerationSystem()
+        matrix_eval = {
+            "archetype": InstitutionalArchetype.ARCHETYPE_B_COILING_BREAKOUT.value,
+            "trade_permitted": True,
+            "dominant_direction": "LONG",
+            "strategy": "COILING_VOLATILITY_BREAKOUT",
+            "allocation_pct": 50.0
+        }
+        trend_matrix = {
+            "5m": "CONSOLIDATION",
+            "15m": "CONSOLIDATION",
+            "1h": "CONSOLIDATION",
+            "4h": "CONSOLIDATION",
+            "12h": "CONSOLIDATION",
+            "1d": "CONSOLIDATION",
+            "1w": "CONSOLIDATION",
+            "15d": "CONSOLIDATION"
+        }
+        horizon_preds = {
+            "5m": {"is_cold_start": False, "candle_count": 50},
+            "15m": {"is_cold_start": False, "candle_count": 50},
+            "1h": {"is_cold_start": False, "candle_count": 50},
+            "4h": {"is_cold_start": False, "candle_count": 50},
+            "12h": {"is_cold_start": False, "candle_count": 50},
+            "1d": {"is_cold_start": False, "candle_count": 50},
+            "1w": {"is_cold_start": False, "candle_count": 50},
+            "15d": {"is_cold_start": False, "candle_count": 50}
+        }
+        q_15m, q_1h, q_24h = sig_sys.evaluate_multi_horizon_gates(
+            trend_matrix=trend_matrix,
+            horizon_predictions=horizon_preds,
+            matrix_eval=matrix_eval,
+            has_smc_15m=True,
+            smc_dir_15m="LONG"
+        )
+        self.assertTrue(q_15m["qualified"], "15M gate must qualify on verified squeeze expansion trigger")
+        self.assertEqual(q_15m["direction"], "LONG")
+
+
 if __name__ == "__main__":
     unittest.main()
 

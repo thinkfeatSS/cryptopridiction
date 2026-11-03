@@ -412,7 +412,7 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.SQUEEZE_EXPANSION_SHORT.value,
                 sample_count=90, resolved_count=85, win_rate=0.60, profit_factor=1.36,
                 rolling_50_pf=1.30, expectancy_net_pct=0.64,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.SQUEEZE_BREAKOUT_LONG.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.SQUEEZE_BREAKOUT_LONG.value,

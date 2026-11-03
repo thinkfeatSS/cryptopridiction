@@ -1088,7 +1088,7 @@ class SignalGenerationSystem:
         )
 
         has_valid_institutional_trigger_15m = bool(
-            (has_ob_15m and ob_setup_15m.get("zeiierman_rank", 99) <= 3) or has_smc_15m
+            (has_ob_15m and ob_setup_15m.get("zeiierman_rank", 99) <= 3) or has_smc_15m or is_coiling_breakout
         )
 
         q_15m_qualified = bool(
@@ -1176,7 +1176,7 @@ class SignalGenerationSystem:
         )
 
         has_valid_institutional_trigger_1h = bool(
-            (has_ob_1h and ob_setup_1h.get("zeiierman_rank", 99) <= 3) or has_smc_1h
+            (has_ob_1h and ob_setup_1h.get("zeiierman_rank", 99) <= 3) or has_smc_1h or is_coiling_breakout
         )
 
         q_1h_qualified = bool(
@@ -1563,10 +1563,10 @@ class SignalGenerationSystem:
         if df_15m is not None and len(df_15m) >= 4:
             c_l, _, m_l = EntryConfirmationEngine.validate_candle_trigger(df_15m, direction="LONG", current_price=current_price, spread_bps=spread_bps)
             c_s, _, m_s = EntryConfirmationEngine.validate_candle_trigger(df_15m, direction="SHORT", current_price=current_price, spread_bps=spread_bps)
-            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing")):
+            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion")):
                 has_smc_15m = True
                 smc_dir_15m = "LONG"
-            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing")):
+            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing") or m_s.get("is_squeeze_expansion")):
                 has_smc_15m = True
                 smc_dir_15m = "SHORT"
 
@@ -1576,10 +1576,10 @@ class SignalGenerationSystem:
         if df_1h is not None and len(df_1h) >= 4:
             c_l, _, m_l = EntryConfirmationEngine.validate_candle_trigger(df_1h, direction="LONG", current_price=current_price, spread_bps=spread_bps)
             c_s, _, m_s = EntryConfirmationEngine.validate_candle_trigger(df_1h, direction="SHORT", current_price=current_price, spread_bps=spread_bps)
-            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing")):
+            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion")):
                 has_smc_1h = True
                 smc_dir_1h = "LONG"
-            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing")):
+            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing") or m_s.get("is_squeeze_expansion")):
                 has_smc_1h = True
                 smc_dir_1h = "SHORT"
 
@@ -1589,10 +1589,10 @@ class SignalGenerationSystem:
         if df_24h is not None and len(df_24h) >= 4:
             c_l, _, m_l = EntryConfirmationEngine.validate_candle_trigger(df_24h, direction="LONG", current_price=current_price, spread_bps=spread_bps)
             c_s, _, m_s = EntryConfirmationEngine.validate_candle_trigger(df_24h, direction="SHORT", current_price=current_price, spread_bps=spread_bps)
-            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing")):
+            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion")):
                 has_smc_24h = True
                 smc_dir_24h = "LONG"
-            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing")):
+            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing") or m_s.get("is_squeeze_expansion")):
                 has_smc_24h = True
                 smc_dir_24h = "SHORT"
 
@@ -1705,7 +1705,7 @@ class SignalGenerationSystem:
                     sig_obj.get("is_ob_setup") or
                     any(k in str(sig_obj.get("decision", "")).upper() for k in [
                         "ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "RANGE_SUPPORT",
-                        "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT", "RANGE_BOUNCE"
+                        "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT", "RANGE_BOUNCE", "SQUEEZE"
                     ])
                 )
                 if not is_boundary_or_coiling:
