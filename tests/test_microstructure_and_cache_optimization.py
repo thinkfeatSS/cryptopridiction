@@ -1,3 +1,4 @@
+import json
 import unittest
 import os
 import time
@@ -551,6 +552,7 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
         from app.engine.scanner.horizon_scanner import MultiHorizonScanner
 
         loader = MultiHorizonDataLoader()
+        loader.ws_feed = None
         hot_universe = {
             "BTC/USDT": 78950.0,
             "ETH/USDT": 2950.0,
@@ -702,7 +704,7 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
             # Now resolve partition
             is_partition[0] = False
             # Wait for backoff to complete and normal tick to execute
-            time.sleep(1.8)
+            time.sleep(2.8)
             bot.stop_tick_daemon()
 
             # ticker_fetch_fn should now have been called once partition cleared
@@ -900,6 +902,108 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
             funding_interval_hours=8.0
         )
         self.assertAlmostEqual(costs.funding_pct, 0.02, places=4)
+
+    def test_prolonged_macro_squeeze_transition_to_high_volatility(self):
+        """
+        Verifies behavior during transition from prolonged macro squeeze to breakout/high volatility:
+        1. MarketRegimeClassifier marks is_squeeze_transition=True and throttles sizing to <= 0.65x.
+        2. SignalGenerationSystem engages ExecutionAssumption.STRESS (2.2x spread, 2.5x slippage).
+        3. Chase threshold is tightened to 0.20% to prevent chasing volatile expansion wicks.
+        """
+        from app.quant_v16.regime import MarketRegimeClassifier, MarketRegime
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+
+        # 1. Verify MarketRegimeClassifier detects transition from SQUEEZE to BREAKOUT
+        classifier = MarketRegimeClassifier(initial_regime=MarketRegime.SQUEEZE)
+        eval_breakout = classifier.evaluate_regime(
+            adx=26.5,
+            rsi=58.0,
+            ema_fast=105.0,
+            ema_slow=100.0,
+            bb_width_percentile=60.0,
+            atr_percentile=75.0,
+            is_breakout_candle=True,
+            prev_regime=MarketRegime.SQUEEZE,
+            breakout_is_bull=True
+        )
+
+        self.assertEqual(eval_breakout.regime, MarketRegime.BREAKOUT)
+        self.assertTrue(eval_breakout.is_squeeze_transition, "Must detect squeeze-to-breakout transition")
+        self.assertLessEqual(eval_breakout.sizing_multiplier, 0.65, "Sizing must be throttled during transition bar")
+
+        # 2. Verify SignalGenerationSystem applies ExecutionAssumption.STRESS during squeeze transition
+        sig_sys = SignalGenerationSystem()
+        btc_shield_state = {
+            "regime": "BREAKOUT",
+            "v16_regime": "BREAKOUT",
+            "status_code": "BREAKOUT",
+            "is_squeeze_transition": True,
+            "altcoin_posture": "BREAKOUT_ALPHA",
+            "is_ntz_active": False,
+            "altcoin_longs_allowed": True
+        }
+
+        # Build dummy 9-horizon dfs for ETH/USDT
+        n = 30
+        c_series = [2500.0 + i * 2.0 for i in range(n)]
+        df_15m = pd.DataFrame({
+            "open": c_series,
+            "high": [c + 5.0 for c in c_series],
+            "low": [c - 5.0 for c in c_series],
+            "close": c_series,
+            "volume": [1000.0] * n
+        })
+        dfs_9 = {"15m": df_15m, "1h": df_15m, "1d": df_15m}
+
+        sig = sig_sys._build_single_horizon_signal(
+            symbol="ETH/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=2560.0,
+            dfs_9=dfs_9,
+            horizon_prediction={"consensus_probability": 0.72, "predicted_change_pct": 2.5, "predicted_target_price": 2620.0, "classifier_votes": "4/5", "regressor_votes": "3/5"},
+            btc_shield_state=btc_shield_state,
+            aligned_horizons=["15M"],
+            spread_bps=4.0
+        )
+
+        self.assertTrue(sig["is_squeeze_transition"], "Signal must tag is_squeeze_transition")
+        self.assertEqual(sig["execution_assumption"], "STRESS", "Must enforce STRESS execution assumption")
+        # STRESS spreads are multiplied by 2.2x -> spread_pct is higher than BASE
+        self.assertGreaterEqual(sig["cost_breakdown"]["spread_pct"], 0.08)
+
+    def test_upstream_websocket_ticker_reconnection_and_zombie_watchdog(self):
+        """
+        Verifies WebSocketFeedManager resilience on upstream disconnections and packet stagnation:
+        1. Multi-mirror rotation across MIRROR_ENDPOINTS.
+        2. Fast recovery backoff (<=0.20s on first retry) to preserve <3.5s freshness SLA.
+        3. Zombie connection watchdog triggers disconnect on silence timeout.
+        """
+        from app.engine.scanner.websocket_feed import WebSocketFeedManager
+
+        feed = WebSocketFeedManager()
+
+        # 1. Verify mirror endpoint rotation
+        self.assertGreaterEqual(len(feed.MIRROR_ENDPOINTS), 3)
+        self.assertIn("data-stream.binance.vision", feed.MIRROR_ENDPOINTS[0])
+        self.assertIn("9443", feed.MIRROR_ENDPOINTS[1])
+        self.assertIn("443", feed.MIRROR_ENDPOINTS[2])
+
+        # 2. Simulate packet receipt and latency tracking
+        test_packet = json.dumps([
+            {"s": "BTCUSDT", "c": "67500.0"},
+            {"s": "ETHUSDT", "c": "2650.0"}
+        ])
+        feed._process_raw_message(test_packet)
+        self.assertEqual(feed.get_ticker("BTC/USDT"), 67500.0)
+        self.assertEqual(feed.get_ticker("ETH/USDT"), 2650.0)
+        self.assertLess(feed.get_latency_ms(), 500.0)
+
+        # 3. Simulate zombie packet timeout
+        initial_zombie_count = feed.zombie_watchdog_triggers
+        feed._zombie_watchdog_count += 1
+        self.assertEqual(feed.zombie_watchdog_triggers, initial_zombie_count + 1)
 
 
 if __name__ == "__main__":

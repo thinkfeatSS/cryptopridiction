@@ -195,6 +195,15 @@ class BtcPredictiveMarketShield:
         # Flash dump cascade: Extreme liquidation event
         is_dump_cascade = (ret_15m <= -0.025) or (ret_1h <= -0.05) or (c_now < ema50_1h * 0.95)
 
+        # Macro Squeeze Transition to High Volatility
+        prev_code = str(self.state.get("status_code", ""))
+        prev_is_squeeze = bool(self.state.get("is_squeeze") or self.state.get("is_prolonged_micro_volatility") or prev_code in ["SQUEEZE_COILING", "NO_TRADE_ZONE", "RANGE_SQUEEZE"])
+        is_squeeze_transition = bool(
+            prev_is_squeeze and (regime_v16 in ["BREAKOUT", "HIGH_VOLATILITY"] or eval_res.get("is_squeeze_transition"))
+        )
+        if is_squeeze_transition:
+            sizing_mult = min(sizing_mult, 0.65)
+
         is_ntz_active = False
 
         if is_dump_cascade:
@@ -365,6 +374,7 @@ class BtcPredictiveMarketShield:
             "bbw_percentile": round(bbw_pctile, 1),
             "is_prolonged_micro_volatility": is_prolonged_micro_vol,
             "btc_atr_48h_pct": round(btc_atr_48h_pct, 2),
+            "is_squeeze_transition": is_squeeze_transition,
             "expansion_readiness": expansion_readiness,
             "last_updated_ts": now_ts
         }

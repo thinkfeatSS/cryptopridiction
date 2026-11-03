@@ -371,12 +371,19 @@ class SignalGenerationSystem:
         # ---------------------------------------------------------------------
         # 3. Determine optimal entry limit and execution entry price
         # ---------------------------------------------------------------------
+        is_squeeze_trans = bool(
+            btc_shield_state.get("is_squeeze_transition") or
+            (btc_shield_state.get("v16_regime") in ["BREAKOUT", "HIGH_VOLATILITY"] and
+             (btc_shield_state.get("is_prolonged_micro_volatility") or btc_shield_state.get("is_squeeze") or float(btc_shield_state.get("bbw_percentile", 50.0)) <= 18.0))
+        )
+        chase_thresh = 0.20 if is_squeeze_trans else 0.40
+
         entry_analysis = EntryConfirmationEngine.calculate_optimal_entry_zone(
             current_price=current_price,
             ob_setup=order_block_setup if is_ob_setup else None,
             direction=direction,
             active_atr=active_atr,
-            chase_threshold_pct=0.40,
+            chase_threshold_pct=chase_thresh,
             strategy=canonical_strategy,
             candle_metrics=candle_metrics
         )
@@ -560,14 +567,17 @@ class SignalGenerationSystem:
             last_vol = float(dfs_9["1d"]["volume"].iloc[-1])
             vol_24h_usd = last_vol * current_price if current_price > 0 else None
 
+        exec_assumption = ExecutionAssumption.STRESS if is_squeeze_trans else ExecutionAssumption.BASE
+
         cost_breakdown = self.cost_engine.estimate_costs(
             market_type="futures",
             observed_spread_bps=spread_bps,
             est_holding_hours=holding_hours,
             current_funding_rate=current_funding_rate,
-            assumption=ExecutionAssumption.BASE,
+            assumption=exec_assumption,
             position_size_usd=1000.0,
-            volume_24h_usd=vol_24h_usd
+            volume_24h_usd=vol_24h_usd,
+            funding_interval_hours=8.0
         )
 
         ev_result = self.expectancy_engine.evaluate(
@@ -894,6 +904,8 @@ class SignalGenerationSystem:
             "candle_trigger_metrics": candle_metrics,
             "ev_net": ev_result.expected_net_return_pct,
             "ev_gross": ev_result.ev_gross_pct,
+            "is_squeeze_transition": is_squeeze_trans,
+            "execution_assumption": exec_assumption.value,
             "costs_total_pct": ev_result.costs_total_pct,
             "cost_breakdown": {
                 "fee_pct": cost_breakdown.fee_pct,

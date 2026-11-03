@@ -37,6 +37,7 @@ class RegimeEvaluation:
     trend_strength: float         # 0.0 to 1.0 (e.g. ADX / 50)
     sizing_multiplier: float      # Section 29 Position Multiplier
     strategy_eligibility: List[str] = field(default_factory=list)
+    is_squeeze_transition: bool = False
 
 class MarketRegimeClassifier:
     """
@@ -242,6 +243,16 @@ class MarketRegimeClassifier:
         self.last_regime = regime
         sizing_mult = self.SIZING_MULTIPLIERS.get(regime, 0.70)
 
+        # Macro Squeeze Transition to High Volatility:
+        # Detect initial expansion bar breaking out of an extended squeeze/compression
+        is_squeeze_transition = bool(
+            prior in [MarketRegime.SQUEEZE, MarketRegime.LOW_VOLATILITY] and
+            regime in [MarketRegime.BREAKOUT, MarketRegime.HIGH_VOLATILITY]
+        )
+        if is_squeeze_transition:
+            # Moderate sizing to 0.65x during the volatile transition bar
+            sizing_mult = min(sizing_mult, 0.65)
+
         return RegimeEvaluation(
             regime=regime,
             probabilities=probs,
@@ -249,7 +260,8 @@ class MarketRegimeClassifier:
             volatility_state=vol_state,
             trend_strength=trend_strength,
             sizing_multiplier=sizing_mult,
-            strategy_eligibility=eligible
+            strategy_eligibility=eligible,
+            is_squeeze_transition=is_squeeze_transition
         )
 
 
@@ -424,6 +436,7 @@ def compute_live_btc_regime(
         "volatility_state": evaluation.volatility_state,
         "trend_strength": evaluation.trend_strength,
         "sizing_multiplier": evaluation.sizing_multiplier,
+        "is_squeeze_transition": evaluation.is_squeeze_transition,
         "eligible_strategies": evaluation.strategy_eligibility,
         "restricted_strategies": restricted,
         "probabilities": evaluation.probabilities,
@@ -482,6 +495,7 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
     shield["v16_regime"] = v16_reg
     shield["confidence"] = v16_regime.get("confidence", 0.85)
     shield["sizing_multiplier"] = v16_regime.get("sizing_multiplier", 1.0)
+    shield["is_squeeze_transition"] = bool(v16_regime.get("is_squeeze_transition") or shield.get("is_squeeze_transition"))
 
     metrics = v16_regime.get("metrics", {})
     adx_val = metrics.get("adx", 25.0)

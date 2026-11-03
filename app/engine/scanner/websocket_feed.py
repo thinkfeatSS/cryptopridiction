@@ -21,6 +21,8 @@ class WebSocketFeedManager:
 
     PRIMARY_WS = "wss://data-stream.binance.vision/ws/!miniTicker@arr"
     FALLBACK_WS = "wss://stream.binance.com:9443/ws/!miniTicker@arr"
+    MIRROR_WS = "wss://stream.binance.com:443/ws/!miniTicker@arr"
+    MIRROR_ENDPOINTS = [PRIMARY_WS, FALLBACK_WS, MIRROR_WS]
 
     def __init__(self, ping_interval: float = 20.0, ping_timeout: float = 10.0):
         self.ping_interval = ping_interval
@@ -37,6 +39,21 @@ class WebSocketFeedManager:
         self._active_stream_url: str = self.PRIMARY_WS
         self._reconnect_count: int = 0
         self._total_packets_received: int = 0
+        self._is_reconnecting: bool = False
+        self._zombie_watchdog_count: int = 0
+
+    @property
+    def is_reconnecting(self) -> bool:
+        with self._lock:
+            return self._is_reconnecting
+
+    @property
+    def reconnect_count(self) -> int:
+        return self._reconnect_count
+
+    @property
+    def zombie_watchdog_triggers(self) -> int:
+        return self._zombie_watchdog_count
 
     @property
     def last_update_ts(self) -> float:
@@ -115,38 +132,56 @@ class WebSocketFeedManager:
             self._loop.close()
 
     async def _connection_supervisor(self):
-        """Supervises the WebSocket lifecycle with keep-alive ping/pong and backoff."""
+        """Supervises the WebSocket lifecycle with keep-alive ping/pong, zombie watchdog, and fast reconnection."""
         import websockets
 
-        backoff = 1.0
+        consecutive_fails = 0
         while self._is_running:
             try:
-                # Alternate between Binance Vision and Binance Spot mirrors
-                stream_url = self.PRIMARY_WS if (self._reconnect_count % 2 == 0) else self.FALLBACK_WS
+                # Rotate across Binance Vision, Binance Spot port 9443, and port 443 mirrors
+                stream_url = self.MIRROR_ENDPOINTS[self._reconnect_count % len(self.MIRROR_ENDPOINTS)]
                 self._active_stream_url = stream_url
 
                 async with websockets.connect(
                     stream_url,
                     ping_interval=self.ping_interval,
                     ping_timeout=self.ping_timeout,
-                    close_timeout=5.0,
+                    close_timeout=4.0,
                     max_size=10 * 1024 * 1024
                 ) as ws:
                     with self._lock:
                         self._connected = True
-                    backoff = 1.0
+                        self._is_reconnecting = False
+                    consecutive_fails = 0
 
-                    async for message in ws:
-                        if not self._is_running:
+                    while self._is_running:
+                        try:
+                            # Zombie connection watchdog: miniTicker streams emit every 1000ms.
+                            # If no packet arrives within 5.0 seconds, force close to trigger immediate reconnect.
+                            message = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                            self._process_raw_message(message)
+                        except asyncio.TimeoutError:
+                            self._zombie_watchdog_count += 1
                             break
-                        self._process_raw_message(message)
 
             except Exception:
+                pass
+            finally:
                 with self._lock:
                     self._connected = False
+                    self._is_reconnecting = self._is_running
                 self._reconnect_count += 1
-                await asyncio.sleep(backoff)
-                backoff = min(8.0, backoff * 1.5)
+                consecutive_fails += 1
+
+                # Fast recovery on initial drops (<300ms) to stay within 3.5s freshness SLA
+                if consecutive_fails <= 1:
+                    sleep_time = 0.15
+                elif consecutive_fails == 2:
+                    sleep_time = 0.40
+                else:
+                    sleep_time = min(6.0, 0.5 * (consecutive_fails ** 1.2))
+
+                await asyncio.sleep(sleep_time)
 
     def _process_raw_message(self, message: str):
         """Parses Binance miniTicker stream array and updates in-memory price dict."""
