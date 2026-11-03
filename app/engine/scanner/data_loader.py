@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import threading
 import requests
 from urllib3.util import Retry
@@ -276,6 +277,31 @@ class MultiHorizonDataLoader:
         except Exception:
             pass
         return None
+
+    def _save_tickers_to_swr_disk(self, tickers: Dict[str, float], ts: float):
+        """Persists live ticker prices atomically to disk for resilient SWR fallback during extreme rate limiting or public API quota exhaustion."""
+        if not tickers:
+            return
+        try:
+            cache_file = os.path.join(self._disk_cache_dir, "live_tickers_swr.json")
+            tmp_file = f"{cache_file}.tmp_{os.getpid()}_{threading.get_ident()}"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump({"timestamp": ts, "tickers": tickers}, f)
+            os.replace(tmp_file, cache_file)
+        except Exception:
+            pass
+
+    def _load_tickers_from_swr_disk(self) -> Tuple[Dict[str, float], float]:
+        """Loads cached ticker prices from persistent disk during upstream quota exhaustion or exchange rate limiting."""
+        try:
+            cache_file = os.path.join(self._disk_cache_dir, "live_tickers_swr.json")
+            if os.path.exists(cache_file):
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("tickers", {}), float(data.get("timestamp", 0.0))
+        except Exception:
+            pass
+        return {}, 0.0
 
     def _fetch_okx_tickers(self) -> Dict[str, float]:
         """Tier-1.5 Failover: Bulk fetches spot tickers from OKX with mirror support and geo-restriction detection."""
@@ -790,13 +816,17 @@ class MultiHorizonDataLoader:
         """
         Tier-6.6 Failover: Coinpaprika Global Price Aggregator (2000+ USD pairs).
         Engaged when CEX endpoints and Tier-6.5 CoinCap are rate-limited or experiencing network drops.
+        Gracefully steps down to SWR disk cache during upstream quota exhaustion.
         """
         now = time.time()
         if (now - getattr(self, '_paprika_rates_ts', 0.0)) < 3.0 and getattr(self, '_paprika_rates_cache', None):
             return self._paprika_rates_cache.copy()
 
         if now < getattr(self, '_paprika_throttled_until', 0.0):
-            return getattr(self, '_paprika_rates_cache', {}).copy()
+            if getattr(self, '_paprika_rates_cache', None):
+                return self._paprika_rates_cache.copy()
+            swr_ticks, _ = self._load_tickers_from_swr_disk()
+            return swr_ticks or {}
 
         res = {}
         try:
@@ -815,14 +845,21 @@ class MultiHorizonDataLoader:
                 if res:
                     self._paprika_rates_cache = res
                     self._paprika_rates_ts = now
+                    self._save_tickers_to_swr_disk(res, now)
                     print(f"[DATA LOADER [TIER-6.6]] Engaged Coinpaprika Global Rates Aggregator ({len(res)} prices).", flush=True)
             elif resp.status_code == 429:
                 self._paprika_throttled_until = now + 60.0
-                return getattr(self, '_paprika_rates_cache', {}).copy()
+                print(f"[DATA LOADER [TIER-6.6 SWR]] Coinpaprika rate-limited (HTTP 429). Gracefully stepping down to SWR disk cache until cooldown expires.", flush=True)
+                swr_ticks, _ = self._load_tickers_from_swr_disk()
+                return swr_ticks or getattr(self, '_paprika_rates_cache', {}).copy()
         except Exception:
             pass
 
-        return res or getattr(self, '_paprika_rates_cache', {}).copy()
+        if not res:
+            swr_ticks, _ = self._load_tickers_from_swr_disk()
+            return swr_ticks or getattr(self, '_paprika_rates_cache', {}).copy()
+
+        return res
 
 
     def _backfill_historical_macro_candles(self, symbol: str, tf: str, df_binance: pd.DataFrame) -> pd.DataFrame:
@@ -980,6 +1017,7 @@ class MultiHorizonDataLoader:
                 self._is_global_outage = False
                 for s in res:
                     self._symbol_price_timestamps[s] = now
+            self._save_tickers_to_swr_disk(res, now)
             return res
 
         # Tier-2 Failover: Bybit Tickers
@@ -1076,6 +1114,21 @@ class MultiHorizonDataLoader:
         # Catastrophic Global Multi-Exchange Outage / Multi-Exchange Rate Limiting
         cache_age = max(0.0, now - self._live_tickers_ts) if self._live_tickers_ts > 0 else 999.0
         is_fresh = (cache_age <= self.MAX_LIVE_PRICE_AGE_SECONDS) and bool(self._live_tickers_cache)
+
+        # Graceful step-down to SWR disk cache if in-memory cache is missing or stale
+        if not is_fresh or not self._live_tickers_cache:
+            swr_ticks, swr_ts = self._load_tickers_from_swr_disk()
+            if swr_ticks:
+                swr_age = max(0.0, now - swr_ts) if swr_ts > 0 else 999.0
+                if swr_age < cache_age or not self._live_tickers_cache:
+                    with self._cache_lock:
+                        self._live_tickers_cache = swr_ticks
+                        self._live_tickers_ts = swr_ts
+                        cache_age = swr_age
+                        is_fresh = (cache_age <= self.MAX_LIVE_PRICE_AGE_SECONDS)
+                        for s in swr_ticks:
+                            self._symbol_price_timestamps[s] = swr_ts
+                    print(f"[DATA LOADER [SWR STEP-DOWN]] Gracefully stepped down to SWR disk cache ({len(swr_ticks)} prices, age={swr_age:.1f}s).", flush=True)
 
         with self._cache_lock:
             self._is_price_fresh_15s = is_fresh

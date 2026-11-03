@@ -756,6 +756,20 @@ class SignalGenerationSystem:
             sl_price = cand_sl
             rr_ratio = cand_rr
 
+        # Zero-distance & price geometry invariant guard (Section 4.2 AGENTS.md)
+        if exec_entry_price <= 0.0001 or sl_price <= 0.0001 or tp1_price <= 0.0001:
+            trade_active = False
+            status = "REJECTED_ZERO_PRICE"
+        elif abs(exec_entry_price - sl_price) <= 1e-8:
+            trade_active = False
+            status = "REJECTED_ZERO_DISTANCE_SL"
+        elif direction == "LONG" and not (sl_price < exec_entry_price < tp1_price < tp2_price < tp3_price):
+            trade_active = False
+            status = "REJECTED_PRICE_GEOMETRY"
+        elif direction == "SHORT" and not (sl_price > exec_entry_price > tp1_price > tp2_price > tp3_price):
+            trade_active = False
+            status = "REJECTED_PRICE_GEOMETRY"
+
         pred_target = horizon_prediction["predicted_target_price"] if horizon_prediction else current_price
         pred_pct = abs(horizon_prediction["predicted_change_pct"]) if horizon_prediction else 0.0
 
@@ -1301,7 +1315,7 @@ class SignalGenerationSystem:
             return None
 
         current_price = live_price if (live_price is not None and live_price > 0) else float(dfs_9["15m"]["close"].iloc[-1])
-        if current_price <= 0:
+        if current_price <= 0.0001:
             return None
 
         # Fetch asset fundamental intelligence & news matrix

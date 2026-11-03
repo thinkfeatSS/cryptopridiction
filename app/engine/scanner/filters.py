@@ -85,7 +85,7 @@ class UniverseFilter:
 
         # 9. Hard Minimum Institutional Volume Gate (Must have real active volume)
         v_thresh = min_volume if min_volume is not None else MIN_24H_VOLUME_USD
-        if volume_usd is not None and volume_usd < v_thresh:
+        if volume_usd is not None and (volume_usd < v_thresh or volume_usd <= 0):
             return False
 
         return True
@@ -274,7 +274,7 @@ class UniverseFilter:
                     spread_bps = 5.0
 
                 # Must have genuine live price and meet at least Tier-2 liquidity floor ($1M)
-                if price <= 0.0001 or quote_vol < 1_000_000.0:
+                if price <= 0.0001 or quote_vol <= 0.0 or quote_vol < 1_000_000.0:
                     continue
 
                 if cls.is_valid_crypto_pair(pair, price=price, high=high, low=low, volume_usd=quote_vol, min_volume=1_000_000.0):

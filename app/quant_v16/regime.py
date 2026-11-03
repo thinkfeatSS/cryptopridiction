@@ -80,7 +80,8 @@ class MarketRegimeClassifier:
         atr_percentile: float = 50.0,
         btc_shield_status: str = "CONSOLIDATION",
         is_breakout_candle: bool = False,
-        prev_regime: Optional[Union[str, MarketRegime]] = None
+        prev_regime: Optional[Union[str, MarketRegime]] = None,
+        breakout_is_bull: Optional[bool] = None
     ) -> RegimeEvaluation:
         """
         Synthesizes technical and cross-asset features into definitive market regime.
@@ -139,7 +140,7 @@ class MarketRegimeClassifier:
         # Breakout Detection (with 24.0/25.0 hysteresis)
         elif is_breakout_candle and adx >= breakout_adx_hurdle:
             regime = MarketRegime.BREAKOUT
-            is_bull = ema_fast > ema_slow
+            is_bull = breakout_is_bull if breakout_is_bull is not None else (ema_fast > ema_slow)
             probs = {"bull": 0.55 if is_bull else 0.10, "bear": 0.10 if is_bull else 0.55, "range": 0.15, "breakout": 0.20, "squeeze": 0.0}
             confidence = 0.85
             eligible = [
@@ -265,11 +266,13 @@ def compute_live_btc_regime(
         closes = [float(x) for x in df["close"].values]
         highs = [float(x) for x in df["high"].values]
         lows = [float(x) for x in df["low"].values]
+        opens = [float(x) for x in df["open"].values] if "open" in df.columns else closes
     else:
         sub_data = data[-100:] if len(data) >= 100 else data
         closes = [float(k[4]) for k in sub_data]
         highs = [float(k[2]) for k in sub_data]
         lows = [float(k[3]) for k in sub_data]
+        opens = [float(k[1]) for k in sub_data]
 
     if live_btc_price is not None and live_btc_price > 0 and len(closes) > 0:
         closes[-1] = float(live_btc_price)
@@ -370,7 +373,13 @@ def compute_live_btc_regime(
     else:
         adx = 20.0
 
-    is_breakout = (highs[-1] > max(highs[-20:-1])) or (lows[-1] < min(lows[-20:-1]))
+    # Directional Body Breakout vs Liquidity Sweep Reclaim:
+    # A genuine expansion breakout requires directional close confirmation.
+    # Wicks sweeping range extremes that close back in the opposite direction are liquidity sweeps (mean reversion), not breakouts.
+    is_high_breakout = (highs[-1] > max(highs[-20:-1])) and (closes[-1] >= opens[-1] or (n >= 2 and closes[-1] > closes[-2]))
+    is_low_breakdown = (lows[-1] < min(lows[-20:-1])) and (closes[-1] <= opens[-1] or (n >= 2 and closes[-1] < closes[-2]))
+    is_breakout = is_high_breakout or is_low_breakdown
+    breakout_is_bull = is_high_breakout if is_breakout else (ema_fast > ema_slow)
 
     classifier = MarketRegimeClassifier(initial_regime=prev_regime)
     evaluation = classifier.evaluate_regime(
@@ -382,7 +391,8 @@ def compute_live_btc_regime(
         atr_percentile=atr_pctile,
         btc_shield_status="NORMAL",
         is_breakout_candle=is_breakout,
-        prev_regime=prev_regime
+        prev_regime=prev_regime,
+        breakout_is_bull=breakout_is_bull
     )
 
     try:

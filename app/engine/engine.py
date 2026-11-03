@@ -78,6 +78,10 @@ class UnifiedCryptoEngine:
         def _evaluate_single_asset(item):
             sym, coin_meta = item
             try:
+                p = float(coin_meta.get("price", 0.0) or 0.0)
+                v = float(coin_meta.get("volume_24h", 0.0) or 0.0)
+                if p <= 0.0001 or v <= 0.0:
+                    return None
                 sig = self.signal_system.evaluate_asset_multi_horizon(
                     symbol=sym,
                     dfs_9=coin_meta["dfs_9"],

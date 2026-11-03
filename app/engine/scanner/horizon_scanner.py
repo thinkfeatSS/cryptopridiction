@@ -56,8 +56,14 @@ class MultiHorizonScanner:
         def _scan_single_coin(coin_meta):
             sym = coin_meta["symbol"]
             try:
-                dfs_9 = self.loader.fetch_all_9_timeframes(sym)
                 live_p = all_tickers.get(sym, coin_meta.get("price", 0.0))
+                vol_24h = coin_meta.get("quote_volume_usd", 0.0)
+                # Delisted / Zero Volume Altcoin Exclusion Guard
+                if live_p <= 0.0001 or vol_24h <= 0.0:
+                    logger.warning(f"[SCANNER [DELISTED / ZERO VOLUME]] Altcoin {sym} has zero volume or missing price (price={live_p}, vol={vol_24h}). Excluded from active prediction universe.")
+                    return sym, None
+
+                dfs_9 = self.loader.fetch_all_9_timeframes(sym)
                 # Sync latest candle close with instantaneous tick price
                 if live_p > 0:
                     for tf in dfs_9:
@@ -67,7 +73,7 @@ class MultiHorizonScanner:
                 return sym, {
                     "symbol": sym,
                     "price": live_p,
-                    "volume_24h": coin_meta.get("quote_volume_usd", 0.0),
+                    "volume_24h": vol_24h,
                     "change_24h": coin_meta.get("change_24h_pct", 0.0),
                     "bid_price": coin_meta.get("bid_price", live_p),
                     "ask_price": coin_meta.get("ask_price", live_p),
