@@ -41,6 +41,8 @@ class TimeframeConsolidationProfile:
     headroom_to_high_pct: float
     headroom_to_low_pct: float
     current_price: float
+    atr: float = 0.0
+    atr_pct: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -63,6 +65,8 @@ class TimeframeConsolidationProfile:
             "headroom_to_high_pct": round(self.headroom_to_high_pct, 2),
             "headroom_to_low_pct": round(self.headroom_to_low_pct, 2),
             "current_price": self.current_price,
+            "atr": round(self.atr, 6),
+            "atr_pct": round(self.atr_pct, 3),
         }
 
 
@@ -230,10 +234,14 @@ class FractalConsolidationEngine:
             )
         )
 
+        atr_val = float(atr_smooth.iloc[-1]) if not np.isnan(atr_smooth.iloc[-1]) else float(tr.iloc[-1])
+        atr_pct_val = (atr_val / max(1e-10, current_price)) * 100.0
+
+        min_box_ratio = max(0.005, min(0.015, 1.5 * (atr_val / max(1e-10, current_price))))
         is_ranging = bool(
             not is_coiling and not is_breakout_high and not is_breakout_low and
             (chop_val >= 55.0 or adx_val < 20.0 or abs(ema_slope) < 0.0003) and
-            range_span / (current_price + 1e-10) > 0.015  # wide enough box
+            range_span / (current_price + 1e-10) > min_box_ratio  # dynamic range box width scaled to ATR
         )
 
         # Breakouts take precedence over consolidation
@@ -280,6 +288,8 @@ class FractalConsolidationEngine:
             headroom_to_high_pct=headroom_to_high_pct,
             headroom_to_low_pct=headroom_to_low_pct,
             current_price=current_price,
+            atr=atr_val,
+            atr_pct=atr_pct_val,
         )
 
     @staticmethod

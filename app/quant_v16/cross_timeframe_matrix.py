@@ -109,7 +109,19 @@ class CrossTimeframeMatrixEngine:
         htf_bullish = bool((is_1d_bull or is_1d_breakout_up or (is_4h_bull and not is_1d_ranging and not is_1d_bear)) and not is_1d_bear)
         htf_bearish = bool((is_1d_bear or is_1d_breakout_down or (is_4h_bear and not is_1d_ranging and not is_1d_bull)) and not is_1d_bull)
         htf_ranging = bool((is_1d_ranging or (is_4h_ranging and not is_1d_bull and not is_1d_bear)) and not is_1d_breakout_up and not is_1d_breakout_down and not is_breakout_expansion_up and not is_breakout_expansion_down)
-        htf_coiling = bool((is_1d_coiling or is_4h_coiling) and not htf_bullish and not htf_bearish)
+        htf_coiling = bool((is_1d_coiling or is_4h_coiling) and not htf_bullish and not htf_bearish)
+
+        # Dynamic volatility headroom thresholds (adapts to compressed micro-regimes and high volatility)
+        ltf_atr_pct = getattr(p_15m, "atr_pct", 0.0)
+        if ltf_atr_pct <= 0 and getattr(p_15m, "atr", 0.0) > 0 and current_price > 0:
+            ltf_atr_pct = (p_15m.atr / current_price) * 100.0
+        if ltf_atr_pct <= 0:
+            ltf_atr_pct = max(0.35, getattr(p_15m, "bbw_pct", 2.0) * 0.40)
+
+        # In tight compression (ATR 0.2%-0.5%), min_macro_headroom scales down to 0.50%
+        # In normal/volatile markets, min_macro_headroom scales up to 2.0%
+        min_macro_headroom = round(max(0.50, min(2.0, 1.20 * ltf_atr_pct)), 2)
+        min_sub_headroom = round(max(0.35, min(1.5, 0.90 * ltf_atr_pct)), 2)
 
         # =====================================================================
         # ARCHETYPE CLASSIFICATION HIERARCHY
@@ -187,10 +199,10 @@ class CrossTimeframeMatrixEngine:
             htf_mid = (htf_high + htf_low) / 2.0
 
             # Sub-Range Support Mean Reversion (Intraday floor bounce within macro box)
-            if sub_span > 0 and (0.0 <= sub_pos <= 0.25) and sub_prof.headroom_to_high_pct >= 1.5:
+            if sub_span > 0 and (0.0 <= sub_pos <= 0.25) and sub_prof.headroom_to_high_pct >= min_sub_headroom:
                 # Target TP1 capped at macro equilibrium (1D mid) to eliminate fighting macro chop
                 target_mid_cap = ((htf_mid - current_price) / max(1e-8, current_price)) * 100.0 if htf_mid > current_price else sub_prof.headroom_to_high_pct
-                sub_headroom = round(min(sub_prof.headroom_to_high_pct, max(1.0, target_mid_cap)), 2)
+                sub_headroom = round(min(sub_prof.headroom_to_high_pct, max(min_sub_headroom, target_mid_cap)), 2)
                 return {
                     "archetype": InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value,
                     "trade_permitted": True,
@@ -204,10 +216,10 @@ class CrossTimeframeMatrixEngine:
                 }
 
             # Sub-Range Resistance Mean Reversion (Intraday ceiling rejection within macro box)
-            if sub_span > 0 and (0.75 <= sub_pos <= 1.0) and sub_prof.headroom_to_low_pct >= 1.5:
+            if sub_span > 0 and (0.75 <= sub_pos <= 1.0) and sub_prof.headroom_to_low_pct >= min_sub_headroom:
                 # Target TP1 capped at macro equilibrium (1D mid) to eliminate fighting macro chop
                 target_mid_cap = ((current_price - htf_mid) / max(1e-8, current_price)) * 100.0 if current_price > htf_mid else sub_prof.headroom_to_low_pct
-                sub_headroom = round(min(sub_prof.headroom_to_low_pct, max(1.0, target_mid_cap)), 2)
+                sub_headroom = round(min(sub_prof.headroom_to_low_pct, max(min_sub_headroom, target_mid_cap)), 2)
                 return {
                     "archetype": InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value,
                     "trade_permitted": True,
@@ -240,7 +252,7 @@ class CrossTimeframeMatrixEngine:
 
             # Range Support Boundary (Lower Quartile: price_rel_pct <= 25.0%)
             if price_rel_pct <= 25.0:
-                if headroom_to_high >= 2.0:
+                if headroom_to_high >= min_macro_headroom:
                     return {
                         "archetype": InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value,
                         "trade_permitted": True,
@@ -262,12 +274,12 @@ class CrossTimeframeMatrixEngine:
                         "headroom_pct": headroom_to_high,
                         "htf_range_high": htf_high,
                         "htf_range_low": htf_low,
-                        "rationale": f"Vetoed by 1D Range Extreme: Only {headroom_to_high:.1f}% headroom remaining before hitting range ceiling.",
+                        "rationale": f"Vetoed by 1D Range Extreme: Only {headroom_to_high:.1f}% headroom remaining before hitting range ceiling (minimum dynamic hurdle: {min_macro_headroom:.1f}%).",
                     }
 
             # Range Resistance Boundary (Upper Quartile: price_rel_pct >= 75.0%)
             if price_rel_pct >= 75.0:
-                if headroom_to_low >= 2.0:
+                if headroom_to_low >= min_macro_headroom:
                     return {
                         "archetype": InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value,
                         "trade_permitted": True,
@@ -289,7 +301,7 @@ class CrossTimeframeMatrixEngine:
                         "headroom_pct": headroom_to_low,
                         "htf_range_high": htf_high,
                         "htf_range_low": htf_low,
-                        "rationale": f"Vetoed by 1D Range Extreme: Only {headroom_to_low:.1f}% headroom remaining before hitting range floor.",
+                        "rationale": f"Vetoed by 1D Range Extreme: Only {headroom_to_low:.1f}% headroom remaining before hitting range floor (minimum dynamic hurdle: {min_macro_headroom:.1f}%).",
                     }
 
         # PRIORITY 3: Coiling Spring / Breakout Preparation (HTF Trending or Ranging + LTF Coiling Squeeze)
@@ -306,10 +318,10 @@ class CrossTimeframeMatrixEngine:
                 # Only take LONG breakout near support (range_pos <= 0.35) towards resistance,
                 # or SHORT breakout near resistance (range_pos >= 0.65) towards support.
                 # In the middle 30% chop (0.35 < range_pos < 0.65), suppress to preserve capital.
-                if range_pos <= 0.35 and headroom_to_high >= 1.5:
+                if range_pos <= 0.35 and headroom_to_high >= min_sub_headroom:
                     direction = "LONG"
                     headroom = headroom_to_high
-                elif range_pos >= 0.65 and headroom_to_low >= 1.5:
+                elif range_pos >= 0.65 and headroom_to_low >= min_sub_headroom:
                     direction = "SHORT"
                     headroom = headroom_to_low
                 else:

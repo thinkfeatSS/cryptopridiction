@@ -705,7 +705,7 @@ class InstitutionalOrderBlockEngine:
                     }
 
                 entry_p = live_p
-                min_sl_dist = max(entry_p * 0.008, 0.85 * atr)
+                min_sl_dist = max(0.85 * atr, min(entry_p * 0.008, 1.8 * atr))
                 sl_p = min(best_ob.ob_low - (0.20 * atr), entry_p - min_sl_dist)
                 # Enforce strict price invariant: entry must be comfortably above stop loss
                 if entry_p > (sl_p + 0.05 * atr):
@@ -848,7 +848,7 @@ class InstitutionalOrderBlockEngine:
                     }
 
                 entry_p = live_p
-                min_sl_dist = max(entry_p * 0.008, 0.85 * atr)
+                min_sl_dist = max(0.85 * atr, min(entry_p * 0.008, 1.8 * atr))
                 sl_p = max(best_ob.ob_high + (0.20 * atr), entry_p + min_sl_dist)
                 # Enforce strict price invariant: entry must be comfortably below stop loss
                 if entry_p < (sl_p - 0.05 * atr):
@@ -916,7 +916,7 @@ class InstitutionalOrderBlockEngine:
                 # Bearish Breaker: Former Demand Block broken downward, now acting as Supply Resistance
                 if bb.block_type == OrderBlockType.BULLISH and live_p <= (bb.ob_high + 0.20 * atr) and live_high >= (bb.ob_low - 0.20 * atr):
                     entry_p = live_p
-                    min_sl_dist = max(entry_p * 0.008, 0.85 * atr)
+                    min_sl_dist = max(0.85 * atr, min(entry_p * 0.008, 1.8 * atr))
                     sl_p = max(bb.ob_high + (0.25 * atr), entry_p + min_sl_dist)
                     risk_amt = max(1e-8, sl_p - entry_p)
                     tp1_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (bb_tp1_mult * risk_amt)))
@@ -960,7 +960,7 @@ class InstitutionalOrderBlockEngine:
                 # Bullish Breaker: Former Supply Block broken upward, now acting as Demand Support
                 elif bb.block_type == OrderBlockType.BEARISH and live_p >= (bb.ob_low - 0.20 * atr) and live_low <= (bb.ob_high + 0.20 * atr):
                     entry_p = live_p
-                    min_sl_dist = max(entry_p * 0.008, 0.85 * atr)
+                    min_sl_dist = max(0.85 * atr, min(entry_p * 0.008, 1.8 * atr))
                     sl_p = min(bb.ob_low - (0.25 * atr), entry_p - min_sl_dist)
                     risk_amt = max(1e-8, entry_p - sl_p)
                     tp1_p = format_dynamic_precision(entry_p + (bb_tp1_mult * risk_amt))

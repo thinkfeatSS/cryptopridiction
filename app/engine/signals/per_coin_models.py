@@ -5,6 +5,7 @@ import warnings
 import joblib
 import numpy as np
 from typing import Dict, Any, Tuple, Optional, List
+from concurrent.futures import ThreadPoolExecutor
 
 # Suppress serialization & version warnings from pre-trained sklearn / xgboost bundles
 try:
@@ -41,25 +42,78 @@ class PerCoinModelRegistry:
                 cls._instance._initialized = False
             return cls._instance
 
-    def __init__(self, base_models_dir: str = None):
+    def __init__(self, base_models_dir: str = None, async_preload: Optional[bool] = None):
         if getattr(self, "_initialized", False):
             return
         self.base_dir = base_models_dir or MODELS_DIR
         self.per_coin_dir = os.path.join(self.base_dir, "per_coin")
+        self.consolidated_cache_path = os.path.join(self.base_dir, "models_cache_consolidated.joblib")
         os.makedirs(self.per_coin_dir, exist_ok=True)
 
         self._lock = threading.Lock()
         # Memory cache: {f"{clean_sym}_{tf}": (clf_ensemble, reg_ensemble, fit_ts, candle_ts)}
         self._cache: Dict[str, Tuple[FiveModelDirectionClassifier, FiveModelPriceRegressor, float, int]] = {}
+        self._preload_thread: Optional[threading.Thread] = None
+        self._preload_event = threading.Event()
+        self._is_preloading = False
         self._initialized = True
-        self.preload_existing_models()
 
-    def preload_existing_models(self) -> int:
-        """Preloads existing trained models from disk into memory cache on daemon startup."""
+        should_block = (async_preload is False) or (base_models_dir is not None and async_preload is not True)
+        self.preload_existing_models(blocking=should_block)
+
+    def preload_existing_models(self, blocking: bool = False) -> int:
+        """Preloads existing trained models into memory cache.
+        If blocking=False (default), preloads in background to eliminate startup latency."""
+        if blocking:
+            return self._execute_preload()
+
+        with self._lock:
+            if self._is_preloading or self._preload_event.is_set():
+                return len(self._cache)
+            self._is_preloading = True
+
+        self._preload_thread = threading.Thread(
+            target=self._run_preload_worker,
+            daemon=True,
+            name="PerCoinModelPreload"
+        )
+        self._preload_thread.start()
+        return 0
+
+    def wait_for_preload(self, timeout: Optional[float] = 30.0) -> bool:
+        """Waits for background model pre-warming to complete."""
+        return self._preload_event.wait(timeout=timeout)
+
+    def _run_preload_worker(self):
+        try:
+            self._execute_preload()
+        finally:
+            with self._lock:
+                self._is_preloading = False
+            self._preload_event.set()
+
+    def _execute_preload(self) -> int:
         loaded_count = 0
         if not os.path.exists(self.per_coin_dir):
             return 0
         try:
+            # 1. Fast Path: Check for consolidated cache file
+            consolidated_loaded = False
+            if os.path.exists(self.consolidated_cache_path):
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        cached_dict = joblib.load(self.consolidated_cache_path)
+                    if isinstance(cached_dict, dict) and len(cached_dict) > 0:
+                        with self._lock:
+                            self._cache.update(cached_dict)
+                        loaded_count = len(self._cache)
+                        consolidated_loaded = True
+                except Exception:
+                    consolidated_loaded = False
+
+            # 2. Check for missing or new individual coin files
+            files_to_load = []
             for coin_name in os.listdir(self.per_coin_dir):
                 coin_path = os.path.join(self.per_coin_dir, coin_name)
                 if not os.path.isdir(coin_path):
@@ -69,25 +123,51 @@ class PerCoinModelRegistry:
                         tf = f.replace("models_", "").replace(".joblib", "")
                         cache_key = f"{coin_name}_{tf}"
                         full_path = os.path.join(coin_path, f)
-                        try:
-                            with warnings.catch_warnings():
-                                warnings.simplefilter("ignore")
-                                bundle = joblib.load(full_path)
-                            c_clfs = bundle.get("classifiers")
-                            c_regs = bundle.get("regressors")
-                            b_fit_ts = bundle.get("fit_timestamp", 0.0)
-                            b_candle_ts = bundle.get("last_candle_ts", 0)
-                            if c_clfs and c_regs:
-                                with self._lock:
-                                    self._cache[cache_key] = (c_clfs, c_regs, b_fit_ts, b_candle_ts)
-                                loaded_count += 1
-                        except Exception:
-                            continue
+                        if not consolidated_loaded or cache_key not in self._cache:
+                            files_to_load.append((cache_key, full_path))
+
+            if files_to_load:
+                def _load_single(item):
+                    c_key, f_path = item
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            bundle = joblib.load(f_path)
+                        c_clfs = bundle.get("classifiers")
+                        c_regs = bundle.get("regressors")
+                        b_fit_ts = bundle.get("fit_timestamp", 0.0)
+                        b_candle_ts = bundle.get("last_candle_ts", 0)
+                        if c_clfs and c_regs:
+                            return c_key, (c_clfs, c_regs, b_fit_ts, b_candle_ts)
+                    except Exception:
+                        pass
+                    return None
+
+                max_workers = min(16, (os.cpu_count() or 4) * 4)
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    for res in pool.map(_load_single, files_to_load):
+                        if res is not None:
+                            k, val = res
+                            with self._lock:
+                                self._cache[k] = val
+                            loaded_count += 1
+
+                # Refresh consolidated cache on disk for instant future boots
+                try:
+                    with self._lock:
+                        snapshot = dict(self._cache)
+                    if snapshot:
+                        tmp_path = self.consolidated_cache_path + ".tmp"
+                        joblib.dump(snapshot, tmp_path, compress=1)
+                        os.replace(tmp_path, self.consolidated_cache_path)
+                except Exception:
+                    pass
+
             if loaded_count > 0:
                 try:
-                    print(f"[MODEL REGISTRY 🧠] Preloaded {loaded_count} per-coin model bundles into memory cache from disk.", flush=True)
+                    print(f"[MODEL REGISTRY 🧠] Preloaded {loaded_count} per-coin model bundles into memory cache.", flush=True)
                 except Exception:
-                    print(f"[MODEL REGISTRY] Preloaded {loaded_count} per-coin model bundles into memory cache from disk.", flush=True)
+                    print(f"[MODEL REGISTRY] Preloaded {loaded_count} per-coin model bundles into memory cache.", flush=True)
         except Exception as e:
             try:
                 print(f"[MODEL REGISTRY ⚠️] Preload warning: {e}", flush=True)
