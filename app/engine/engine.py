@@ -72,6 +72,16 @@ class UnifiedCryptoEngine:
         btc_shield = scan_result["btc_shield"]
         assets_data = scan_result["assets"]
 
+        # Check for Upstream Exchange Network Partition / Global Outage (Stale Data Protection)
+        is_partition_stale = getattr(self.data_loader, "is_partition_stale_active", lambda: False)()
+        if is_partition_stale:
+            part_status = getattr(self.data_loader, "get_partition_status", lambda: {})()
+            btc_shield["is_partition_stale"] = True
+            btc_shield["is_global_outage"] = bool(part_status.get("is_global_outage"))
+            btc_shield["is_ntz_active"] = True
+            btc_shield["status_code"] = "NO_TRADE_ZONE"
+            btc_shield["altcoin_longs_allowed"] = False
+
         print(f"\n[SIGNALS 🧠] Executing 5 Classifiers & 5 Regressors concurrently across {len(assets_data)} assets...")
         generated_signals = []
 

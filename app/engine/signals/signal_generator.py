@@ -706,6 +706,14 @@ class SignalGenerationSystem:
                 is_breakout_spread_asymmetric = True
                 asymmetry_reason = f"Friction consumes {friction_to_tp1_ratio*100:.1f}% of TP1 target (> 40.0% limit)"
 
+        # Low-cap excessive slippage gate: If modeled slippage exceeds 35% of TP1 target, fail closed
+        target_dist_pct = abs(cand_tp1 - entry_analysis["optimal_entry_price"]) / max(1e-8, entry_analysis["optimal_entry_price"]) * 100.0
+        is_excessive_slippage = False
+        slippage_reason = ""
+        if cost_breakdown.slippage_pct > (0.35 * max(0.10, target_dist_pct)):
+            is_excessive_slippage = True
+            slippage_reason = f"Modeled slippage {cost_breakdown.slippage_pct:.3f}% exceeds 35% of TP1 distance ({target_dist_pct:.2f}%)"
+
         if volume_24h_usd and 0 < volume_24h_usd < 1_000_000.0:
             status = "HOLD_VETOED_BY_SUB_THRESHOLD_ILLIQUIDITY"
             trade_active = False
@@ -730,6 +738,16 @@ class SignalGenerationSystem:
             status = "HOLD_VETOED_BY_BREAKOUT_SPREAD_ASYMMETRY"
             trade_active = False
             grade = f"Grade C (BREAKOUT SPREAD ASYMMETRY: {asymmetry_reason})"
+            conviction = 0.0
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
+        elif is_excessive_slippage:
+            status = "HOLD_VETOED_BY_EXCESSIVE_SLIPPAGE"
+            trade_active = False
+            grade = f"Grade C (EXCESSIVE SLIPPAGE: {slippage_reason})"
             conviction = 0.0
             tp1_price = cand_tp1
             tp2_price = cand_tp2
@@ -917,6 +935,9 @@ class SignalGenerationSystem:
         base_fund_sizing = float((fund_matrix.get("sizing_multiplier") if fund_matrix else 1.0) or 1.0)
         shield_sizing = float(btc_shield_state.get("sizing_multiplier", 1.0) or 1.0)
         effective_sizing = round(float(np.clip(base_fund_sizing * shield_sizing * beta_sizing_mult, 0.20, 1.30)), 2)
+        if volume_24h_usd and 0 < volume_24h_usd < 10_000_000.0:
+            low_cap_sizing_ceiling = max(0.20, min(1.0, volume_24h_usd / 10_000_000.0))
+            effective_sizing = round(min(effective_sizing, low_cap_sizing_ceiling), 2)
 
         return {
             "symbol": symbol,
@@ -953,6 +974,8 @@ class SignalGenerationSystem:
             "is_squeeze_transition": is_squeeze_trans,
             "is_breakout_spread_asymmetric": is_breakout_spread_asymmetric,
             "asymmetry_reason": asymmetry_reason if is_breakout_spread_asymmetric else None,
+            "is_excessive_slippage": is_excessive_slippage,
+            "slippage_reason": slippage_reason if is_excessive_slippage else None,
             "breakout_spread_cushion_bps": breakout_spread_cushion_bps,
             "effective_spread_bps": round(effective_spread_bps, 2),
             "execution_assumption": exec_assumption.value,

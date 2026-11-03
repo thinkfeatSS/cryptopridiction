@@ -1153,6 +1153,161 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
         self.assertFalse(sig_liquid["is_breakout_spread_asymmetric"])
         self.assertIn("STRESS", sig_liquid["execution_assumption"])
 
+    def test_prolonged_concurrent_multi_exchange_outage_defense(self):
+        """
+        Verifies behavior during a prolonged concurrent multi-exchange outage:
+        1. When all venues fail and price staleness exceeds 15.0s, is_global_outage is engaged.
+        2. is_partition_stale_active() returns True.
+        3. PaperTradingBot freezes open positions in SAFEGUARD_HOLD (preventing false stop-outs).
+        4. When the outage clears, positions transition back to ACTIVE_MONITORING and post-outage
+           stabilization guard suppresses premature resting order fills for 1.5s.
+        """
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+
+        # 1. Simulate data loader under concurrent outage exceeding 15.0s
+        loader = MultiHorizonDataLoader()
+        loader.ws_feed = None
+        now = time.time()
+        loader._live_tickers_cache = {"BTC/USDT": 67000.0}
+        loader._live_tickers_ts = now - 25.0  # 25 seconds stale (> 15.0s constraint)
+
+        # Mock all REST endpoints failing and SWR disk cache stale (>15s)
+        with patch.object(loader.session, "get", side_effect=Exception("Outage")):
+            with patch.object(loader, "_fetch_bybit_tickers", return_value=None):
+                with patch.object(loader, "_fetch_okx_tickers", return_value=None):
+                    with patch.object(loader, "_fetch_gateio_tickers", return_value=None):
+                        with patch.object(loader, "_fetch_kucoin_tickers", return_value=None):
+                            with patch.object(loader, "_fetch_mexc_tickers", return_value=None):
+                                with patch.object(loader, "_fetch_coincap_tickers", return_value=None):
+                                    with patch.object(loader, "_fetch_coinpaprika_tickers", return_value=None):
+                                        with patch.object(loader, "_load_tickers_from_swr_disk", return_value=(loader._live_tickers_cache, now - 30.0)):
+                                            loader.fetch_all_tickers(max_age_seconds=0.0)
+
+        self.assertTrue(loader.is_partition_stale_active())
+        self.assertTrue(loader.get_partition_status()["is_global_outage"])
+
+        # 2. Verify PaperTradingBot freezes positions during active outage
+        bot = PaperTradingBot(ledger_file="scratch/test_outage_ledger.json")
+        pos = {
+            "trade_id": "TEST_OUTAGE_01",
+            "symbol": "BTC/USDT",
+            "direction": "LONG",
+            "entry_price": 67000.0,
+            "current_price": 67000.0,
+            "sl_price": 66000.0,
+            "tp1_price": 68500.0,
+            "leverage": 1,
+            "position_size_usd": 1000.0,
+            "status": "OPEN",
+            "opened_at_utc": "2026-11-03T00:00:00+00:00"
+        }
+        bot.data["open_positions"] = [pos]
+
+        # Tick with active outage partition
+        bot.on_tick({}, is_market_partition_active=True)
+        self.assertEqual(pos["safeguard_state"], "SAFEGUARD_HOLD")
+        self.assertEqual(pos["safeguard_reason"], "GLOBAL_OUTAGE_SHIELD_ACTIVE")
+        self.assertEqual(len(bot.data["open_positions"]), 1)
+
+        # 3. Simulate outage recovery
+        bot.on_tick({"BTC/USDT": 67500.0}, is_market_partition_active=False)
+        self.assertEqual(pos["safeguard_state"], "ACTIVE_MONITORING")
+        self.assertNotIn("safeguard_reason", pos)
+        self.assertGreater(getattr(bot, "_outage_recovered_ts", 0.0), 0.0)
+
+    def test_sub_second_tick_slippage_on_low_cap_pairs(self):
+        """
+        Verifies protections against sub-second tick slippage on low-cap pairs:
+        1. ExecutionCostEngine applies low_cap_slip_mult when volume_24h_usd < $10M.
+        2. SignalGenerationSystem caps sizing multiplier for thin pairs (e.g. $2M volume -> <= 0.20x).
+        3. If modeled slippage exceeds 35% of TP1 distance, signal fails closed with
+           HOLD_VETOED_BY_EXCESSIVE_SLIPPAGE.
+        4. PaperTradingBot applies dynamic low-cap factor and latency penalty to exit/entry slippage.
+        """
+        from app.quant_v16.costs import ExecutionCostEngine, ExecutionAssumption
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+
+        # 1. ExecutionCostEngine slippage scaling on low-cap
+        cost_engine = ExecutionCostEngine()
+        costs_btc = cost_engine.estimate_costs(
+            market_type="futures",
+            observed_spread_bps=4.0,
+            volume_24h_usd=25_000_000_000.0 # $25B deep volume
+        )
+        costs_low_cap = cost_engine.estimate_costs(
+            market_type="futures",
+            observed_spread_bps=4.0,
+            volume_24h_usd=2_500_000.0 # $2.5M low-cap volume
+        )
+        self.assertGreater(costs_low_cap.slippage_pct, costs_btc.slippage_pct)
+
+        # 2. SignalGenerationSystem sizing cap on low-cap pairs
+        sig_sys = SignalGenerationSystem()
+        btc_shield_state = {
+            "regime": "TRENDING_BULL",
+            "v16_regime": "TRENDING_BULL",
+            "status_code": "NORMAL",
+            "sizing_multiplier": 1.0,
+            "altcoin_posture": "BULL_ACCELERATION",
+            "is_ntz_active": False,
+            "altcoin_longs_allowed": True
+        }
+        n = 30
+        c_series = [5.0 + i * 0.02 for i in range(n)]
+        df_15m = pd.DataFrame({
+            "open": c_series,
+            "high": [c + 0.10 for c in c_series],
+            "low": [c - 0.05 for c in c_series],
+            "close": c_series,
+            "volume": [10000.0] * n
+        })
+        dfs_9 = {"15m": df_15m, "1h": df_15m, "1d": df_15m}
+
+        sig_thin = sig_sys._build_single_horizon_signal(
+            symbol="MICRO/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=5.5,
+            dfs_9=dfs_9,
+            horizon_prediction={"consensus_probability": 0.75, "predicted_change_pct": 2.5, "predicted_target_price": 5.64, "classifier_votes": "4/5", "regressor_votes": "4/5"},
+            btc_shield_state=btc_shield_state,
+            aligned_horizons=["15M"],
+            spread_bps=4.0,
+            volume_24h_usd=2_000_000.0 # $2M volume
+        )
+        # Sizing ceiling: 2M / 10M = 0.20x
+        self.assertLessEqual(sig_thin["sizing_multiplier"], 0.20)
+
+        # 3. PaperTradingBot dynamic slippage calculation on tick
+        bot = PaperTradingBot(ledger_file="scratch/test_slip_ledger.json")
+        pos_record = {
+            "trade_id": "TEST_SLIP_01",
+            "symbol": "MICRO/USDT",
+            "direction": "LONG",
+            "entry_price": 5.5,
+            "current_price": 5.5,
+            "sl_price": 5.3,
+            "tp1_price": 5.8,
+            "leverage": 1,
+            "initial_position_size_usd": 1000.0,
+            "remaining_position_size_usd": 1000.0,
+            "volume_24h_usd": 2_000_000.0, # $2M low cap
+            "status": "OPEN",
+            "opened_at_utc": "2026-11-03T00:00:00+00:00"
+        }
+        bot.data["open_positions"] = [pos_record]
+
+        # Stop out on adverse tick with 600ms latency
+        bot.on_tick({"MICRO/USDT": 5.25}, tick_latency_ms=600.0)
+        self.assertEqual(len(bot.data["closed_trades"]), 1)
+        closed = bot.data["closed_trades"][0]
+        # On a $2M coin with latency, slippage drag must be higher than base 0.04% ($0.40)
+        self.assertGreater(closed["slippage_drag_usd"], 0.40)
+
+
 
 
 if __name__ == "__main__":

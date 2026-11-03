@@ -99,6 +99,11 @@ class ExecutionCostEngine:
             liq_mult = float(max(0.70, min(3.00, impact_ratio)))
             slip_bps = slip_bps * liq_mult
 
+        # Sub-Second Tick Slippage Floor for Low-Cap Pairs (< $10M volume)
+        if volume_24h_usd is not None and 0 < float(volume_24h_usd) < 10_000_000.0:
+            low_cap_slip_mult = max(1.0, math.sqrt(10_000_000.0 / max(1_000_000.0, float(volume_24h_usd))))
+            slip_bps = slip_bps * low_cap_slip_mult
+
         # Multipliers by execution assumption
         if assumption == ExecutionAssumption.OPTIMISTIC:
             fee_mult = 0.85     # VIP tier / maker rebate

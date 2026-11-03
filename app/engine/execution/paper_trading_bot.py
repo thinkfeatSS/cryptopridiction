@@ -5,7 +5,7 @@ import json
 import time
 import threading
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from app.engine.config import EXPORT_DIR
 from app.engine.scanner.filters import UniverseFilter
@@ -418,6 +418,7 @@ class PaperTradingBot:
                 "total_gross_partial_usd": 0.0,
                 "total_frictions_partial_usd": 0.0,
                 "remaining_position_size_usd": position_size_usd,
+                "volume_24h_usd": float(signal.get("volume_24h_usd") or 0.0),
                 # Dynamic Tier-0 BE threshold: scaled by desk and range-regime awareness
                 # Scalp: 0.80%, Day: 1.20%, Swing: 2.00%
                 "tier0_threshold_pct": 0.80 if desk_key == "scalp" else (1.20 if desk_key in ["day", "intraday"] else 2.00),
@@ -609,15 +610,38 @@ class PaperTradingBot:
             # Outage Position Frozen Shield: If exchange partition / global outage is active,
             # freeze stop-loss and horizon expiry to protect capital from stale/frozen executions.
             if is_market_partition_active:
+                self._was_partition_active = True
+                if not getattr(self, "_partition_active_since", None):
+                    self._partition_active_since = time.time()
                 for pos in self.data["open_positions"]:
                     pos["safeguard_state"] = "SAFEGUARD_HOLD"
                     pos["safeguard_reason"] = "GLOBAL_OUTAGE_SHIELD_ACTIVE"
                 return
             else:
+                outage_duration = 0.0
+                if getattr(self, "_was_partition_active", False):
+                    outage_duration = time.time() - (self._partition_active_since or time.time())
+                    self._was_partition_active = False
+                    self._partition_active_since = None
+                    self._outage_recovered_ts = time.time()
+                    try:
+                        print(f"[PAPER BOT [OUTAGE RECOVERED]] Partition cleared after {outage_duration:.1f}s outage. Engaging post-outage gap guard.", flush=True)
+                    except Exception:
+                        pass
+
                 for pos in self.data["open_positions"]:
                     if pos.get("safeguard_state") == "SAFEGUARD_HOLD":
                         pos["safeguard_state"] = "ACTIVE_MONITORING"
                         pos.pop("safeguard_reason", None)
+
+            # Dynamic Sub-Second Tick Slippage Helper for shallow order books and latency
+            def _calc_tick_slip_rates(p_pos: Dict[str, Any]) -> Tuple[float, float]:
+                v_24h = float(p_pos.get("volume_24h_usd") or p_pos.get("volume_24h") or 0.0)
+                low_cap_factor = max(1.0, math.sqrt(15_000_000.0 / max(1_000_000.0, v_24h))) if v_24h > 0 else 1.0
+                lat_factor = 1.0 + min(1.5, max(0.0, tick_latency_ms - 300.0) / 1000.0)
+                entry_rate = 0.0003 * low_cap_factor * lat_factor
+                exit_rate = 0.0004 * low_cap_factor * lat_factor
+                return entry_rate, exit_rate
 
             remaining_positions = []
             for pos in self.data["open_positions"]:
@@ -745,6 +769,11 @@ class PaperTradingBot:
                         continue
 
                     # F. Clean Limit Fill (Touched limit within the safe bracket)
+                    # Post-Outage Stabilization: wait 1.5s after outage recovery before filling resting orders
+                    if (time.time() - getattr(self, "_outage_recovered_ts", 0.0)) < 1.5:
+                        remaining_positions.append(pos)
+                        continue
+
                     if (direction == "LONG" and curr_p <= limit_p) or (direction == "SHORT" and curr_p >= limit_p):
                         pos["status"] = "OPEN"
                         pos["is_limit_resting"] = False
@@ -821,7 +850,7 @@ class PaperTradingBot:
 
                 pos["unrealized_pnl_pct"] = gain_pct * leverage
                 pos["unrealized_pnl_usd"] = (gain_pct / 100.0) * remaining_size_usd
-                pos["peak_gain_pct"] = max(pos["peak_gain_pct"], gain_pct)
+                pos["peak_gain_pct"] = max(float(pos.get("peak_gain_pct") or 0.0), gain_pct)
 
                 # Emergency Macro Impulse Exit for Open Positions:
                 # If an active position experiences an extreme sudden adverse spike (gain_pct <= -2.5%)
@@ -918,7 +947,8 @@ class PaperTradingBot:
                     t1_gross = (t1_gain / 100.0) * t1_notional
                     t1_fee = (float(pos.get("entry_fee_usd", initial_size_usd * self.taker_fee_rate)) * 0.50) + (t1_notional * (1.0 + t1_gain / 100.0) * self.taker_fee_rate)
                     t1_spread = (float(pos.get("spread_bps", 4.0)) / 20000.0) * t1_notional if not pos.get("optimal_entry_limit") else 0.0
-                    t1_slip = 0.0003 * t1_notional if not pos.get("optimal_entry_limit") else 0.0
+                    dyn_entry_slip_rate, dyn_exit_slip_rate = _calc_tick_slip_rates(pos)
+                    t1_slip = dyn_entry_slip_rate * t1_notional if not pos.get("optimal_entry_limit") else 0.0
                     t1_friction = t1_fee + t1_spread + t1_slip
                     t1_net = t1_gross - t1_friction
 
@@ -956,7 +986,8 @@ class PaperTradingBot:
                     t2_gross = (t2_gain / 100.0) * t2_notional
                     t2_fee = (float(pos.get("entry_fee_usd", initial_size_usd * self.taker_fee_rate)) * 0.30) + (t2_notional * (1.0 + t2_gain / 100.0) * self.taker_fee_rate)
                     t2_spread = (float(pos.get("spread_bps", 4.0)) / 20000.0) * t2_notional if not pos.get("optimal_entry_limit") else 0.0
-                    t2_slip = 0.0003 * t2_notional if not pos.get("optimal_entry_limit") else 0.0
+                    dyn_entry_slip_rate, dyn_exit_slip_rate = _calc_tick_slip_rates(pos)
+                    t2_slip = dyn_entry_slip_rate * t2_notional if not pos.get("optimal_entry_limit") else 0.0
                     t2_friction = t2_fee + t2_spread + t2_slip
                     t2_net = t2_gross - t2_friction
 
@@ -1044,8 +1075,9 @@ class PaperTradingBot:
                     spread_drag_usd = entry_spread_usd + exit_spread_usd
 
                     # 3. Execution Slippage Drag
-                    entry_slip_usd = 0.0 if entry_was_limit else (0.0003 * rem_notional)
-                    exit_slip_usd = 0.0 if hit_tp else (0.0004 * rem_notional)
+                    dyn_entry_slip_rate, dyn_exit_slip_rate = _calc_tick_slip_rates(pos)
+                    entry_slip_usd = 0.0 if entry_was_limit else (dyn_entry_slip_rate * rem_notional)
+                    exit_slip_usd = 0.0 if hit_tp else (dyn_exit_slip_rate * rem_notional)
                     slippage_drag_usd = entry_slip_usd + exit_slip_usd
 
                     # 4. Accrued Funding Rate Drag (Pro-rated per 8-hour cycle)
@@ -1145,7 +1177,10 @@ class PaperTradingBot:
                     self.data["win_rate_pct"] = total_closed_wr
                     self.data["total_closed_win_rate_pct"] = total_closed_wr
                     self.data["decisive_win_rate_pct"] = decisive_wr
-                    print(f"[PAPER BOT 🏁] Position Closed: {sym} ({exit_reason}) | Outcome: {outcome} | Net PnL: ${net_pnl:+,.2f} ({realized_ret_pct:+.2f}%) | Friction: ${total_frictions:.2f}")
+                    try:
+                        print(f"[PAPER BOT [CLOSED]] Position Closed: {sym} ({exit_reason}) | Outcome: {outcome} | Net PnL: ${net_pnl:+,.2f} ({realized_ret_pct:+.2f}%) | Friction: ${total_frictions:.2f}")
+                    except Exception:
+                        pass
                     self._sync_paper_exit_to_audit(closed_record)
                 else:
                     remaining_positions.append(pos)
