@@ -286,13 +286,13 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.BREAKOUT_SHORT.value,
                 sample_count=110, resolved_count=105, win_rate=0.55, profit_factor=1.30,
                 rolling_50_pf=1.25, expectancy_net_pct=0.62,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.MOMENTUM_SHORT.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.MOMENTUM_SHORT.value,
                 sample_count=190, resolved_count=182, win_rate=0.59, profit_factor=1.35,
                 rolling_50_pf=1.28, expectancy_net_pct=0.68,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.MOMENTUM_LONG.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.MOMENTUM_LONG.value,
@@ -310,7 +310,7 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.BREAKDOWN_SHORT.value,
                 sample_count=180, resolved_count=172, win_rate=0.62, profit_factor=1.35,
                 rolling_50_pf=1.30, expectancy_net_pct=0.65,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.RALLY_FADE_SHORT.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.RALLY_FADE_SHORT.value,
@@ -346,7 +346,7 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.DIRECTIONAL_TREND_SHORT.value,
                 sample_count=95, resolved_count=90, win_rate=0.61, profit_factor=1.34,
                 rolling_50_pf=1.26, expectancy_net_pct=0.56,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.DIRECTIONAL_TREND_LONG.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.DIRECTIONAL_TREND_LONG.value,
@@ -412,7 +412,7 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.SQUEEZE_EXPANSION_SHORT.value,
                 sample_count=90, resolved_count=85, win_rate=0.60, profit_factor=1.36,
                 rolling_50_pf=1.30, expectancy_net_pct=0.64,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.SQUEEZE_BREAKOUT_LONG.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.SQUEEZE_BREAKOUT_LONG.value,
@@ -424,7 +424,7 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.SQUEEZE_BREAKOUT_SHORT.value,
                 sample_count=95, resolved_count=90, win_rate=0.58, profit_factor=1.28,
                 rolling_50_pf=1.24, expectancy_net_pct=0.52,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.MEAN_REVERSION_LONG.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.MEAN_REVERSION_LONG.value,
@@ -457,8 +457,20 @@ class StrategyRegistry:
         Evaluates Section 31 Strategy Kill Switch & Section 32 Regime Kill Switch.
         Supports fuzzy regime normalization and alias matching.
         """
+        norm_regime = normalize_regime_key(current_regime)
+        raw_regime = str(getattr(current_regime, "value", current_regime)).strip().upper() if current_regime else "RANGE"
+
         perf = self.strategies.get(strategy_id)
+        if not perf and strategy_id:
+            norm_id = strategy_id.upper().strip()
+            perf = self.strategies.get(norm_id)
+
         if not perf:
+            # Dynamic Safeguard: Unregistered continuation shorts must NOT bypass regime kill switches
+            strat_upper = str(strategy_id or "").upper().strip()
+            if "SHORT" in strat_upper and norm_regime in ["RANGE", "BEAR_TREND"]:
+                if any(k in strat_upper for k in ["BREAKOUT", "BREAKDOWN", "MOMENTUM", "TREND", "COILING", "EXPANSION"]):
+                    return False, f"Strategy {strategy_id} is PAUSED specifically in {norm_regime} regime (Unregistered Continuation Short)"
             return True, "Active (Unregistered Strategy)"
 
         # 1. Global Strategy Status check
@@ -468,8 +480,6 @@ class StrategyRegistry:
             return False, f"Strategy {strategy_id} is PAUSED (Rolling 50 PF < 0.80)"
 
         # 2. Section 32: Regime-Specific Kill Switch
-        norm_regime = normalize_regime_key(current_regime)
-        raw_regime = str(getattr(current_regime, "value", current_regime)).strip().upper() if current_regime else "RANGE"
         regime_st = perf.regime_status.get(norm_regime) or perf.regime_status.get(raw_regime)
         if regime_st in [StrategyStatus.PAUSED, StrategyStatus.DISABLED]:
             return False, f"Strategy {strategy_id} is {regime_st.value} specifically in {norm_regime} regime"
@@ -568,3 +578,80 @@ class StrategyRegistry:
             return 1.0
         # Normalizes PF between 0.85x and 1.25x
         return max(0.85, min(1.25, perf.rolling_50_pf / 1.20))
+
+    def seed_from_tracker_csv(self, csv_path: Optional[str] = None) -> bool:
+        """
+        Dynamically synchronizes historical strategy priors and regime statuses
+        from the authoritative trader_signals_tracker.csv.
+        """
+        export_dir = os.getenv("EXPORT_DIR", "./export_app_data")
+        path = csv_path or os.path.join(export_dir, "trader_signals_tracker.csv")
+        if not os.path.exists(path):
+            return False
+
+        try:
+            import pandas as pd
+            df = pd.read_csv(path)
+            if df.empty or "strategy_archetype" not in df.columns or "outcome_label" not in df.columns:
+                return False
+
+            with self._lock:
+                for _, row in df.iterrows():
+                    raw_strat = str(row.get("strategy_archetype") or "").strip()
+                    if not raw_strat or raw_strat == "nan":
+                        continue
+                    strat_id = raw_strat.upper()
+                    if strat_id not in self.strategies:
+                        continue
+
+                    outcome = str(row.get("outcome_label") or "")
+                    if "WON" in outcome:
+                        is_win = True
+                    elif "LOST" in outcome or "SL HIT" in outcome:
+                        is_win = False
+                    else:
+                        continue
+
+                    ret_str = str(row.get("realized_return_pct") or "").replace("+", "").replace("%", "").strip()
+                    try:
+                        ret_pct = float(ret_str) if ret_str and ret_str != "nan" else (1.5 if is_win else -1.0)
+                    except Exception:
+                        ret_pct = 1.5 if is_win else -1.0
+
+                    regime = str(row.get("market_shield") or "RANGE")
+                    perf = self.strategies[strat_id]
+                    perf.sample_count += 1
+                    perf.resolved_count += 1
+                    n = max(1, perf.resolved_count)
+
+                    actual_wins = (perf.win_rate * (n - 1)) + (1.0 if is_win else 0.0)
+                    perf.win_rate = round(float((actual_wins + 5.0) / (n + 10.0)), 4)
+
+                    ret_factor = max(0.1, 1.0 + (ret_pct / 100.0)) if is_win else max(0.1, 1.0 - (abs(ret_pct) / 100.0))
+                    if is_win:
+                        perf.rolling_50_pf = round(min(3.0, (perf.rolling_50_pf * 0.96) + (ret_factor * 0.04)), 4)
+                    else:
+                        perf.rolling_50_pf = round(max(0.4, (perf.rolling_50_pf * 0.96) - ((1.0 / ret_factor) * 0.04)), 4)
+
+                    perf.expectancy_net_pct = round(float((perf.expectancy_net_pct * 0.95) + (ret_pct * 0.05)), 4)
+                    perf.last_updated_ts = time.time()
+
+                    if perf.expectancy_net_pct < -0.20 or perf.rolling_50_pf < 0.70:
+                        perf.status = StrategyStatus.DISABLED
+                    elif perf.rolling_50_pf < 0.85:
+                        perf.status = StrategyStatus.PAUSED
+                    elif perf.rolling_50_pf < 1.00:
+                        perf.status = StrategyStatus.WARNING
+                    else:
+                        perf.status = StrategyStatus.ACTIVE
+
+                    norm_r = normalize_regime_key(regime)
+                    if not is_win and perf.rolling_50_pf < 0.90:
+                        perf.regime_status[norm_r] = StrategyStatus.PAUSED
+                    elif is_win and perf.rolling_50_pf >= 1.05:
+                        perf.regime_status.pop(norm_r, None)
+
+            self.save_to_disk()
+            return True
+        except Exception:
+            return False

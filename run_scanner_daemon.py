@@ -214,6 +214,16 @@ def run_daemon():
     print("[SCANNER DAEMON 🧠] Initializing HybridQuantEngine...")
     engine = HybridQuantEngine(CONFIG)
 
+    # Seed StrategyRegistry from authoritative trader signals tracker
+    try:
+        from app.quant_v16.strategies import StrategyRegistry
+        strat_reg = StrategyRegistry()
+        seeded = strat_reg.seed_from_tracker_csv()
+        if seeded:
+            print("[SCANNER DAEMON 📊] Successfully seeded StrategyRegistry priors & kill switches from trader_signals_tracker.csv.")
+    except Exception as seed_err:
+        print(f"[SCANNER DAEMON ⚠️] Could not seed StrategyRegistry: {seed_err}")
+
     # Start Decoupled 24/7 Position Heartbeat Thread
     stop_heartbeat_event = threading.Event()
     heartbeat_thread, stop_heartbeat_event = start_heartbeat_worker(engine, heartbeat_secs=heartbeat_secs, stop_event=stop_heartbeat_event)
