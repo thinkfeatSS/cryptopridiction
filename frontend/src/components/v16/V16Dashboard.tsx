@@ -10,11 +10,13 @@ import V16SignalTable from "@/components/v16/V16SignalTable";
 import V16SignalDetailModal from "@/components/v16/V16SignalDetailModal";
 import V16EventJournal from "@/components/v16/V16EventJournal";
 import V16PerformancePanel from "@/components/v16/V16PerformancePanel";
+import V16InstitutionalIntelligenceHUD from "@/components/v16/V16InstitutionalIntelligenceHUD";
 import {
   useV16Signals,
   useV16Theses,
   useV16Events,
   useV16Regime,
+  useV16MarketIntelligence,
 } from "@/hooks/useV16Data";
 import { V16SignalEnvelope } from "@/types/v16";
 import { AlertCircle, RefreshCw, Sparkles, Activity, LayoutGrid, Table } from "lucide-react";
@@ -28,11 +30,13 @@ export default function V16Dashboard() {
   const thesesQuery = useV16Theses();
   const eventsQuery = useV16Events(50);
   const regimeQuery = useV16Regime();
+  const intelligenceQuery = useV16MarketIntelligence();
 
   const signals = signalsQuery.data?.signals || [];
   const theses = thesesQuery.data?.theses || [];
   const events = eventsQuery.data?.events || [];
   const regimeData = regimeQuery.data?.regime;
+  const intelligenceData = intelligenceQuery.data?.intelligence;
 
   // Active signals partition (strictly excludes terminal/evaluated signals)
   const activeSignals = useMemo(() => {
@@ -81,6 +85,7 @@ export default function V16Dashboard() {
     theses: thesesQuery.data?.health,
     events: eventsQuery.data?.health,
     regime: regimeQuery.data?.health,
+    intelligence: intelligenceQuery.data?.health,
   };
 
   const isEngineOnline =
@@ -117,6 +122,15 @@ export default function V16Dashboard() {
         regime={regimeData?.regime || "RANGE"}
         isEngineOnline={isEngineOnline}
       />
+
+      {/* 2.5 Institutional Macro, Fed/FOMC, Spot ETF & Whale Depth Command HUD */}
+      <div className="relative z-10">
+        <V16InstitutionalIntelligenceHUD
+          intelligence={intelligenceData}
+          isLoading={intelligenceQuery.isLoading}
+          onRefresh={() => intelligenceQuery.refetch()}
+        />
+      </div>
 
       {/* 3. Qualified V16 Signals Section (Cards & Table Views) - Positioned Above Market State & Trade Theses */}
       <div className="relative z-10 space-y-3">
@@ -169,6 +183,7 @@ export default function V16Dashboard() {
                 thesesQuery.refetch();
                 eventsQuery.refetch();
                 regimeQuery.refetch();
+                intelligenceQuery.refetch();
               }}
               className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-xs text-slate-300 hover:text-cyan-300 font-mono font-bold transition-all shadow-sm"
             >

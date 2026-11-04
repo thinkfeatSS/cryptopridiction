@@ -549,6 +549,43 @@ class SignalGenerationSystem:
                     actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
                     cand_rr = f"1:{actual_rr:.1f}"
 
+        # Confluence bonuses from Institutional Intelligence Hub (Macro, Whales, Dominance, ETF):
+        inst_conviction_bonus = 0.0
+        try:
+            from app.services.institutional_intelligence_service import institutional_intelligence_service
+            clean_sym = symbol.split("/")[0].split(":")[0].upper()
+            
+            # 1. Hyperliquid Whale Wall alignment
+            if clean_sym in ["BTC", "ETH", "SOL", "BNB", "XRP"]:
+                hl_radar = institutional_intelligence_service.get_hyperliquid_whale_radar(clean_sym)
+                hl_bias = hl_radar.get("whale_bias", "")
+                if direction == "LONG" and hl_bias == "BULLISH_WHALE_BID_ABSORPTION":
+                    inst_conviction_bonus += 5.0
+                elif direction == "SHORT" and hl_bias == "BEARISH_WHALE_ASK_RESISTANCE":
+                    inst_conviction_bonus += 5.0
+
+            # 2. Spot ETF institutional momentum alignment
+            if clean_sym in ["BTC", "ETH"]:
+                etf_flows = institutional_intelligence_service.get_crypto_etf_flows()
+                if direction == "LONG" and "ACCUMULATION" in etf_flows.get("institutional_bias", ""):
+                    inst_conviction_bonus += 5.0
+                elif direction == "SHORT" and etf_flows.get("veto_macro_btc_shorts"):
+                    inst_conviction_bonus -= 10.0
+
+            # 3. Capital rotation dominance alignment
+            dom_matrix = institutional_intelligence_service.get_dominance_matrix()
+            dom_regime = dom_matrix.get("capital_rotation_regime", "")
+            if clean_sym not in ["BTC"]:
+                if direction == "LONG" and dom_regime == "ALT_SEASON_EXPANSION":
+                    inst_conviction_bonus += 5.0
+                elif direction == "LONG" and dom_regime == "BITCOIN_DOMINANCE":
+                    inst_conviction_bonus -= 8.0
+        except Exception:
+            pass
+
+        base_conviction = 95.0 if horizon_label == "24H" else (90.0 if horizon_label == "1H" else 85.0)
+        adj_conviction = min(98.0, max(50.0, base_conviction + inst_conviction_bonus))
+
         # Evaluate setup against this coin's dedicated Meta-Labeler
         cand_meta_payload = {
             "symbol": symbol,
@@ -557,7 +594,7 @@ class SignalGenerationSystem:
             "entry_price": exec_entry_price,
             "tp1_price": cand_tp1,
             "sl_price": cand_sl,
-            "conviction": 95.0 if horizon_label == "24H" else (90.0 if horizon_label == "1H" else 85.0),
+            "conviction": adj_conviction,
             "expected_return_pct": abs(horizon_prediction["predicted_change_pct"]) if horizon_prediction else 0.0,
             "quality_grade": "Grade A+",
             "regime": active_market_regime,
@@ -659,6 +696,8 @@ class SignalGenerationSystem:
 
         is_macro_blackout = False
         macro_blackout_reason = ""
+        is_macro_pause = False
+        macro_pause_msg = ""
         if fund_matrix:
             cat_ev = fund_matrix.get("catalyst_event", {})
             news_sent = fund_matrix.get("news_sentiment", {})
@@ -673,6 +712,8 @@ class SignalGenerationSystem:
             cat_title = cat_ev.get("title", "Catalyst Event")
             is_macro_blackout = bool(macro_ev.get("is_volatility_pause_active", False))
             macro_blackout_reason = macro_ev.get("pause_reason", "US Macro Release Blackout Active")
+            is_macro_pause = is_macro_blackout
+            macro_pause_msg = macro_blackout_reason
 
         # News & Event Gating (Black Swan Sentinel & NWS-01 Macro Blackout)
         is_news_vetoed = False
@@ -858,6 +899,16 @@ class SignalGenerationSystem:
             trade_active = False
             grade = f"Grade C (EXCESSIVE SPREAD: {spread_bps:.1f} bps > 35.0 bps limit)"
             conviction = max(40.0, float(meta_eval.get("win_probability_pct", 65.0)) * 0.6)
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
+        elif is_macro_pause:
+            status = "HOLD_MACRO_VOLATILITY_BLACKOUT"
+            trade_active = False
+            grade = f"Grade C ({macro_pause_msg})"
+            conviction = 40.0
             tp1_price = cand_tp1
             tp2_price = cand_tp2
             tp3_price = cand_tp3

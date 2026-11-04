@@ -10,6 +10,7 @@ import {
   V16EventsResponse,
   V16RegimeResponse,
   V16EndpointHealth,
+  MarketIntelligenceResponse,
 } from "@/types/v16";
 
 const getApiBase = (): string => {
@@ -119,5 +120,25 @@ export const v16Api = {
 
   getValidation: async (cohort = "current") => {
     return fetchWithHealth<any>(`/api/v16/validation?cohort=${cohort}`);
+  },
+
+  getMarketIntelligence: async (symbol = "BTC/USDT") => {
+    return fetchWithHealth<MarketIntelligenceResponse>(`/api/v16/market-intelligence?symbol=${encodeURIComponent(symbol)}`);
+  },
+
+  getMacroCalendar: async () => {
+    return fetchWithHealth<any>(`/api/v16/macro-calendar`);
+  },
+
+  getWhaleRadar: async (symbol = "BTC") => {
+    return fetchWithHealth<any>(`/api/v16/whale-radar?symbol=${encodeURIComponent(symbol)}`);
+  },
+
+  getEtfFlows: async () => {
+    return fetchWithHealth<any>(`/api/v16/etf-flows`);
+  },
+
+  getDominance: async () => {
+    return fetchWithHealth<any>(`/api/v16/dominance`);
   },
 };

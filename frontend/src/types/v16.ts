@@ -135,6 +135,158 @@ export interface V16RegimeResponse {
   error?: string;
 }
 
+export interface MacroEvent {
+  name: string;
+  category: "EMPLOYMENT_DATA" | "CPI_INFLATION" | "FOMC_DECISION" | "POWELL_SPEECH" | string;
+  impact: "CRITICAL" | "HIGH" | "MEDIUM" | string;
+  time_utc: string;
+  description: string;
+  minutes_until: number;
+}
+
+export interface MacroCalendar {
+  has_macro_event: boolean;
+  has_upcoming_event: boolean;
+  event_name: string | null;
+  category: string | null;
+  impact: string | null;
+  event_time_utc: string | null;
+  minutes_until_event: number | null;
+  is_volatility_pause_active: boolean;
+  pause_reason: string | null;
+  fed_blackout_active: boolean;
+  upcoming_events: MacroEvent[];
+}
+
+export interface DominanceMatrix {
+  btc_dominance_pct: number;
+  eth_dominance_pct: number;
+  usdt_dominance_pct: number;
+  stablecoin_dominance_pct: number;
+  others_dominance_pct: number;
+  capital_rotation_regime: "ALT_SEASON_EXPANSION" | "BITCOIN_DOMINANCE" | "STABLECOIN_FLIGHT" | "BALANCED_ROTATION" | string;
+  rotation_description: string;
+  alt_sizing_multiplier: number;
+  btc_sizing_multiplier: number;
+  updated_at_utc: string;
+}
+
+export interface DualSentiment {
+  crypto_fear_and_greed: {
+    score: number;
+    classification: string;
+    trend_7d?: string;
+    stance?: string;
+    directive?: string;
+    is_extreme_fear_accumulation: boolean;
+    is_extreme_greed_distribution: boolean;
+  };
+  traditional_fear_and_greed: {
+    score: number;
+    classification: string;
+    proxy_benchmark: string;
+  };
+  sentiment_divergence: {
+    delta: number;
+    status: string;
+    description: string;
+  };
+  updated_at_utc: string;
+}
+
+export interface EtfFundFlow {
+  daily_net_flow_usd_m: number;
+  cumulative_5d_flow_usd_m: number;
+  top_inflow_fund?: string;
+  top_inflow_amount_usd_m?: number;
+  top_outflow_fund?: string;
+  top_outflow_amount_usd_m?: number;
+  flow_direction: "NET_INFLOW" | "NET_OUTFLOW" | string;
+}
+
+export interface EtfFlows {
+  bitcoin_spot_etf: EtfFundFlow;
+  ethereum_spot_etf: EtfFundFlow;
+  institutional_bias: string;
+  institutional_description: string;
+  veto_macro_btc_shorts: boolean;
+  updated_at_utc: string;
+}
+
+export interface ExchangeFlows {
+  btc_exchange_flow: {
+    inflow_24h_usd_m: number;
+    outflow_24h_usd_m: number;
+    net_flow_24h_usd_m: number;
+    is_supply_squeeze: boolean;
+    is_deposit_dump_risk: boolean;
+  };
+  stablecoin_exchange_flow: {
+    inflow_24h_usd_m: number;
+    outflow_24h_usd_m: number;
+    net_dry_powder_inflow_usd_m: number;
+    has_buying_capacity_surge: boolean;
+  };
+  flow_regime: string;
+  flow_description: string;
+  updated_at_utc: string;
+}
+
+export interface WhaleWall {
+  price: number;
+  size: number;
+  notional_usd: number;
+}
+
+export interface HyperliquidWhaleRadar {
+  symbol: string;
+  mark_price: number;
+  funding_rate_8h_pct: number;
+  open_interest_coins: number;
+  open_interest_usd: number;
+  whale_bid_walls: WhaleWall[];
+  whale_ask_walls: WhaleWall[];
+  total_whale_bid_notional_usd: number;
+  total_whale_ask_notional_usd: number;
+  whale_bias: "BULLISH_WHALE_BID_ABSORPTION" | "BEARISH_WHALE_ASK_RESISTANCE" | "BALANCED_ORDER_FLOW" | string;
+  confluence_boost_pct: number;
+  updated_at_utc: string;
+}
+
+export interface LiquidationPool {
+  leverage: string;
+  price: number;
+  distance_pct: number;
+  density: string;
+}
+
+export interface LiquidationHeatmap {
+  symbol: string;
+  current_price: number;
+  short_liquidation_pools: LiquidationPool[];
+  long_liquidation_pools: LiquidationPool[];
+  target_magnet_long: number;
+  target_magnet_short: number;
+  recommendation: string;
+}
+
+export interface MarketIntelligencePayload {
+  macro_calendar: MacroCalendar;
+  dominance_matrix: DominanceMatrix;
+  dual_sentiment: DualSentiment;
+  etf_flows: EtfFlows;
+  exchange_flows: ExchangeFlows;
+  hyperliquid_whale_radar: HyperliquidWhaleRadar;
+  liquidation_heatmap: LiquidationHeatmap;
+  synthesized_at_utc: string;
+}
+
+export interface MarketIntelligenceResponse {
+  status: string;
+  symbol: string;
+  market_intelligence: MarketIntelligencePayload;
+}
+
 export interface V16EndpointHealth {
   endpoint: string;
   status: number | "ERR";

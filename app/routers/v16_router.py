@@ -1070,3 +1070,93 @@ def clear_all_v16_caches() -> Dict[str, Any]:
             "timestamp_utc": datetime.now(timezone.utc).isoformat()
         }
     }
+
+# =============================================================================
+# INSTITUTIONAL MARKET INTELLIGENCE, MACRO SENTINEL & WHALE RADAR
+# =============================================================================
+
+@v16_router.get("/market-intelligence")
+def get_v16_market_intelligence(
+    symbol: str = Query("BTC/USDT", description="Target trading pair"),
+    current_price: float = Query(76500.0, description="Current price of the asset"),
+    atr: float = Query(1200.0, description="Active ATR volatility of the asset"),
+    force: bool = Query(False, description="Force refresh from source feeds")
+) -> Dict[str, Any]:
+    """
+    Unified Institutional Market Intelligence Hub:
+    Consolidates:
+    1. US Macro Calendar (Federal Reserve FOMC, CPI Inflation, NFP, Powell Speeches)
+    2. Capital Rotation Dominance (BTC.D, ETH.D, USDT.D, Others.D)
+    3. Dual Fear & Greed Index (Crypto + TradFi S&P/VIX)
+    4. US Spot ETF Inflows & Outflows (BTC & ETH Spot ETFs)
+    5. CEX Exchange Net Flows & Reserve Shifts
+    6. Hyperliquid Perp DEX Whale Radar & Order Book Whale Walls
+    7. High-Density Derivatives Liquidation Heatmap & TP Alignment
+    """
+    from app.services.institutional_intelligence_service import institutional_intelligence_service
+    intel = institutional_intelligence_service.get_full_institutional_intelligence(
+        symbol=symbol,
+        current_price=current_price,
+        atr=atr
+    )
+    return {
+        "status": "success",
+        "symbol": symbol,
+        "market_intelligence": intel
+    }
+
+@v16_router.get("/macro-calendar")
+def get_v16_macro_calendar() -> Dict[str, Any]:
+    """Returns the high-impact US Federal Reserve, FOMC, CPI, NFP, and Powell calendar."""
+    from app.services.institutional_intelligence_service import institutional_intelligence_service
+    return {
+        "status": "success",
+        "macro_calendar": institutional_intelligence_service.get_macro_economic_calendar()
+    }
+
+@v16_router.get("/dominance")
+def get_v16_dominance(force: bool = Query(False)) -> Dict[str, Any]:
+    """Returns the market capitalization dominance matrix and capital rotation regime."""
+    from app.services.institutional_intelligence_service import institutional_intelligence_service
+    return {
+        "status": "success",
+        "dominance_matrix": institutional_intelligence_service.get_dominance_matrix(force=force)
+    }
+
+@v16_router.get("/whale-radar")
+def get_v16_whale_radar(
+    symbol: str = Query("BTC", description="Coin symbol to inspect"),
+    force: bool = Query(False)
+) -> Dict[str, Any]:
+    """Returns Hyperliquid L2 order book whale walls, open interest, and smart money skew."""
+    from app.services.institutional_intelligence_service import institutional_intelligence_service
+    return {
+        "status": "success",
+        "whale_radar": institutional_intelligence_service.get_hyperliquid_whale_radar(symbol=symbol, force=force)
+    }
+
+@v16_router.get("/etf-flows")
+def get_v16_etf_flows(force: bool = Query(False)) -> Dict[str, Any]:
+    """Returns US Spot Bitcoin & Ethereum ETF daily inflows/outflows and 5-day velocity."""
+    from app.services.institutional_intelligence_service import institutional_intelligence_service
+    return {
+        "status": "success",
+        "etf_flows": institutional_intelligence_service.get_crypto_etf_flows(force=force)
+    }
+
+@v16_router.get("/liquidation-heatmap")
+def get_v16_liquidation_heatmap(
+    symbol: str = Query("BTC/USDT"),
+    current_price: float = Query(76500.0),
+    atr: float = Query(1200.0)
+) -> Dict[str, Any]:
+    """Returns high-density liquidation clusters across 10x-100x leverage tiers."""
+    from app.services.institutional_intelligence_service import institutional_intelligence_service
+    return {
+        "status": "success",
+        "liquidation_heatmap": institutional_intelligence_service.get_liquidation_heatmap(
+            symbol=symbol,
+            current_price=current_price,
+            atr=atr
+        )
+    }

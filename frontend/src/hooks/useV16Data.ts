@@ -8,6 +8,7 @@ import {
   V16AuditEvent,
   V16RegimeResponse,
   V16EndpointHealth,
+  MarketIntelligencePayload,
 } from "@/types/v16";
 
 export function useV16Signals(filters?: { status?: string; symbol?: string }) {
@@ -99,6 +100,28 @@ export function useV16Regime() {
     },
     refetchInterval: 15000,
     staleTime: 5000,
+    refetchOnWindowFocus: true,
+    retry: 2,
+  });
+}
+
+export function useV16MarketIntelligence(symbol = "BTC/USDT") {
+  return useQuery<{
+    intelligence: MarketIntelligencePayload | null;
+    health: V16EndpointHealth;
+    error?: string;
+  }>({
+    queryKey: ["v16-market-intelligence", symbol],
+    queryFn: async () => {
+      const res = await v16Api.getMarketIntelligence(symbol);
+      return {
+        intelligence: res.data?.market_intelligence || null,
+        health: res.health,
+        error: res.error,
+      };
+    },
+    refetchInterval: 20000, // 20s auto-refresh
+    staleTime: 10000,
     refetchOnWindowFocus: true,
     retry: 2,
   });
