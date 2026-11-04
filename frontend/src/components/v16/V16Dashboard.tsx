@@ -10,7 +10,6 @@ import V16SignalTable from "@/components/v16/V16SignalTable";
 import V16SignalDetailModal from "@/components/v16/V16SignalDetailModal";
 import V16EventJournal from "@/components/v16/V16EventJournal";
 import V16PerformancePanel from "@/components/v16/V16PerformancePanel";
-import AssetPredictionMatrix from "@/components/AssetPredictionMatrix";
 import {
   useV16Signals,
   useV16Theses,
@@ -206,12 +205,7 @@ export default function V16Dashboard() {
         )}
       </div>
 
-      {/* 5. Live Top 40 Quantitative Scanner Matrix (All 9 Horizons) */}
-      <div className="relative z-10 space-y-3">
-        <AssetPredictionMatrix />
-      </div>
-
-      {/* 6. Performance and Event Audit Stream */}
+      {/* 5. Performance and Event Audit Stream */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 relative z-10">
         <V16PerformancePanel signals={signals} />
         <V16EventJournal

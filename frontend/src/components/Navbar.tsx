@@ -35,10 +35,7 @@ export default function Navbar() {
   const navLinks = useMemo(
     () => [
       { href: "/", label: "V16 Quant Terminal", icon: Activity },
-      { href: "/my-trades", label: "My Trades Desk", icon: Target },
       { href: "/signals", label: "Signals Audit Ledger", icon: BarChart2 },
-      { href: "/portfolio", label: "Paper Trading Bot", icon: TrendingUp },
-      { href: "/radar", label: "Multi-Horizon Radar", icon: Layers },
     ],
     []
   );
