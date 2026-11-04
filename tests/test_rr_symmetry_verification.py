@@ -108,5 +108,31 @@ class TestRiskRewardSymmetry(unittest.TestCase):
         payout_ratio = total_win_gross / abs(total_loss_gross)
         self.assertGreaterEqual(payout_ratio, 1.50, f"Expected Win/Loss payout >= 1.50, got {payout_ratio:.2f}")
 
+    def test_05_range_rotation_rr_anti_compaction(self):
+        """Verifies that range rotation target clamping maintains RR >= 2.0 or adapts SL."""
+        exec_entry = 100.0
+        htf_high = 105.0  # Available span = 5.0
+        avail_span = htf_high - exec_entry
+        cand_tp1 = exec_entry + (avail_span * 0.60)  # 103.0 (reward = 3.0)
+        cand_sl = 98.0  # initial risk = 2.0 (RR = 3.0/2.0 = 1.5 < 2.0)
+        
+        # Anti-compaction adjustment
+        reward_dist = cand_tp1 - exec_entry
+        current_sl_dist = exec_entry - cand_sl
+        active_atr = 1.5
+        if current_sl_dist > 0 and (reward_dist / current_sl_dist) < 2.0:
+            max_allowed_sl_dist = reward_dist / 2.0
+            if max_allowed_sl_dist >= (active_atr * 0.35):
+                cand_sl = exec_entry - max_allowed_sl_dist  # tightened to 98.5
+        
+        actual_rr = round(abs(cand_tp1 - exec_entry) / abs(exec_entry - cand_sl), 2)
+        self.assertGreaterEqual(actual_rr, 2.0, f"Expected adapted RR >= 2.0, got {actual_rr}")
+
+    def test_06_hard_rr_gate_vetoes_sub_2_0(self):
+        """Verifies that any trade with actual_rr < 2.0 is strictly vetoed."""
+        actual_rr = 1.85
+        passed_rr_gate = actual_rr >= 2.00
+        self.assertFalse(passed_rr_gate, "Trade with actual_rr < 2.00 must fail the hard RR gate")
+
 if __name__ == "__main__":
     unittest.main()

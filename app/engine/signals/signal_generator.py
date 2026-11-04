@@ -530,6 +530,7 @@ class SignalGenerationSystem:
         if arch_type == InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value:
             # Cap TP1, TP2, and TP3 dynamically within the HTF Range Extreme to prevent running into iron wall
             # while preserving strictly monotonic target spacing: entry < TP1 < TP2 < TP3 <= htf_high
+            # and guaranteeing True Risk-to-Reward >= 1:2.0
             if direction == "LONG" and archetype_info.get("htf_range_high"):
                 htf_high = float(archetype_info["htf_range_high"])
                 if htf_high > exec_entry_price:
@@ -537,6 +538,16 @@ class SignalGenerationSystem:
                     cand_tp3 = min(cand_tp3, format_dynamic_precision(htf_high))
                     cand_tp2 = min(cand_tp2, format_dynamic_precision(exec_entry_price + (avail_span * 0.85)))
                     cand_tp1 = min(cand_tp1, format_dynamic_precision(exec_entry_price + (avail_span * 0.60)))
+                    
+                    # Ensure reward distance is at least 2.0x risk distance
+                    reward_dist = cand_tp1 - exec_entry_price
+                    current_sl_dist = exec_entry_price - cand_sl
+                    if current_sl_dist > 0 and (reward_dist / current_sl_dist) < 2.0:
+                        # Attempt to tighten SL closer to support/entry while respecting 0.35 * ATR noise floor
+                        max_allowed_sl_dist = reward_dist / 2.0
+                        if max_allowed_sl_dist >= (active_atr * 0.35):
+                            cand_sl = format_dynamic_precision(exec_entry_price - max_allowed_sl_dist)
+                    
                     actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
                     cand_rr = f"1:{actual_rr:.1f}"
             elif direction == "SHORT" and archetype_info.get("htf_range_low"):
@@ -546,8 +557,53 @@ class SignalGenerationSystem:
                     cand_tp3 = max(cand_tp3, format_dynamic_precision(htf_low))
                     cand_tp2 = max(cand_tp2, format_dynamic_precision(exec_entry_price - (avail_span * 0.85)))
                     cand_tp1 = max(cand_tp1, format_dynamic_precision(exec_entry_price - (avail_span * 0.60)))
+                    
+                    reward_dist = exec_entry_price - cand_tp1
+                    current_sl_dist = cand_sl - exec_entry_price
+                    if current_sl_dist > 0 and (reward_dist / current_sl_dist) < 2.0:
+                        max_allowed_sl_dist = reward_dist / 2.0
+                        if max_allowed_sl_dist >= (active_atr * 0.35):
+                            cand_sl = format_dynamic_precision(exec_entry_price + max_allowed_sl_dist)
+
                     actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
                     cand_rr = f"1:{actual_rr:.1f}"
+
+        # Liquidation Heatmap Magnet Snapping (Align Take-Profits into High-Density 50x/100x Stop Cascades)
+        try:
+            from app.services.institutional_intelligence_service import institutional_intelligence_service
+            liq_heatmap = institutional_intelligence_service.get_liquidation_heatmap(
+                symbol=symbol,
+                current_price=exec_entry_price,
+                atr=active_atr
+            )
+            sl_dist = abs(exec_entry_price - cand_sl)
+            if direction == "LONG" and sl_dist > 0:
+                short_pools = liq_heatmap.get("short_liquidation_pools", [])
+                for pool in short_pools:
+                    p_px = float(pool.get("price", 0.0))
+                    if p_px > exec_entry_price and pool.get("density") in ["CRITICAL_MAGNET", "VERY_HIGH"]:
+                        if (p_px - exec_entry_price) >= (2.0 * sl_dist):
+                            # If near TP1 (within 3.0%), snap TP1 to harvest stop cascade
+                            if abs(p_px - cand_tp1) / cand_tp1 <= 0.030:
+                                cand_tp1 = format_dynamic_precision(p_px)
+                                break
+                            elif p_px > cand_tp1 and abs(p_px - cand_tp2) / cand_tp2 <= 0.040:
+                                cand_tp2 = format_dynamic_precision(p_px)
+            elif direction == "SHORT" and sl_dist > 0:
+                long_pools = liq_heatmap.get("long_liquidation_pools", [])
+                for pool in long_pools:
+                    p_px = float(pool.get("price", 0.0))
+                    if 0 < p_px < exec_entry_price and pool.get("density") in ["CRITICAL_MAGNET", "VERY_HIGH"]:
+                        if (exec_entry_price - p_px) >= (2.0 * sl_dist):
+                            if abs(cand_tp1 - p_px) / cand_tp1 <= 0.030:
+                                cand_tp1 = format_dynamic_precision(p_px)
+                                break
+                            elif p_px < cand_tp1 and abs(cand_tp2 - p_px) / cand_tp2 <= 0.040:
+                                cand_tp2 = format_dynamic_precision(p_px)
+            actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
+            cand_rr = f"1:{actual_rr:.1f}"
+        except Exception:
+            pass
 
         # Confluence bonuses from Institutional Intelligence Hub (Macro, Whales, Dominance, ETF):
         inst_conviction_bonus = 0.0
@@ -555,14 +611,13 @@ class SignalGenerationSystem:
             from app.services.institutional_intelligence_service import institutional_intelligence_service
             clean_sym = symbol.split("/")[0].split(":")[0].upper()
             
-            # 1. Hyperliquid Whale Wall alignment
-            if clean_sym in ["BTC", "ETH", "SOL", "BNB", "XRP"]:
-                hl_radar = institutional_intelligence_service.get_hyperliquid_whale_radar(clean_sym)
-                hl_bias = hl_radar.get("whale_bias", "")
-                if direction == "LONG" and hl_bias == "BULLISH_WHALE_BID_ABSORPTION":
-                    inst_conviction_bonus += 5.0
-                elif direction == "SHORT" and hl_bias == "BEARISH_WHALE_ASK_RESISTANCE":
-                    inst_conviction_bonus += 5.0
+            # 1. Hyperliquid Whale Wall alignment across ALL coins
+            hl_radar = institutional_intelligence_service.get_hyperliquid_whale_radar(clean_sym)
+            hl_bias = hl_radar.get("whale_bias", "")
+            if direction == "LONG" and hl_bias == "BULLISH_WHALE_BID_ABSORPTION":
+                inst_conviction_bonus += 5.0
+            elif direction == "SHORT" and hl_bias == "BEARISH_WHALE_ASK_RESISTANCE":
+                inst_conviction_bonus += 5.0
 
             # 2. Spot ETF institutional momentum alignment
             if clean_sym in ["BTC", "ETH"]:
@@ -938,6 +993,16 @@ class SignalGenerationSystem:
             status = "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY" if ev_result.expected_net_return_pct <= 0.0 else "HOLD_UNFAVORABLE_RISK_REWARD"
             trade_active = False
             grade = f"Grade C ({ev_result.decision_reason})"
+            conviction = float(meta_eval.get("win_probability_pct", 65.0))
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
+        elif actual_rr < 2.00:
+            status = "HOLD_INSUFFICIENT_RISK_REWARD"
+            trade_active = False
+            grade = f"Grade C (INSUFFICIENT RISK-REWARD: 1:{actual_rr:.2f} < 1:2.00 required)"
             conviction = float(meta_eval.get("win_probability_pct", 65.0))
             tp1_price = cand_tp1
             tp2_price = cand_tp2

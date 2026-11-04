@@ -155,22 +155,35 @@ class UnifiedCryptoEngine:
                 if len(generated_signals) % 10 == 0 or len(generated_signals) == len(assets_data):
                     print(f"  [MODELS 🤖] Completed 5 Classifiers + 5 Regressors on {len(generated_signals)}/{len(assets_data)} assets...", flush=True)
 
-        # Phase 4: Anees Mehdi "The Only 1 Minute Rectangle Strategy" Scanner Integration
+        # Phase 4: Anees Mehdi "The Only 1 Minute Rectangle Strategy" Universal Scanner (All 91 Coins)
         if not is_partition_stale and hasattr(self, "rectangle_orchestrator") and self.rectangle_orchestrator:
-            for sym in getattr(self, "TOP_RECTANGLE_PAIRS", []):
+            for sym, coin_meta in assets_data.items():
                 try:
                     is_quar, _ = self.is_symbol_quarantined(sym)
                     if is_quar:
                         continue
-                    coin_meta = assets_data.get(sym, {})
                     df_15m = coin_meta.get("dfs_9", {}).get("15m")
                     if df_15m is None or len(df_15m) < 35:
                         continue
+                    bid_p = float(coin_meta.get("bid_price", coin_meta.get("price", 0.0)) or 0.0)
+                    ask_p = float(coin_meta.get("ask_price", coin_meta.get("price", 0.0)) or 0.0)
+                    
+                    # Tier 1 In-Memory Pre-Screening: verify if a valid M15 consolidation rectangle exists (0 API overhead)
+                    m15_pre = self.rectangle_orchestrator.scan_for_setups(
+                        symbol=sym,
+                        df_m15=df_15m,
+                        df_m1=None,
+                        bid_price=bid_p if bid_p > 0 else None,
+                        ask_price=ask_p if ask_p > 0 else None
+                    )
+                    if not m15_pre.get("weakness_confirmed") or float(m15_pre.get("rectangle_upper", 0.0)) <= 0:
+                        continue
+
+                    # Tier 2: Confirmed M15 Rectangle candidate! Fetch live M1 candles for precision trigger
                     df_1m = self.data_loader.fetch_single_timeframe_raw(sym, "1m", limit=60)
                     if df_1m is None or len(df_1m) < 20:
                         continue
-                    bid_p = float(coin_meta.get("bid_price", coin_meta.get("price", 0.0)) or 0.0)
-                    ask_p = float(coin_meta.get("ask_price", coin_meta.get("price", 0.0)) or 0.0)
+
                     rect_res = self.rectangle_orchestrator.scan_for_setups(
                         symbol=sym,
                         df_m15=df_15m,
@@ -186,9 +199,10 @@ class UnifiedCryptoEngine:
                         rect_tp2 = float(rect_res.get("tp2_price", 0.0))
                         rect_tp3 = float(rect_res.get("tp3_price", 0.0))
                         rect_rr = str(rect_res.get("risk_reward", "1:2.0"))
+                        actual_rect_rr = round(abs(rect_tp1 - rect_entry) / max(1e-9, abs(rect_entry - rect_sl)), 2)
                         is_valid_geom = (rect_sl < rect_entry < rect_tp1) if rect_dir == "LONG" else (rect_sl > rect_entry > rect_tp1)
-                        if is_valid_geom and rect_entry > 0:
-                            print(f"[RECTANGLE STRATEGY 📐] Triggered {sym} {rect_dir} M1 Setup! Score: {rect_res.get('signal_score'):.1f} | Entry: ${rect_entry} | TP1: ${rect_tp1} | SL: ${rect_sl}", flush=True)
+                        if is_valid_geom and rect_entry > 0 and actual_rect_rr >= 2.0:
+                            print(f"[RECTANGLE STRATEGY 📐] Triggered {sym} {rect_dir} M1 Setup! Score: {rect_res.get('signal_score'):.1f} | Entry: ${rect_entry} | TP1: ${rect_tp1} | SL: ${rect_sl} | RR: 1:{actual_rect_rr:.1f}", flush=True)
                             now_iso = datetime.now(timezone.utc).isoformat()
                             rect_sig = {
                                 "symbol": sym,
