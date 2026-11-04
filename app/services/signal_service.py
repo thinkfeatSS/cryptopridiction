@@ -832,9 +832,29 @@ class SignalService:
                     s.outcome_label = "🔴 LOST (SL HIT)"
                     s.evaluated_at_utc = now_str
                     updated = True
+                    def _build_sig_dict(sig_obj):
+                        return {
+                            "signal_id": sig_obj.signal_id,
+                            "symbol": sig_obj.symbol,
+                            "horizon": sig_obj.horizon,
+                            "direction": sig_obj.direction,
+                            "entry_price": sig_obj.entry_price,
+                            "entry_price_initial": sig_obj.entry_price,
+                            "tp1_price": sig_obj.tp1_price,
+                            "tp2_price": sig_obj.tp2_price,
+                            "tp3_price": sig_obj.tp3_price,
+                            "sl_price": sig_obj.sl_price,
+                            "quality_grade": sig_obj.quality_grade,
+                            "meta_win_prob_pct": sig_obj.meta_win_prob_pct,
+                            "risk_reward_ratio": getattr(sig_obj, "risk_reward_ratio", "1:2.0"),
+                            "ev_net": getattr(sig_obj, "ev_net", None),
+                            "decision": getattr(sig_obj, "decision", None) or sig_obj.outcome_label,
+                            "is_trade_active": True,
+                        }
+
                     try:
                         from app.services.whatsapp_service import whatsapp_service
-                        sig_dict = {"signal_id": s.signal_id, "symbol": s.symbol, "horizon": s.horizon, "direction": s.direction, "entry_price": s.entry_price, "quality_grade": s.quality_grade, "meta_win_prob_pct": s.meta_win_prob_pct, "decision": getattr(s, "decision", None) or s.outcome_label}
+                        sig_dict = _build_sig_dict(s)
                         whatsapp_service.emit_signal_outcome(sig_dict, "SL_HIT", s.exit_price, float(s.realized_return_pct))
                     except Exception:
                         pass
@@ -848,7 +868,7 @@ class SignalService:
                     updated = True
                     try:
                         from app.services.whatsapp_service import whatsapp_service
-                        sig_dict = {"signal_id": s.signal_id, "symbol": s.symbol, "horizon": s.horizon, "direction": s.direction, "entry_price": s.entry_price, "quality_grade": s.quality_grade, "meta_win_prob_pct": s.meta_win_prob_pct, "decision": getattr(s, "decision", None) or s.outcome_label}
+                        sig_dict = _build_sig_dict(s)
                         whatsapp_service.emit_signal_outcome(sig_dict, "TP3_HIT", tp3_p, ret_pct)
                     except Exception:
                         pass
@@ -860,7 +880,7 @@ class SignalService:
                     try:
                         from app.services.whatsapp_service import whatsapp_service
                         ret_tp2 = ((tp2_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp2_p) / entry_p) * 100.0
-                        sig_dict = {"signal_id": s.signal_id, "symbol": s.symbol, "horizon": s.horizon, "direction": s.direction, "entry_price": s.entry_price, "quality_grade": s.quality_grade, "meta_win_prob_pct": s.meta_win_prob_pct, "decision": getattr(s, "decision", None) or s.outcome_label}
+                        sig_dict = _build_sig_dict(s)
                         whatsapp_service.emit_signal_outcome(sig_dict, "TP2_HIT", tp2_p, ret_tp2)
                     except Exception:
                         pass
@@ -880,7 +900,7 @@ class SignalService:
                     try:
                         from app.services.whatsapp_service import whatsapp_service
                         ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
-                        sig_dict = {"signal_id": s.signal_id, "symbol": s.symbol, "horizon": s.horizon, "direction": s.direction, "entry_price": s.entry_price, "quality_grade": s.quality_grade, "meta_win_prob_pct": s.meta_win_prob_pct, "decision": getattr(s, "decision", None) or s.outcome_label}
+                        sig_dict = _build_sig_dict(s)
                         whatsapp_service.emit_signal_outcome(sig_dict, "TP1_HIT", tp1_p, ret_tp1)
                     except Exception:
                         pass
@@ -909,7 +929,7 @@ class SignalService:
                         s.exit_price = round(sl_p, 6)
                         s.realized_return_pct = round(ret_be, 2)
                         s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
-                        evt = "TIER0_BE_HIT"
+                        evt = "BE_HIT"
                     else:
                         s.status = "LOST_SL"
                         s.exit_price = round(sl_p, 6)
@@ -919,14 +939,13 @@ class SignalService:
                         evt = "SL_HIT"
                     s.evaluated_at_utc = now_str
                     updated = True
-                    if evt != "TIER0_BE_HIT":
-                        try:
-                            from app.services.whatsapp_service import whatsapp_service
-                            ret_exit = s.realized_return_pct or 0.0
-                            sig_dict = {"signal_id": s.signal_id, "symbol": s.symbol, "horizon": s.horizon, "direction": s.direction, "entry_price": s.entry_price, "quality_grade": s.quality_grade, "meta_win_prob_pct": s.meta_win_prob_pct, "decision": getattr(s, "decision", None) or s.outcome_label}
-                            whatsapp_service.emit_signal_outcome(sig_dict, evt, s.exit_price, float(ret_exit))
-                        except Exception:
-                            pass
+                    try:
+                        from app.services.whatsapp_service import whatsapp_service
+                        ret_exit = s.realized_return_pct or 0.0
+                        sig_dict = _build_sig_dict(s)
+                        whatsapp_service.emit_signal_outcome(sig_dict, evt, s.exit_price, float(ret_exit))
+                    except Exception:
+                        pass
                 elif is_expired:
                     # Invariant (Quant Edge Rule 6 & 8): Check if intra-candle adverse wick breached SL during the interval!
                     hit_sl_during_interval = (direction == "LONG" and low_p <= sl_p) or (direction == "SHORT" and high_p >= sl_p)

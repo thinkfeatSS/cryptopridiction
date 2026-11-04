@@ -584,6 +584,21 @@ class PaperTradingBot:
                 except UnicodeEncodeError:
                     safe_desk = str(desk.get('name', '')).encode('ascii', 'ignore').decode('ascii')
                     print(f"[PAPER BOT [EXEC] TRADE] Executed Signal Trade: {symbol} ({direction} {norm_horizon}) on {safe_desk} | Size: ${position_size_usd:,.2f} | Entry: ${entry_p:,.4f} | TP1: ${tp1_p:,.4f} | SL: ${sl_p:,.4f}")
+
+            # Automated WhatsApp Signal Notification Dispatch for Executed Paper Trade
+            try:
+                from app.services.whatsapp_service import whatsapp_service
+                sig_wa = dict(pos_record)
+                sig_wa["is_trade_active"] = True
+                sig_wa["quality_grade"] = pos_record.get("signal_quality_grade") or signal.get("quality_grade", "Grade A")
+                sig_wa["conviction_pct"] = pos_record.get("signal_conviction") or signal.get("conviction", 80.0)
+                sig_wa["meta_win_prob_pct"] = float(pos_record.get("meta_win_probability", 0.70)) * 100.0
+                sig_wa["ev_net"] = float(pos_record.get("expected_return_pct", 0.0))
+                sig_wa["risk_reward_ratio"] = pos_record.get("risk_reward_ratio", "1:2.0")
+                whatsapp_service.emit_signal_created(sig_wa)
+            except Exception as wa_err:
+                print(f"[WHATSAPP ❌] Error emitting paper trade execution to WhatsApp: {wa_err}", flush=True)
+
             return True
 
     def admit_shadow_signal(self, signal: Dict[str, Any], btc_shield_state: Optional[Dict[str, Any]] = None) -> bool:

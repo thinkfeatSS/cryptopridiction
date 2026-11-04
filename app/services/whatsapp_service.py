@@ -14,7 +14,21 @@ from app.config import settings
 logger = logging.getLogger("whatsapp_service")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
-    _sh = logging.StreamHandler(sys.stdout)
+    class _SafeStreamHandler(logging.StreamHandler):
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                stream = self.stream
+                try:
+                    stream.write(msg + self.terminator)
+                except UnicodeEncodeError:
+                    safe_msg = msg.encode("ascii", errors="backslashreplace").decode("ascii")
+                    stream.write(safe_msg + self.terminator)
+                self.flush()
+            except Exception:
+                self.handleError(record)
+
+    _sh = _SafeStreamHandler(sys.stdout)
     _sh.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] %(message)s"))
     logger.addHandler(_sh)
 
@@ -118,8 +132,6 @@ class WhatsAppService:
     @property
     def channel_id(self) -> str:
         cid = str(self._get_setting("WHATSAPP_CHANNEL_ID", "") or "").strip()
-        if "@newsletter" in cid:
-            return ""
         return cid
 
     @property
@@ -216,12 +228,14 @@ class WhatsAppService:
         if (grade_tier >= 4) or ("GRADE C" in raw_grade):
             return False
 
-        # Strict NTZ & Consolidation Gate: NEVER broadcast any signal marked as No Trade Zone
+        # Strict NTZ Gate: NEVER broadcast any signal vetoed by Macro No Trade Zone
         dec = str(sig.get("decision", "")).upper()
+        dirn = str(sig.get("dominant_direction") or sig.get("direction") or "").upper()
         if (
             sig.get("is_ntz_blocked")
             or sig.get("is_ntz_active")
-            or any(k in dec for k in ["NO TRADE ZONE", "CONSOLIDATION", "RANGE SQUEEZE", "COILED SQUEEZE", "LOW VOL", "CHOP"])
+            or dirn in ["NO_TRADE", "HOLD_VETOED", "HOLD"]
+            or any(k in dec for k in ["NO TRADE ZONE", "HOLD (QUARANTINED)", "VETOED BY NO TRADE ZONE"])
         ):
             return False
 
@@ -255,7 +269,9 @@ class WhatsAppService:
     def _format_price(val: Any) -> str:
         try:
             f = float(val)
-            if f >= 1000:
+            if f <= 0.0:
+                return "N/A"
+            elif f >= 1000:
                 return f"${f:,.2f}"
             elif f >= 1:
                 return f"${f:.4f}"
@@ -343,7 +359,7 @@ class WhatsAppService:
 
     def format_new_signal(self, sig: Dict[str, Any]) -> str:
         sym = sig.get("symbol", "BTC/USDT")
-        direction = str(sig.get("direction", "LONG")).upper()
+        direction = str(sig.get("dominant_direction") or sig.get("direction") or "LONG").upper()
         is_long = direction in ["LONG", "BULLISH", "BUY"]
         dir_emoji = "🟢 *LONG BUY*" if is_long else "🔴 *SHORT SELL*"
         horizon = self._format_horizon_display(sig)
@@ -357,16 +373,28 @@ class WhatsAppService:
             or sig.get("setup_label")
             or sig.get("strategy_archetype")
             or (sig.get("order_block_setup") or {}).get("setup_label")
+            or (sig.get("grade") if isinstance(sig.get("grade"), str) and "(" in sig.get("grade") else None)
             or ("🎯 INSTITUTIONAL ORDER-BLOCK RETEST (LONG)" if is_long else "🎯 ELITE BREAKDOWN EXECUTE (SHORT)")
         )
         decision_str = str(decision).strip()
-        if not any(decision_str.startswith(icon) for icon in ["🎯", "🛑", "🚀", "✅", "⚪", "💎", "⚡"]):
+        if not any(decision_str.startswith(icon) for icon in ["🎯", "🛑", "🚀", "✅", "⚪", "💎", "⚡", "⚖️"]):
             decision_display = f"🎯 {decision_str}"
         else:
             decision_display = decision_str
 
-        conviction = float(sig.get("conviction_pct") or sig.get("conviction") or 75.0)
-        win_prob = float(sig.get("meta_win_prob_pct") or (float(sig.get("meta_win_prob", 0.70)) * 100.0 if float(sig.get("meta_win_prob", 0.70)) <= 1.0 else sig.get("meta_win_prob", 70.0)))
+        conviction = float(sig.get("conviction_pct") or sig.get("signal_score") or sig.get("conviction") or 75.0)
+        raw_win = (
+            sig.get("meta_win_prob_pct")
+            or sig.get("win_probability_pct")
+            or sig.get("p_tp1")
+            or sig.get("meta_win_prob")
+            or 70.0
+        )
+        try:
+            f_win = float(raw_win)
+            win_prob = f_win * 100.0 if 0.0 < f_win <= 1.0 else f_win
+        except Exception:
+            win_prob = 70.0
         
         # Calibrated path probabilities for targets and invalidation
         probs = self._extract_path_probabilities(sig, win_prob)
@@ -381,22 +409,43 @@ class WhatsAppService:
         elif pred_window and pred_window != "N/A":
             candle_time_str = f"⏳ *Horizon Window:* `{pred_window}`"
 
-        entry = self._format_price(sig.get("entry_price", 0.0))
-        tp1 = self._format_price(sig.get("tp1_price", 0.0))
-        tp2 = self._format_price(sig.get("tp2_price", 0.0))
-        tp3 = self._format_price(sig.get("tp3_price", 0.0))
-        sl = self._format_price(sig.get("sl_price", 0.0))
+        entry_val = float(
+            sig.get("entry_price")
+            or sig.get("entry_price_initial")
+            or sig.get("optimal_entry_price")
+            or sig.get("current_price")
+            or 0.0
+        )
+        tp1_val = float(sig.get("tp1_price") or sig.get("tp1_initial") or sig.get("tp1") or 0.0)
+        tp2_val = float(sig.get("tp2_price") or sig.get("tp2_initial") or sig.get("tp2") or 0.0)
+        tp3_val = float(sig.get("tp3_price") or sig.get("tp3_initial") or sig.get("tp3") or 0.0)
+        sl_val = float(sig.get("sl_price") or sig.get("sl_initial") or sig.get("current_sl") or sig.get("sl") or 0.0)
+
+        entry = self._format_price(entry_val)
+        tp1 = self._format_price(tp1_val)
+        tp2 = self._format_price(tp2_val)
+        tp3 = self._format_price(tp3_val)
+        sl = self._format_price(sl_val)
         
-        rr = sig.get("risk_reward_ratio", "1:2.0")
-        exp_ret = float(sig.get("expected_return_pct") or (float(sig.get("exp_return", 0.035)) * 100.0 if float(sig.get("exp_return", 0.035)) <= 1.0 else sig.get("exp_return", 3.5)))
-        
-        market_shield = sig.get("market_shield", "BALANCED VOLATILITY")
+        raw_rr = sig.get("risk_reward_ratio") or sig.get("risk_reward") or 2.0
+        if isinstance(raw_rr, (int, float)):
+            rr = f"1:{float(raw_rr):.1f}"
+        elif "1:" in str(raw_rr):
+            rr = str(raw_rr)
+        else:
+            try:
+                rr = f"1:{float(raw_rr):.1f}"
+            except Exception:
+                rr = str(raw_rr)
+
+        exp_ret = float(sig.get("expected_net_return") or sig.get("expected_return_pct") or sig.get("ev_net") or 3.5)
+        market_shield = sig.get("market_shield") or sig.get("regime") or "BALANCED VOLATILITY"
 
         candle_line = f"{candle_time_str}\n" if candle_time_str else ""
 
         is_limit_pending = bool(sig.get("is_limit_pending") or "AWAIT PULLBACK" in decision_display or "AWAIT BOUNCE" in decision_display)
-        entry_val = sig.get("optimal_entry_price") or sig.get("entry_price", 0.0)
-        curr_val = sig.get("current_price") or entry_val
+        optimal_entry_val = float(sig.get("optimal_entry_price") or entry_val)
+        curr_val = float(sig.get("current_price") or entry_val)
         zone_min = sig.get("entry_zone_min")
         zone_max = sig.get("entry_zone_max")
 
@@ -404,7 +453,7 @@ class WhatsAppService:
             if zone_min and zone_max and str(zone_min) != str(zone_max):
                 zone_str = f"{self._format_price(zone_min)} – {self._format_price(zone_max)}"
             else:
-                zone_str = self._format_price(entry_val)
+                zone_str = self._format_price(optimal_entry_val)
             live_label = "Peak" if is_long else "Trough"
             action_warn = "DO NOT MARKET-BUY AT PEAK (Wait for Retest)" if is_long else "DO NOT MARKET-SHORT LOW (Wait for Bounce)"
             chase_note = f"• ⚠️ *Metric:* {sig.get('chase_warning')}\n" if sig.get('chase_warning') else ""
@@ -416,7 +465,7 @@ class WhatsAppService:
                 f"• 🎯 *Resting Limit Zone:* *{zone_str}*\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
             )
-            entry_line = f"📍 *Optimal Limit {'Bid' if is_long else 'Ask'}:* {self._format_price(entry_val)}\n"
+            entry_line = f"📍 *Optimal Limit {'Bid' if is_long else 'Ask'}:* {self._format_price(optimal_entry_val)}\n"
         else:
             anti_chase_block = ""
             entry_line = f"📍 *Entry Zone:* {entry}\n"
@@ -454,8 +503,8 @@ class WhatsAppService:
         if fund_parts:
             fund_line = "\n".join(fund_parts) + "\n"
 
-        ev_net_val = sig.get("ev_net")
-        costs_val = sig.get("costs_total_pct")
+        ev_net_val = sig.get("expected_net_return") or sig.get("ev_net")
+        costs_val = sig.get("total_execution_costs") or sig.get("costs_total_pct")
         if ev_net_val is not None and str(ev_net_val) != "":
             try:
                 ev_line = f"📈 *Expected Net Value (EVnet):* *+{float(ev_net_val):.2f}%* (Costs: {float(costs_val or 0.145):.2f}%)\n"
@@ -499,8 +548,18 @@ class WhatsAppService:
         sym = sig.get("symbol", "BTC/USDT")
         horizon = self._format_horizon_display(sig)
         f_price = self._format_price(current_price)
-        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        decision = (
+            sig.get("decision")
+            or sig.get("strategy_archetype")
+            or (sig.get("grade") if isinstance(sig.get("grade"), str) and "(" in sig.get("grade") else "")
+            or ""
+        )
         setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
+
+        entry_val = float(sig.get("entry_price") or sig.get("entry_price_initial") or 0.0)
+        if (gain_pct is None or gain_pct == 0.0) and entry_val > 0 and current_price > 0:
+            dirn = str(sig.get("dominant_direction") or sig.get("direction") or "LONG").upper()
+            gain_pct = ((current_price - entry_val) / entry_val * 100.0) if dirn in ["LONG", "BUY"] else ((entry_val - current_price) / entry_val * 100.0)
 
         if level == "TP1":
             action_text = (
@@ -524,8 +583,15 @@ class WhatsAppService:
             title = "🚀 *MAX TARGET SMASHED (TP3 WON)!* 🏆"
 
         grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
-        prob = sig.get("meta_win_prob_pct")
-        prob_str = f"🧠 P(TP1): *{float(prob):.1f}%* | " if prob is not None else ""
+        raw_prob = sig.get("meta_win_prob_pct") or sig.get("win_probability_pct") or sig.get("p_tp1") or sig.get("meta_win_prob")
+        prob_str = ""
+        if raw_prob is not None:
+            try:
+                f_prob = float(raw_prob)
+                f_prob = f_prob * 100.0 if 0.0 < f_prob <= 1.0 else f_prob
+                prob_str = f"🧠 P(TP1): *{f_prob:.1f}%* | "
+            except Exception:
+                pass
 
         msg = (
             f"{title}\n"
@@ -544,11 +610,30 @@ class WhatsAppService:
         sym = sig.get("symbol", "BTC/USDT")
         horizon = self._format_horizon_display(sig)
         grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
-        prob = sig.get("meta_win_prob_pct")
-        prob_str = f"🧠 P(TP1): *{float(prob):.1f}%* | " if prob is not None else ""
-        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        raw_prob = sig.get("meta_win_prob_pct") or sig.get("win_probability_pct") or sig.get("p_tp1") or sig.get("meta_win_prob")
+        prob_str = ""
+        if raw_prob is not None:
+            try:
+                f_prob = float(raw_prob)
+                f_prob = f_prob * 100.0 if 0.0 < f_prob <= 1.0 else f_prob
+                prob_str = f"🧠 P(TP1): *{f_prob:.1f}%* | "
+            except Exception:
+                pass
+
+        decision = (
+            sig.get("decision")
+            or sig.get("strategy_archetype")
+            or (sig.get("grade") if isinstance(sig.get("grade"), str) and "(" in sig.get("grade") else "")
+            or ""
+        )
         setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
         f_price = self._format_price(exit_price)
+
+        entry_val = float(sig.get("entry_price") or sig.get("entry_price_initial") or 0.0)
+        if (loss_pct is None or loss_pct == 0.0) and entry_val > 0 and exit_price > 0:
+            dirn = str(sig.get("dominant_direction") or sig.get("direction") or "LONG").upper()
+            loss_pct = ((exit_price - entry_val) / entry_val * 100.0) if dirn in ["LONG", "BUY"] else ((entry_val - exit_price) / entry_val * 100.0)
+
         msg = (
             f"🛑 *TRADE INVALIDATION / STOP-LOSS ALERT* ⚠️\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -567,9 +652,22 @@ class WhatsAppService:
         sym = sig.get("symbol", "BTC/USDT")
         horizon = self._format_horizon_display(sig)
         grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
-        prob = sig.get("meta_win_prob_pct")
-        prob_str = f"🧠 P(TP1): *{float(prob):.1f}%* | " if prob is not None else ""
-        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        raw_prob = sig.get("meta_win_prob_pct") or sig.get("win_probability_pct") or sig.get("p_tp1") or sig.get("meta_win_prob")
+        prob_str = ""
+        if raw_prob is not None:
+            try:
+                f_prob = float(raw_prob)
+                f_prob = f_prob * 100.0 if 0.0 < f_prob <= 1.0 else f_prob
+                prob_str = f"🧠 P(TP1): *{f_prob:.1f}%* | "
+            except Exception:
+                pass
+
+        decision = (
+            sig.get("decision")
+            or sig.get("strategy_archetype")
+            or (sig.get("grade") if isinstance(sig.get("grade"), str) and "(" in sig.get("grade") else "")
+            or ""
+        )
         setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
         f_price = self._format_price(exit_price)
         msg = (
@@ -590,12 +688,31 @@ class WhatsAppService:
         sym = sig.get("symbol", "BTC/USDT")
         horizon = self._format_horizon_display(sig)
         grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
-        prob = sig.get("meta_win_prob_pct")
-        prob_str = f"🧠 P(TP1): *{float(prob):.1f}%* | " if prob is not None else ""
-        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        raw_prob = sig.get("meta_win_prob_pct") or sig.get("win_probability_pct") or sig.get("p_tp1") or sig.get("meta_win_prob")
+        prob_str = ""
+        if raw_prob is not None:
+            try:
+                f_prob = float(raw_prob)
+                f_prob = f_prob * 100.0 if 0.0 < f_prob <= 1.0 else f_prob
+                prob_str = f"🧠 P(TP1): *{f_prob:.1f}%* | "
+            except Exception:
+                pass
+
+        decision = (
+            sig.get("decision")
+            or sig.get("strategy_archetype")
+            or (sig.get("grade") if isinstance(sig.get("grade"), str) and "(" in sig.get("grade") else "")
+            or ""
+        )
         setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
-        entry_p = self._format_price(sig.get("entry_price") or current_price)
+        entry_val = sig.get("entry_price") or sig.get("entry_price_initial") or current_price
+        entry_p = self._format_price(entry_val)
         curr_p = self._format_price(current_price)
+
+        if (gain_pct is None or gain_pct == 0.0) and float(entry_val or 0) > 0 and current_price > 0:
+            dirn = str(sig.get("dominant_direction") or sig.get("direction") or "LONG").upper()
+            gain_pct = ((current_price - float(entry_val)) / float(entry_val) * 100.0) if dirn in ["LONG", "BUY"] else ((float(entry_val) - current_price) / float(entry_val) * 100.0)
+
         msg = (
             f"🛡️ *RISK-FREE PROFIT LOCK / BREAK-EVEN MOVED* 🛡️\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -937,6 +1054,55 @@ class WhatsAppService:
         if is_dispatched:
             self._broadcasted_signals.add(sig_id)
 
+    def sync_v16_terminal_signals(self) -> int:
+        """
+        Reconciles active signals from the Quant Edge V16 Institutional Terminal store
+        (v16_immutable_signals.json & v16_dynamic_states.json) and ensures active trades
+        are broadcast to the WhatsApp group with deduplication.
+        Returns the number of new signals dispatched.
+        """
+        if not self.enabled or not self.group_id:
+            return 0
+
+        try:
+            from app.routers.v16_router import _get_v16_store
+            immut_data, dyn_data = _get_v16_store()
+        except Exception as e:
+            logger.warning(f"[WHATSAPP ⚠️] Failed to load V16 store for sync: {e}")
+            return 0
+
+        dispatched = 0
+        for sid, imm in immut_data.items():
+            dyn = dyn_data.get(sid, {})
+            status = str(dyn.get("status") or imm.get("status") or "").upper()
+            outcome_lbl = str(dyn.get("outcome_label") or "").upper()
+
+            is_active = (
+                status in ["ACTIVE", "PENDING_EVALUATION", "ACTIVE_TRADE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
+                or "RUNNING" in outcome_lbl
+                or "ACTIVE" in outcome_lbl
+                or "PENDING" in outcome_lbl
+            )
+            if not is_active:
+                continue
+
+            merged = {**imm, **dyn}
+            if not self.passes_quality_gate(merged, is_channel=False):
+                continue
+
+            dedup_key = f"V16_SYNC_CREATED:{sid}"
+            if self.is_already_sent(dedup_key, ttl_seconds=86400 * 3):
+                continue
+
+            text = self.format_new_signal(merged)
+            self._enqueue_message(self.group_id, text, priority=1)
+            if self.channel_id and self.passes_quality_gate(merged, is_channel=True):
+                self._enqueue_message(self.channel_id, text, priority=1)
+            dispatched += 1
+            logger.info(f"[WHATSAPP 🚀] Synced active V16 Terminal signal to WhatsApp: {merged.get('symbol')} ({merged.get('horizon')})")
+
+        return dispatched
+
     def emit_signal_outcome(self, sig: Dict[str, Any], event_type: str, current_price: float, gain_pct: float):
         """
         Called on heartbeat evaluation when a TP, SL, or Breakeven is touched.
@@ -1026,21 +1192,20 @@ class WhatsAppService:
 
         is_emergency_dump = regime in ["ALERT_DUMP", "FLASH_DUMP"] or "CRASH" in str(shield_data.get("reason", "")).upper()
 
-        # 1. Exact regime repeat deduplication: Don't repeat the exact same regime within 45m (or 4 hours for CONSOLIDATION)
-        repeat_ttl = 14400 if regime in ["CONSOLIDATION", "RANGE_SQUEEZE", "NO_TRADE_ZONE"] else 2700
+        # 1. Exact regime repeat deduplication: Don't repeat the exact same regime within 15m
+        repeat_ttl = 900 if regime in ["CONSOLIDATION", "RANGE_SQUEEZE", "NO_TRADE_ZONE"] else 600
         same_regime_key = f"REGIME_REPEAT:{regime}"
         if self.is_already_sent(same_regime_key, ttl_seconds=repeat_ttl):
             return
 
         # 2. Global regime cooldown: Prevent rapid alternating oscillations between ANY regimes
-        # (e.g. flipping between BEAR_TREND and CONSOLIDATION within 20 minutes)
         global_lock_key = "GLOBAL_REGIME_ALERT_LOCK"
         if not is_emergency_dump:
-            if self.is_already_sent(global_lock_key, ttl_seconds=1200):
+            if self.is_already_sent(global_lock_key, ttl_seconds=600):
                 return
         else:
-            # For emergency crash dumps, establish shorter 10m lock
-            self.is_already_sent(global_lock_key, ttl_seconds=600)
+            # For emergency crash dumps, establish shorter 5m lock
+            self.is_already_sent(global_lock_key, ttl_seconds=300)
 
         if not self.enabled:
             return

@@ -1018,6 +1018,15 @@ class UnifiedCryptoEngine:
                 except Exception as csv_err:
                     print(f"[SIGNALS ⚠️] Error persisting signals to CSV: {csv_err}")
 
+            # Reconcile & ensure active V16 Terminal signals are synchronized to WhatsApp
+            try:
+                from app.services.whatsapp_service import whatsapp_service
+                synced_n = whatsapp_service.sync_v16_terminal_signals()
+                if synced_n > 0:
+                    print(f"[WHATSAPP 🚀] Reconciled and synced {synced_n} active V16 terminal signal(s) to WhatsApp queue", flush=True)
+            except Exception as sync_wa_err:
+                print(f"[WHATSAPP ⚠️] Error during V16 terminal WhatsApp sync: {sync_wa_err}")
+
         # 4. Rank Coins by Multi-Horizon Trend Alignment across 9 Horizons (5M -> 1M)
         best_trend_aligned_coins = sorted(
             generated_signals,

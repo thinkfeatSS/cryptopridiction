@@ -25,6 +25,16 @@ def get_whatsapp_status():
     """Returns the operational status and configuration of the WhatsApp dispatcher."""
     return whatsapp_service.get_status()
 
+@router.post("/sync-terminal")
+def sync_terminal_signals():
+    """Forces synchronization between active V16 Terminal signals and WhatsApp."""
+    count = whatsapp_service.sync_v16_terminal_signals()
+    return {
+        "status": "SUCCESS",
+        "synced_count": count,
+        "message": f"Successfully evaluated and synced {count} active V16 terminal signal(s) to WhatsApp queue."
+    }
+
 @router.post("/test")
 def send_test_signal(req: TestSignalRequest):
     """Dispatches a test institutional signal to verify WhatsApp Group and Channel connectivity."""

@@ -141,6 +141,110 @@ class TestWhatsAppFullParity(unittest.TestCase):
         self.assertEqual(call_args[1], "BE_HIT")
         self.assertEqual(call_args[2], 68000.0)
 
+    def test_07_format_v16_canonical_schema_without_zero_dollars(self):
+        """Verifies that format_new_signal formats V16 Terminal canonical schemas with exact prices (zero bare $0.)."""
+        v16_sig = {
+            "signal_id": "BMT_USDT_15M_1793773328",
+            "symbol": "BMT/USDT",
+            "horizon": "15M",
+            "direction": "LONG",
+            "entry_price_initial": 0.02988,
+            "tp1_initial": 0.032098,
+            "tp2_initial": 0.033207,
+            "tp3_initial": 0.034870,
+            "sl_initial": 0.028771,
+            "grade": "⚖️ Grade A (RANGE ROTATION: 1D Range Mean Reversion)",
+            "signal_score": 84.0,
+            "expected_net_return": 1.003,
+            "total_execution_costs": 0.145,
+            "risk_reward": 2.0,
+            "p_tp1": 57.9,
+            "p_sl": 42.1,
+            "regime": "RANGE"
+        }
+        msg = whatsapp_service.format_new_signal(v16_sig)
+        self.assertNotIn("$0.\n", msg)
+        self.assertNotIn("Target 1: N/A", msg)
+        self.assertIn("$0.029880", msg)
+        self.assertIn("$0.032098", msg)
+        self.assertIn("$0.033207", msg)
+        self.assertIn("$0.034870", msg)
+        self.assertIn("$0.028771", msg)
+        self.assertIn("+1.00%", msg)
+        self.assertIn("1:2.0", msg)
+
+    @patch.object(whatsapp_service, "_enqueue_message")
+    def test_08_sync_v16_terminal_signals_dispatches_active_trades(self, mock_enqueue):
+        """Verifies that sync_v16_terminal_signals successfully reconciles active V16 terminal trades."""
+        mock_imm = {
+            "TEST_V16_SYNC_01": {
+                "signal_id": "TEST_V16_SYNC_01",
+                "symbol": "SOL/USDT",
+                "horizon": "1H",
+                "direction": "LONG",
+                "entry_price_initial": 145.0,
+                "tp1_initial": 155.0,
+                "tp2_initial": 160.0,
+                "tp3_initial": 170.0,
+                "sl_initial": 140.0,
+                "grade": "Grade A+",
+                "expected_net_return": 2.50,
+                "status": "ACTIVE"
+            }
+        }
+        mock_dyn = {
+            "TEST_V16_SYNC_01": {
+                "status": "ACTIVE",
+                "outcome_label": "RUNNING 🚀",
+                "current_price": 148.0
+            }
+        }
+        with patch("app.routers.v16_router._get_v16_store", return_value=(mock_imm, mock_dyn)):
+            dispatched = whatsapp_service.sync_v16_terminal_signals()
+            self.assertEqual(dispatched, 1)
+            mock_enqueue.assert_called()
+            # Verify deduplication
+            dispatched_again = whatsapp_service.sync_v16_terminal_signals()
+            self.assertEqual(dispatched_again, 0)
+
+    @patch.object(whatsapp_service, "emit_signal_created")
+    def test_09_paper_trading_bot_entry_dispatches_whatsapp_created(self, mock_created):
+        """Verifies that PaperTradingBot.admit_signal invokes emit_signal_created upon execution."""
+        import tempfile
+        import os
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            tmp_path = tf.name
+        try:
+            bot = PaperTradingBot(ledger_file=tmp_path)
+            sample_entry = {
+                "symbol": "AVAX/USDT",
+                "dominant_timeframe": "1H",
+                "dominant_direction": "LONG",
+                "direction": "LONG",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "entry_price": 30.0,
+                "current_price": 30.0,
+                "tp1_price": 32.0,
+                "tp2_price": 34.0,
+                "tp3_price": 36.0,
+                "sl_price": 29.0,
+                "quality_grade": "Grade A+",
+                "conviction": 90.0,
+                "expected_return_pct": 1.50,
+                "ev_net": 1.50,
+                "risk_reward_ratio": "1:2.0"
+            }
+            admitted = bot.admit_signal(sample_entry)
+            self.assertTrue(admitted)
+            mock_created.assert_called()
+            dispatched_sig = mock_created.call_args[0][0]
+            self.assertEqual(dispatched_sig.get("symbol"), "AVAX/USDT")
+            self.assertTrue(dispatched_sig.get("is_trade_active"))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 
 if __name__ == "__main__":
     unittest.main()
