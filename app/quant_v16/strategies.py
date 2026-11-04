@@ -50,6 +50,9 @@ class StrategyArchetype(str, Enum):
     SQUEEZE_EXPANSION_SHORT = "SQUEEZE_EXPANSION_SHORT"
     RECTANGLE_STRATEGY_LONG = "RECTANGLE_STRATEGY_LONG"
     RECTANGLE_STRATEGY_SHORT = "RECTANGLE_STRATEGY_SHORT"
+    MULTI_HORIZON_TREND = "MULTI_HORIZON_TREND"
+    MOMENTUM_TREND_EXPANSION = "MOMENTUM_TREND_EXPANSION"
+    COILING_VOLATILITY_BREAKOUT = "COILING_VOLATILITY_BREAKOUT"
 
 class StrategyStatus(str, Enum):
     ACTIVE = "ACTIVE"
@@ -452,6 +455,24 @@ class StrategyRegistry:
                 rolling_50_pf=1.35, expectancy_net_pct=0.68,
                 regime_status={"BULL_TREND": StrategyStatus.PAUSED}
             ),
+            StrategyArchetype.MULTI_HORIZON_TREND.value: StrategyPerformance(
+                strategy_id=StrategyArchetype.MULTI_HORIZON_TREND.value,
+                sample_count=69, resolved_count=69, win_rate=0.0588, profit_factor=0.20,
+                rolling_50_pf=0.45, expectancy_net_pct=-0.99,
+                regime_status={"RANGE": StrategyStatus.PAUSED, "CONSOLIDATION": StrategyStatus.PAUSED, "CHOP": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
+            ),
+            StrategyArchetype.MOMENTUM_TREND_EXPANSION.value: StrategyPerformance(
+                strategy_id=StrategyArchetype.MOMENTUM_TREND_EXPANSION.value,
+                sample_count=38, resolved_count=38, win_rate=0.0, profit_factor=0.10,
+                rolling_50_pf=0.40, expectancy_net_pct=-0.77,
+                regime_status={"RANGE": StrategyStatus.PAUSED, "CONSOLIDATION": StrategyStatus.PAUSED, "CHOP": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
+            ),
+            StrategyArchetype.COILING_VOLATILITY_BREAKOUT.value: StrategyPerformance(
+                strategy_id=StrategyArchetype.COILING_VOLATILITY_BREAKOUT.value,
+                sample_count=29, resolved_count=29, win_rate=0.0, profit_factor=0.10,
+                rolling_50_pf=0.40, expectancy_net_pct=-0.52,
+                regime_status={"RANGE": StrategyStatus.PAUSED, "CONSOLIDATION": StrategyStatus.PAUSED, "CHOP": StrategyStatus.PAUSED}
+            ),
         }
 
         # Initialize all archetypes cleanly
@@ -479,9 +500,15 @@ class StrategyRegistry:
             norm_id = strategy_id.upper().strip()
             perf = self.strategies.get(norm_id)
 
+        strat_upper = str(strategy_id or "").upper().strip()
+
+        # Phase 2: Section 32 Strict Fail-Closed Veto for Trend-Following & Breakout Strategies in Range / Chop
+        if norm_regime in ["RANGE", "CONSOLIDATION", "CHOP"]:
+            if any(k in strat_upper for k in ["TREND", "MOMENTUM", "BREAKOUT", "EXPANSION", "COILING", "MULTI_HORIZON"]):
+                return False, f"Section 32: Trend continuation strategy {strategy_id} strictly PAUSED in {norm_regime} regime"
+
         if not perf:
             # Dynamic Safeguard: Unregistered continuation shorts must NOT bypass regime kill switches
-            strat_upper = str(strategy_id or "").upper().strip()
             if "SHORT" in strat_upper and norm_regime in ["RANGE", "BEAR_TREND"]:
                 if any(k in strat_upper for k in ["BREAKOUT", "BREAKDOWN", "MOMENTUM", "TREND", "COILING", "EXPANSION"]):
                     return False, f"Strategy {strategy_id} is PAUSED specifically in {norm_regime} regime (Unregistered Continuation Short)"

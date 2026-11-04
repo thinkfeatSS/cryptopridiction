@@ -455,10 +455,12 @@ class SignalGenerationSystem:
                 tp2_mult = 3.50
                 tp3_mult = 5.50
 
-            cand_tp1 = format_dynamic_precision(exec_entry_price + (active_atr * tp1_mult))
-            cand_tp2 = format_dynamic_precision(exec_entry_price + (active_atr * tp2_mult))
-            cand_tp3 = format_dynamic_precision(exec_entry_price + (active_atr * tp3_mult))
-            cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 1.2)))
+            # Phase 2: Dynamic 15M Noise Floor Hardening (Prevent premature microstructure wick-outs)
+            min_sl_dist = max(exec_entry_price * 0.010, active_atr * 1.25) if horizon_label == "15M" else (active_atr * 1.20)
+            cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - min_sl_dist))
+            cand_tp1 = format_dynamic_precision(exec_entry_price + max(active_atr * tp1_mult, 1.30 * min_sl_dist if horizon_label == "15M" else 0.0))
+            cand_tp2 = format_dynamic_precision(exec_entry_price + max(active_atr * tp2_mult, 2.20 * min_sl_dist if horizon_label == "15M" else 0.0))
+            cand_tp3 = format_dynamic_precision(exec_entry_price + max(active_atr * tp3_mult, 3.40 * min_sl_dist if horizon_label == "15M" else 0.0))
             actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
         else: # SHORT
@@ -491,10 +493,12 @@ class SignalGenerationSystem:
                 tp2_mult = 3.50
                 tp3_mult = 5.50
 
-            cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * tp1_mult)))
-            cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * tp2_mult)))
-            cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * tp3_mult)))
-            cand_sl = format_dynamic_precision(exec_entry_price + (active_atr * 1.2))
+            # Phase 2: Dynamic 15M Noise Floor Hardening for SHORT
+            min_sl_dist = max(exec_entry_price * 0.010, active_atr * 1.25) if horizon_label == "15M" else (active_atr * 1.20)
+            cand_sl = format_dynamic_precision(exec_entry_price + min_sl_dist)
+            cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - max(active_atr * tp1_mult, 1.30 * min_sl_dist if horizon_label == "15M" else 0.0)))
+            cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - max(active_atr * tp2_mult, 2.20 * min_sl_dist if horizon_label == "15M" else 0.0)))
+            cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - max(active_atr * tp3_mult, 3.40 * min_sl_dist if horizon_label == "15M" else 0.0)))
             actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
 
@@ -883,6 +887,10 @@ class SignalGenerationSystem:
                         grade = f"⚡ Grade A+ ({canonical_strategy} @ {rank_lbl})"
                     conviction = max(84.0, float(order_block_setup.get("conviction", 88.0)) - 2.0)
                 arch_strategy = canonical_strategy
+            elif "LIQUIDITY_RECLAIM" in str(canonical_strategy).upper():
+                conviction = 92.0
+                grade = f"💎 Grade A+ (LIQUIDITY_RECLAIM: Confirmed Institutional Reversal in {direction} Direction)"
+                arch_strategy = canonical_strategy
             elif arch_strategy == "DIRECTIONAL_BREAKOUT_EXPANSION":
                 conviction = 92.0
                 grade = f"🚀 Grade A+ (DIRECTIONAL BREAKOUT EXPANSION: Macro Range Breakout in {direction} Direction)"
@@ -964,7 +972,9 @@ class SignalGenerationSystem:
 
         base_fund_sizing = float((fund_matrix.get("sizing_multiplier") if fund_matrix else 1.0) or 1.0)
         shield_sizing = float(btc_shield_state.get("sizing_multiplier", 1.0) or 1.0)
-        effective_sizing = round(float(np.clip(base_fund_sizing * shield_sizing * beta_sizing_mult, 0.20, 1.30)), 2)
+        # Phase 1: Boost sizing multiplier for confirmed LIQUIDITY_RECLAIM setups (+25% institutional edge)
+        strategy_sizing_boost = 1.25 if "LIQUIDITY_RECLAIM" in str(canonical_strategy).upper() else 1.0
+        effective_sizing = round(float(np.clip(base_fund_sizing * shield_sizing * beta_sizing_mult * strategy_sizing_boost, 0.20, 1.30)), 2)
         if volume_24h_usd and 0 < volume_24h_usd < 10_000_000.0:
             low_cap_sizing_ceiling = max(0.20, min(1.0, volume_24h_usd / 10_000_000.0))
             effective_sizing = round(min(effective_sizing, low_cap_sizing_ceiling), 2)

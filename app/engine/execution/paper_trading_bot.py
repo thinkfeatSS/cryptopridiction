@@ -18,9 +18,9 @@ class PaperTradingBot:
     - Runs a fast 1-2s tick watcher to monitor open positions.
     - Evaluates intra-candle fills, Tier-0 Breakeven ratchets, and TP partial scaling.
     - Multi-Desk Capital Allocation:
-      1. ⚡ Scalp Desk (35% allocation, 2 max slots, 5x leverage)
-      2. ⏳ Day Trading Desk (40% allocation, 2 max slots, 3x leverage)
-      3. 🌊 Swing Desk (25% allocation, 1 max slot, 2x leverage)
+      1. ⚡ Scalp Desk (20% allocation, 2 max slots, 2x leverage)
+      2. ⏳ Day Trading Desk (35% allocation, 2 max slots, 3x leverage)
+      3. 🌊 Swing Desk (45% allocation, 2 max slots, 2x leverage)
     - Realistic Binance Futures fee ($0.0405% taker with BNB discount) and funding rates.
     """
 
@@ -60,13 +60,30 @@ class PaperTradingBot:
                         else:
                             purged_symbols.append(sym)
 
+                    # Resynchronize desk targets to Phase 1 Capital Optimization:
+                    # Swing Desk (24H): $450 (45%), 2 slots, 2x leverage (proven 75% WR edge)
+                    # Day Desk (1H): $350 (35%), 2 slots, 3x leverage
+                    # Scalp Desk (15M): $200 (20%), 2 slots, 2x leverage (throttled from 5x to suppress noise)
+                    desks = loaded.get("desks", {})
+                    if "swing" in desks:
+                        desks["swing"]["allocated_usd"] = 450.0
+                        desks["swing"]["max_slots"] = 2
+                        desks["swing"]["leverage"] = 2
+                    if "day" in desks:
+                        desks["day"]["allocated_usd"] = 350.0
+                        desks["day"]["max_slots"] = 2
+                        desks["day"]["leverage"] = 3
+                    if "scalp" in desks:
+                        desks["scalp"]["allocated_usd"] = 200.0
+                        desks["scalp"]["max_slots"] = 2
+                        desks["scalp"]["leverage"] = 2
+                    for d_key, d_val in desks.items():
+                        d_val["active_slots"] = sum(1 for p in valid_positions if p.get("desk") == d_key)
+                    loaded["desks"] = desks
+
                     if purged_symbols:
                         print(f"[PAPER BOT 🧹 PURGE] Evicted delisted/ghost positions from ledger: {purged_symbols}")
                         loaded["open_positions"] = valid_positions
-                        # Resynchronize desk active slots
-                        desks = loaded.get("desks", {})
-                        for d_key, d_val in desks.items():
-                            d_val["active_slots"] = sum(1 for p in valid_positions if p.get("desk") == d_key)
 
                     # Ensure both closed_trades and closed_trades_history exist and are synchronized
                     c_trades = loaded.get("closed_trades") or []
@@ -155,9 +172,9 @@ class PaperTradingBot:
             "winning_trades_count": 0,
             "losing_trades_count": 0,
             "desks": {
-                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": 350.0, "max_slots": 2, "active_slots": 0, "leverage": 5},
-                "day": {"name": "⏳ Day Trading Desk", "allocated_usd": 400.0, "max_slots": 2, "active_slots": 0, "leverage": 3},
-                "swing": {"name": "🌊 Swing Desk", "allocated_usd": 250.0, "max_slots": 1, "active_slots": 0, "leverage": 2}
+                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": 200.0, "max_slots": 2, "active_slots": 0, "leverage": 2},
+                "day": {"name": "⏳ Day Trading Desk", "allocated_usd": 350.0, "max_slots": 2, "active_slots": 0, "leverage": 3},
+                "swing": {"name": "🌊 Swing Desk", "allocated_usd": 450.0, "max_slots": 2, "active_slots": 0, "leverage": 2}
             },
             "open_positions": [],
             "shadow_positions": [],
@@ -365,6 +382,10 @@ class PaperTradingBot:
             # 6. Capital Allocation & Sizing (Scaled by Institutional Archetype & Fundamental Sizing Multiplier)
             alloc_mult = float(signal.get("allocation_pct", 100.0)) / 100.0
             sizing_mult = float(signal.get("sizing_multiplier") or (signal.get("fundamental_matrix") or {}).get("sizing_multiplier") or 1.0)
+            # Boost sizing multiplier for confirmed LIQUIDITY_RECLAIM setups (+25% institutional edge)
+            strat_str = str(signal.get("canonical_strategy") or signal.get("strategy") or signal.get("strategy_archetype") or "").upper()
+            if "LIQUIDITY_RECLAIM" in strat_str:
+                sizing_mult = max(sizing_mult, 1.25)
             alloc_mult = max(0.20, min(1.30, alloc_mult * sizing_mult))
             alloc_usd = float(desk.get("allocated_usd", 350.0))
             allocated_margin = round((alloc_usd / max(1, max_slots)) * alloc_mult, 2)
