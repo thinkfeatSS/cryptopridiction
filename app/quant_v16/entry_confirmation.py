@@ -139,6 +139,8 @@ class EntryConfirmationEngine:
         is_volume_absorption = False
         spread_val = float(spread_bps if spread_bps is not None else 5.0)
         is_spread_acceptable = spread_val <= 35.0  # Max allowable spread hurdle: 0.35% (35 bps)
+        c_vol = float(trigger_candle.get("volume", 0.0) or 0.0)
+        robust_base_vol = 0.0
 
         if "volume" in df.columns:
             try:
@@ -148,7 +150,7 @@ class EntryConfirmationEngine:
                     avg_vol = float(vol_window.mean())
                     median_vol = float(vol_window.median())
                     robust_base_vol = max(avg_vol, median_vol)
-                    c_vol = float(trigger_candle.get("volume", 0.0))
+                    c_vol = float(trigger_candle.get("volume", 0.0) or 0.0)
                     if robust_base_vol > 0:
                         volume_surge_ratio = round(c_vol / robust_base_vol, 2)
                         # Disqualify absorption if spread exceeds hurdle (thin-book erratic spikes)
