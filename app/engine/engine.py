@@ -4,7 +4,7 @@ import time
 import math
 import numpy as np
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 from app.engine.config import EXPORT_DIR
