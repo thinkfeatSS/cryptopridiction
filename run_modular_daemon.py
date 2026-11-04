@@ -131,6 +131,8 @@ def main():
 
         except Exception as e:
             print(f"[DAEMON ⚠️] Cycle execution note: {e}")
+            import traceback
+            traceback.print_exc()
 
         # Compute exact next candle boundary sleep (5M candle close + 3s buffer)
         sleep_secs, next_dt = get_seconds_until_next_candle("5m", buffer_seconds=3)
