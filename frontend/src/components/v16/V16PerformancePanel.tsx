@@ -74,12 +74,13 @@ interface ValidationReport {
 
 export default function V16PerformancePanel({ signals }: Props) {
   const [report, setReport] = useState<ValidationReport | null>(null);
+  const [cohort, setCohort] = useState<"current" | "archived">("current");
   const [loading, setLoading] = useState(true);
   const [showCalibrationDrawer, setShowCalibrationDrawer] = useState(false);
 
-  const fetchValidation = () => {
+  const fetchValidation = (c: "current" | "archived" = cohort) => {
     v16Api
-      .getValidation()
+      .getValidation(c)
       .then((res) => {
         if (res.data?.status === "success" && res.data.report) {
           setReport(res.data.report);
@@ -89,12 +90,12 @@ export default function V16PerformancePanel({ signals }: Props) {
       .finally(() => setLoading(false));
   };
 
-  // Re-fetch on mount and periodically sync with live matrix
+  // Re-fetch on mount, on cohort change, and periodically sync
   useEffect(() => {
-    fetchValidation();
-    const interval = setInterval(fetchValidation, 20000); // 20s sync
+    fetchValidation(cohort);
+    const interval = setInterval(() => fetchValidation(cohort), 20000); // 20s sync
     return () => clearInterval(interval);
-  }, [signals.length]);
+  }, [cohort, signals.length]);
 
   const totalTracked = report?.total_signals ?? signals.length;
   const resolved = report?.resolved_signals ?? 0;
@@ -125,7 +126,7 @@ export default function V16PerformancePanel({ signals }: Props) {
       <div className="absolute -top-12 -right-12 w-48 h-48 bg-cyan-500/10 rounded-full blur-2xl pointer-events-none" />
       <div className="absolute -bottom-12 -left-12 w-48 h-48 bg-indigo-500/5 rounded-full blur-2xl pointer-events-none" />
 
-      {/* Header with Experiment ID Badge */}
+      {/* Header with Experiment Selector & Badges */}
       <div className="flex flex-wrap items-center justify-between border-b border-slate-800/80 pb-3 gap-2 relative z-10">
         <div className="flex items-center gap-2.5">
           <div className="p-1.5 rounded-lg bg-cyan-950/60 border border-cyan-500/30 text-cyan-400 shadow-[0_0_12px_rgba(6,182,212,0.2)]">
@@ -140,16 +141,76 @@ export default function V16PerformancePanel({ signals }: Props) {
             </span>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-amber-950/60 border border-amber-500/30 text-amber-300 font-bold">
-            EXP: {report?.experiment_id || "V16.0.0-SHADOW-001"}
+
+        {/* Cohort Tabs & Status Badge */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Cohort Switcher */}
+          <div className="flex items-center bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px] font-mono">
+            <button
+              onClick={() => setCohort("current")}
+              className={`px-2.5 py-1 rounded-md font-bold transition-all ${
+                cohort === "current"
+                  ? "bg-cyan-600 text-white shadow-sm"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Active Cohort (SHADOW-002)
+            </button>
+            <button
+              onClick={() => setCohort("archived")}
+              className={`px-2.5 py-1 rounded-md font-bold transition-all ${
+                cohort === "archived"
+                  ? "bg-amber-600 text-white shadow-sm"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Frozen Baseline (SHADOW-001)
+            </button>
+          </div>
+
+          <span className="text-[10px] font-mono px-2.5 py-1 rounded-md bg-amber-950/60 border border-amber-500/30 text-amber-300 font-bold">
+            EXP: {report?.experiment_id || (cohort === "current" ? "V16.1.0-SHADOW-002" : "V16.0.0-SHADOW-001")}
           </span>
-          <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/30 text-emerald-300 font-bold">
-            <Lock className="w-2.5 h-2.5" />
-            FROZEN 🔒
-          </span>
+          {cohort === "current" ? (
+            <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2.5 py-1 rounded-md bg-emerald-950/60 border border-emerald-500/30 text-emerald-300 font-bold">
+              <Activity className="w-2.5 h-2.5 animate-pulse" />
+              LIVE SHADOW 🟢
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2.5 py-1 rounded-md bg-indigo-950/60 border border-indigo-500/30 text-indigo-300 font-bold">
+              <Lock className="w-2.5 h-2.5" />
+              FROZEN BASELINE 🔒
+            </span>
+          )}
         </div>
       </div>
+
+      {/* Active Upgrades Banner for SHADOW-002 */}
+      {cohort === "current" && (
+        <div className="flex flex-wrap items-center gap-1.5 py-1 px-2.5 rounded-lg bg-cyan-950/20 border border-cyan-800/30 text-[9px] font-mono text-cyan-300 relative z-10">
+          <span className="font-bold text-white flex items-center gap-1">
+            <ShieldCheck className="w-3 h-3 text-cyan-400" /> V16.1 ACTIVE GUARDS:
+          </span>
+          <span className="px-1.5 py-0.5 rounded bg-cyan-900/40 border border-cyan-500/30">
+            🛡️ 15M Dynamic Noise Floor (≥1.0%)
+          </span>
+          <span className="px-1.5 py-0.5 rounded bg-indigo-900/40 border border-indigo-500/30">
+            ⏱️ 2H Symbol Dedup
+          </span>
+          <span className="px-1.5 py-0.5 rounded bg-amber-900/40 border border-amber-500/30">
+            ☣️ 24H Toxic Quarantine
+          </span>
+          <span className="px-1.5 py-0.5 rounded bg-rose-900/40 border border-rose-500/30">
+            🛑 Section 32 Regime Veto
+          </span>
+          <span className="px-1.5 py-0.5 rounded bg-emerald-900/40 border border-emerald-500/30">
+            📐 Anees Mehdi 1M Hook
+          </span>
+          <span className="px-1.5 py-0.5 rounded bg-purple-900/40 border border-purple-500/30">
+            💎 Scaled Liquidity Reclaim (92%)
+          </span>
+        </div>
+      )}
 
       {/* Primary Comparative Grid: Prediction vs. Reality */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 my-2 font-mono text-xs relative z-10">
@@ -181,7 +242,7 @@ export default function V16PerformancePanel({ signals }: Props) {
             <span className="text-[9px] text-slate-400">Post-Cost</span>
           </div>
           <div className="text-base font-black text-emerald-400 mt-1">
-            +{report?.expected_avg_net_ev !== undefined ? report.expected_avg_net_ev.toFixed(2) : "0.23"}%
+            +{report?.expected_avg_net_ev !== undefined ? report.expected_avg_net_ev.toFixed(2) : "0.00"}%
           </div>
           <div className="text-[10px] mt-2">
             Realized:{" "}
@@ -195,7 +256,7 @@ export default function V16PerformancePanel({ signals }: Props) {
                 {report.realized_avg_net_return.toFixed(2)}% (OOS)
               </strong>
             ) : (
-              <strong className="text-slate-400">+0.45% (Phase 1)</strong>
+              <strong className="text-slate-400">Awaiting Outcomes</strong>
             )}
           </div>
           <div className="text-[9px] text-slate-400 mt-0.5">
@@ -203,7 +264,7 @@ export default function V16PerformancePanel({ signals }: Props) {
             <strong className="text-cyan-300">
               {report?.realized_profit_factor !== null && report?.realized_profit_factor !== undefined
                 ? report.realized_profit_factor.toFixed(2)
-                : "1.84"}
+                : "Pending"}
             </strong>
           </div>
         </div>
@@ -215,14 +276,14 @@ export default function V16PerformancePanel({ signals }: Props) {
             <span className="text-[9px] text-slate-400">Platt</span>
           </div>
           <div className="text-base font-black text-indigo-300 mt-1">
-            {formatProbability(report?.expected_avg_p_tp1 ?? 74.3)} exp.
+            {formatProbability(report?.expected_avg_p_tp1 ?? 0.0)} exp.
           </div>
           <div className="text-[10px] text-slate-400 mt-2">
             Actual TP1 Rate:{" "}
             <strong className="text-amber-300">
               {report?.realized_tp1_rate !== null && report?.realized_tp1_rate !== undefined
                 ? `${report.realized_tp1_rate.toFixed(1)}% (Empirical)`
-                : "61.8% (Phase 1)"}
+                : "Pending"}
             </strong>
           </div>
           <div className="text-[9px] text-slate-400 mt-0.5">
@@ -230,7 +291,7 @@ export default function V16PerformancePanel({ signals }: Props) {
             <strong className="text-emerald-300">
               {report?.realized_win_rate !== null && report?.realized_win_rate !== undefined
                 ? `${report.realized_win_rate.toFixed(1)}%`
-                : "68.5%"}
+                : "Pending"}
             </strong>
           </div>
         </div>
@@ -244,7 +305,7 @@ export default function V16PerformancePanel({ signals }: Props) {
           <div className="text-base font-black text-cyan-300 mt-1">
             {report?.brier_score !== null && report?.brier_score !== undefined
               ? report.brier_score.toFixed(3)
-              : "0.220"}{" "}
+              : "Pending"}{" "}
             <span className="text-[10px] text-slate-400 font-normal">(Brier)</span>
           </div>
           <div className="text-[10px] text-slate-400 mt-2">
@@ -256,7 +317,7 @@ export default function V16PerformancePanel({ signals }: Props) {
                   ? report.expected_calibration_error <= 0.12
                     ? "text-emerald-400"
                     : "text-amber-300"
-                  : "text-emerald-400"
+                  : "text-slate-400"
               }
             >
               {report?.expected_calibration_error !== null &&
@@ -264,7 +325,7 @@ export default function V16PerformancePanel({ signals }: Props) {
                 ? `${report.expected_calibration_error.toFixed(3)} ${
                     report.expected_calibration_error <= 0.12 ? "(Pass ≤ 0.12)" : "(Monitoring)"
                   }`
-                : "0.084 (Pass ≤ 0.12)"}
+                : "Pending (≤ 0.12)"}
             </strong>
           </div>
           <div className="text-[9px] text-slate-400 mt-0.5">
@@ -272,7 +333,7 @@ export default function V16PerformancePanel({ signals }: Props) {
             <strong className="text-teal-300">
               {report?.realized_max_drawdown_pct !== null && report?.realized_max_drawdown_pct !== undefined
                 ? `${report.realized_max_drawdown_pct.toFixed(1)}% (≤ 6.0%)`
-                : "5.0% (Pass)"}
+                : "0.0% (≤ 6.0%)"}
             </strong>
           </div>
         </div>
@@ -415,11 +476,11 @@ export default function V16PerformancePanel({ signals }: Props) {
         <span>
           Commit:{" "}
           <strong className="text-slate-300">
-            {report?.manifest?.git_commit?.slice(0, 8) || "698e6a73"}
+            {report?.manifest?.git_commit?.slice(0, 8) || (cohort === "current" ? "6b27043" : "698e6a73")}
           </strong>{" "}
           | Freeze:{" "}
           <strong className="text-slate-300">
-            {report?.manifest?.frozen_at_utc || "2026-10-08 05:40:00 UTC"}
+            {report?.manifest?.frozen_at_utc || (cohort === "current" ? "2026-11-04 03:30:00 UTC" : "2026-10-08 05:40:00 UTC")}
           </strong>
         </span>
         <span

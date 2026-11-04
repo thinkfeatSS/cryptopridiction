@@ -19,11 +19,41 @@ from datetime import datetime, timezone
 # ------------------------------------------------------------------------------
 # 1. EXPERIMENT SPECIFICATION & VERSION FREEZE
 # ------------------------------------------------------------------------------
-EXPERIMENT_ID = "V16.0.0-SHADOW-001"
+EXPERIMENT_ID = "V16.1.0-SHADOW-002"
+ARCHIVED_EXPERIMENT_ID = "V16.0.0-SHADOW-001"
+SHADOW_002_FREEZE_UTC = "2026-11-04 03:30:00 UTC"
+SHADOW_002_FREEZE_TS = 1793763000.0
 
 EXPERIMENT_MANIFEST = {
     "experiment_id": EXPERIMENT_ID,
     "status": "ACTIVE_SHADOW_VALIDATION",
+    "git_commit": "6b27043",
+    "backend_version": "16.1.0",
+    "scanner_version": "16.1.0",
+    "feature_version": "16.1.0",
+    "strategy_version": "16.1.0-RegimeFiltered",
+    "probability_version": "16.1.0-HardenedNoiseFloor",
+    "calibration_version": "16.1.0",
+    "cost_model_version": "16.1.0-FrictionBlended",
+    "risk_model_version": "16.1.0-2hDedup-ToxicQuarantine",
+    "grading_version": "16.1.0-LiquidityReclaimScaled",
+    "database_schema_version": "16.1.0-MySQL-EventStore",
+    "frozen_at_utc": SHADOW_002_FREEZE_UTC,
+    "previous_experiment_id": ARCHIVED_EXPERIMENT_ID,
+    "previous_experiment_archive": "export_app_data/archive_v16_shadow_001_report.json",
+    "active_upgrades": [
+        "15M Dynamic Noise Floor (min_sl_dist >= 1.0% or 1.25x ATR)",
+        "Strict 2-Hour Symbol Deduplication Registry",
+        "Dynamic 24-Hour Toxic Coin Quarantine",
+        "Section 32 Regime Veto on Trend Strategies in Range/Chop",
+        "Anees Mehdi 1M Strategy Integration (M15+M1)",
+        "Scaled Liquidity Reclaim Conviction (92%) & 1.25x Sizing"
+    ]
+}
+
+ARCHIVED_MANIFEST = {
+    "experiment_id": ARCHIVED_EXPERIMENT_ID,
+    "status": "FROZEN_ARCHIVED",
     "git_commit": "698e6a7330ae4356e96dc5f1623278deec6de283",
     "backend_version": "16.0.0",
     "scanner_version": "16.0.0",
@@ -35,7 +65,11 @@ EXPERIMENT_MANIFEST = {
     "risk_model_version": "16.0.0-ThesisCapped",
     "grading_version": "16.0.0-MultiFactorAuthoritative",
     "database_schema_version": "16.0.0-MySQL-EventStore",
-    "frozen_at_utc": "2026-10-08 05:40:00 UTC"
+    "frozen_at_utc": "2026-10-08 05:40:00 UTC",
+    "archived_at_utc": SHADOW_002_FREEZE_UTC,
+    "total_signals": 1353,
+    "resolved_signals": 1273,
+    "conclusion": "VALIDATION FAILED — INVESTIGATION REQUIRED"
 }
 
 # Predefined probability bins for Expected Calibration Error (ECE)
@@ -316,11 +350,55 @@ class V16ShadowValidationEngine:
 
     def evaluate_shadow_dataset(
         self,
-        signals_data: List[Dict[str, Any]]
+        signals_data: List[Dict[str, Any]],
+        cohort: str = "current"
     ) -> ValidationMetricsReport:
         """
         Comprehensive evaluation of all admitted signals and their dynamic/resolved states.
+        Supports cohort filtering:
+        - "current" / EXPERIMENT_ID: Signals generated on or after SHADOW_002_FREEZE_UTC
+        - "archived" / ARCHIVED_EXPERIMENT_ID: Signals generated prior to SHADOW_002_FREEZE_UTC
+        - "all": All historical and current signals
         """
+        target_exp_id = EXPERIMENT_ID if cohort in ["current", EXPERIMENT_ID] else (
+            ARCHIVED_EXPERIMENT_ID if cohort in ["archived", ARCHIVED_EXPERIMENT_ID] else "V16-CUMULATIVE"
+        )
+        target_manifest = EXPERIMENT_MANIFEST if target_exp_id == EXPERIMENT_ID else ARCHIVED_MANIFEST
+
+        filtered_signals = []
+        for item in signals_data:
+            immut = item.get("immutable", {})
+            sig_exp = immut.get("experiment_id")
+            sig_gen_at = str(immut.get("signal_generated_at", "") or "")
+
+            is_new = False
+            if sig_exp == EXPERIMENT_ID:
+                is_new = True
+            elif sig_exp == ARCHIVED_EXPERIMENT_ID:
+                is_new = False
+            else:
+                if sig_gen_at and sig_gen_at >= "2026-11-04 03:30:00":
+                    is_new = True
+                else:
+                    sig_id = str(immut.get("signal_id", ""))
+                    parts = sig_id.split("_")
+                    if parts and parts[-1].isdigit() and len(parts[-1]) >= 10:
+                        try:
+                            if float(parts[-1]) >= SHADOW_002_FREEZE_TS:
+                                is_new = True
+                        except Exception:
+                            pass
+
+            if cohort in ["current", EXPERIMENT_ID]:
+                if is_new:
+                    filtered_signals.append(item)
+            elif cohort in ["archived", ARCHIVED_EXPERIMENT_ID]:
+                if not is_new:
+                    filtered_signals.append(item)
+            else:
+                filtered_signals.append(item)
+
+        signals_data = filtered_signals
         total = len(signals_data)
         active = 0
         resolved = 0
@@ -531,8 +609,8 @@ class V16ShadowValidationEngine:
             conclusion = "VALIDATION PASSED — LIMITED LIVE ELIGIBLE" if all_pass else "VALIDATION FAILED — INVESTIGATION REQUIRED"
 
         return ValidationMetricsReport(
-            experiment_id=EXPERIMENT_ID,
-            manifest=EXPERIMENT_MANIFEST,
+            experiment_id=target_exp_id,
+            manifest=target_manifest,
             total_signals=total,
             active_signals=active,
             resolved_signals=resolved,

@@ -969,23 +969,48 @@ def get_v16_status() -> Dict[str, Any]:
     }
 
 @v16_router.get("/manifest")
-def get_v16_manifest() -> Dict[str, Any]:
-    """Returns the frozen V16.0.0-SHADOW-001 experiment manifest and component versions."""
-    from app.quant_v16.validation_engine import EXPERIMENT_MANIFEST
+def get_v16_manifest(cohort: str = Query("current")) -> Dict[str, Any]:
+    """Returns the V16 experiment manifest (current or archived) and component versions."""
+    from app.quant_v16.validation_engine import EXPERIMENT_MANIFEST, ARCHIVED_MANIFEST
+    if cohort in ["archived", "V16.0.0-SHADOW-001"]:
+        return {
+            "status": "success",
+            "cohort": cohort,
+            "manifest": ARCHIVED_MANIFEST
+        }
     return {
         "status": "success",
+        "cohort": cohort,
         "manifest": EXPERIMENT_MANIFEST
     }
 
 @v16_router.get("/validation")
-def get_v16_validation_report() -> Dict[str, Any]:
+def get_v16_validation_report(cohort: str = Query("current", description="Cohort: 'current' (V16.1.0-SHADOW-002), 'archived' (V16.0.0-SHADOW-001), or 'all'")) -> Dict[str, Any]:
     """
     Returns empirical validation metrics:
     Brier Score, Expected Calibration Error (ECE), Expectancy Calibration,
     Grade Breakdown, Strategy Edge, and Promotion Gate evaluations.
     """
     from dataclasses import asdict
-    from app.quant_v16.validation_engine import V16ShadowValidationEngine
+    from app.quant_v16.validation_engine import V16ShadowValidationEngine, EXPERIMENT_ID, ARCHIVED_EXPERIMENT_ID
+
+    # Fast-path for archived historical experiment if pre-calculated frozen file exists
+    if cohort in ["archived", ARCHIVED_EXPERIMENT_ID]:
+        candidate_paths = [
+            os.path.join(settings.EXPORT_DIR, "archive_v16_shadow_001_report.json"),
+            os.path.join(".", "export_app_data", "archive_v16_shadow_001_report.json"),
+            os.path.join("/app/export_app_data", "archive_v16_shadow_001_report.json"),
+            os.path.join("/root/crypto/export_app_data", "archive_v16_shadow_001_report.json"),
+        ]
+        for p in candidate_paths:
+            if os.path.exists(p) and os.path.getsize(p) > 50:
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if "report" in data:
+                            return data
+                except Exception:
+                    pass
 
     immut_data, dyn_data = _get_v16_store()
 
@@ -998,9 +1023,10 @@ def get_v16_validation_report() -> Dict[str, Any]:
         })
 
     engine = V16ShadowValidationEngine()
-    report = engine.evaluate_shadow_dataset(signals_list)
+    report = engine.evaluate_shadow_dataset(signals_list, cohort=cohort)
     return {
         "status": "success",
+        "cohort": cohort,
         "report": asdict(report)
     }
 

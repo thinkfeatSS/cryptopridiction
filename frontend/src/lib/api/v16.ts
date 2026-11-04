@@ -117,7 +117,7 @@ export const v16Api = {
     return fetchWithHealth<any>(`/api/v16/status`);
   },
 
-  getValidation: async () => {
-    return fetchWithHealth<any>(`/api/v16/validation`);
+  getValidation: async (cohort = "current") => {
+    return fetchWithHealth<any>(`/api/v16/validation?cohort=${cohort}`);
   },
 };
