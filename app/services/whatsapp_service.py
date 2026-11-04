@@ -586,6 +586,31 @@ class WhatsAppService:
         )
         return msg
 
+    def format_breakeven_locked(self, sig: Dict[str, Any], current_price: float, gain_pct: float) -> str:
+        sym = sig.get("symbol", "BTC/USDT")
+        horizon = self._format_horizon_display(sig)
+        grade = sig.get("quality_grade") or sig.get("grade") or "Grade A"
+        prob = sig.get("meta_win_prob_pct")
+        prob_str = f"🧠 P(TP1): *{float(prob):.1f}%* | " if prob is not None else ""
+        decision = sig.get("decision") or sig.get("strategy_archetype") or ""
+        setup_line = f"🎯 Setup: *{decision}*\n" if decision else ""
+        entry_p = self._format_price(sig.get("entry_price") or current_price)
+        curr_p = self._format_price(current_price)
+        msg = (
+            f"🛡️ *RISK-FREE PROFIT LOCK / BREAK-EVEN MOVED* 🛡️\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Coin: *{sym}* ({horizon})\n"
+            f"{setup_line}"
+            f"💎 Grade: *{grade}*\n"
+            f"{prob_str}Current Price: *{curr_p}* ({gain_pct:+.2f}%)\n"
+            f"Stop Loss Adjusted to Entry: *{entry_p}*\n"
+            f"Risk Exposure: *0.00% (Guaranteed Risk-Free Trade)*\n"
+            f"Capital protected. Position is running towards profit targets with zero downside.\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 https://bullsandbears.binaryunit.tech"
+        )
+        return msg
+
     def format_expired(self, sig: Dict[str, Any], exit_price: float, ret_pct: float, label: str) -> str:
         sym = sig.get("symbol", "BTC/USDT")
         horizon = self._format_horizon_display(sig)
@@ -914,24 +939,11 @@ class WhatsAppService:
 
     def emit_signal_outcome(self, sig: Dict[str, Any], event_type: str, current_price: float, gain_pct: float):
         """
-        Called on heartbeat evaluation when a TP or SL is touched.
-        event_type in: TP1_HIT, TP2_HIT, TP3_HIT, SL_HIT, BE_HIT, TRAIL_SL_HIT, EXPIRED
+        Called on heartbeat evaluation when a TP, SL, or Breakeven is touched.
+        event_type in: TP1_HIT, TP2_HIT, TP3_HIT, SL_HIT, BE_LOCKED, BE_HIT, BREAKEVEN_GUARD, TRAIL_SL_HIT, EXPIRED
         """
-        # STRICT CONSTRAINT: NEVER send message for Tier-0 breakeven events
-        status_upper = str(sig.get("status", "")).upper()
-        outcome_upper = str(sig.get("outcome_label", "")).upper()
-        event_upper = str(event_type or "").upper()
-        is_tier0_event = (
-            event_upper in ["TIER0_BE_HIT", "TIER0_PROTECTED_BREAKEVEN", "BE_TIER0"]
-            or "TIER0" in event_upper or "TIER-0" in event_upper
-            or (status_upper in ["WON_TIER0_BE", "TIER0_PROTECTED_BREAKEVEN", "BREAKEVEN_GUARD"] and not any(tp in event_upper for tp in ["TP1", "TP2", "TP3"]))
-        )
-        if is_tier0_event and not any(tp in event_upper for tp in ["TP1", "TP2", "TP3"]):
-            logger.info(f"[WHATSAPP 🛡️] Tier-0 Breakeven outcome suppressed per user preference for {sig.get('symbol')}")
-            return
-
         horizon_desc = sig.get("horizon_name") or sig.get("horizon_tag") or sig.get("horizon_key") or sig.get("horizon") or "1H"
-        sig_id = sig.get("signal_id") or f"{sig.get('symbol')}_{horizon_desc}"
+        sig_id = sig.get("signal_id") or sig.get("trade_id") or f"{sig.get('symbol')}_{horizon_desc}"
 
         # 1. Quality Gate Check: Suppress outcome updates for Grade C / sub-hurdle setups
         if not self.passes_quality_gate(sig, is_channel=False):
@@ -960,6 +972,13 @@ class WhatsAppService:
             if channel_jid and level in ["TP1", "TP3"]:
                 self._enqueue_message(channel_jid, text, priority=2)
 
+        elif event_type in ["BE_LOCKED", "BE_RATCHET"]:
+            text = self.format_breakeven_locked(sig, current_price, gain_pct)
+            if group_jid:
+                self._enqueue_message(group_jid, text, priority=2)
+            if channel_jid:
+                self._enqueue_message(channel_jid, text, priority=2)
+
         elif event_type == "SL_HIT":
             if not self.send_sl_updates:
                 return
@@ -968,7 +987,7 @@ class WhatsAppService:
             if group_jid:
                 self._enqueue_message(group_jid, text, priority=3)
 
-        elif event_type in ["BE_HIT", "TRAIL_SL_HIT"]:
+        elif event_type in ["BE_HIT", "BREAKEVEN_GUARD", "TRAIL_SL_HIT"]:
             label = sig.get("outcome_label", "Break-Even Exit")
             text = self.format_trail_or_be_hit(sig, current_price, gain_pct, label)
             if group_jid:

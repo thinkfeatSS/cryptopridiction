@@ -1118,6 +1118,15 @@ class PaperTradingBot:
                         print(f"[PAPER BOT 🛡️] Tier-0 Breakeven Ratchet Activated for {sym}! Stop-loss locked at Entry.")
                     except Exception:
                         pass
+                    try:
+                        from app.services.whatsapp_service import whatsapp_service
+                        sig_dict = dict(pos)
+                        sig_dict["signal_id"] = pos.get("trade_id") or pos.get("signal_id")
+                        sig_dict["entry_price"] = entry_p
+                        gain_now = ((curr_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - curr_p) / entry_p) * 100.0
+                        whatsapp_service.emit_signal_outcome(sig_dict, "BE_LOCKED", curr_p, gain_now)
+                    except Exception:
+                        pass
 
                 # Multi-Tranche Scale Check 1: TP1 Hit (Realize 70%, lock Profit Buffer, hold 30% for TP2)
                 if policy == "MULTI_TRANCHE_SCALE" and has_multi_tp and is_tp1 and not pos.get("tp1_hit"):
@@ -1613,31 +1622,51 @@ class PaperTradingBot:
             if "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
                 audit_status = "BREAKEVEN_GUARD"
                 outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_pct:+.2f}%)"
+                wa_event = "BE_HIT"
             elif "STOP_LOSS" in exit_reason:
                 audit_status = "LOST_SL"
                 outcome_label = "🔴 LOST (SL HIT)"
+                wa_event = "SL_HIT"
             elif "TAKE_PROFIT_3" in exit_reason or "TP3" in exit_reason:
                 audit_status = "WON_TP3"
                 outcome_label = "🟢 WON (TP3 HIT)"
+                wa_event = "TP3_HIT"
             elif "TAKE_PROFIT_2" in exit_reason or "TP2" in exit_reason:
                 audit_status = "WON_TP2"
                 outcome_label = "🟢 WON (TP2 HIT)"
+                wa_event = "TP2_HIT"
             elif "TAKE_PROFIT_1" in exit_reason or "TP1" in exit_reason or "TAKE_PROFIT" in exit_reason:
                 audit_status = "WON_TP1"
                 outcome_label = "🟢 WON (TP1 HIT)"
+                wa_event = "TP1_HIT"
             elif "HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason:
                 if ret_pct >= 0.10:
                     audit_status = "WON_EXP_PROFIT"
                     outcome_label = f"🟢 WON (EXP PROFIT {ret_pct:+.2f}%)"
+                    wa_event = "EXPIRED"
                 elif ret_pct <= -0.10:
                     audit_status = "LOST_EXP"
                     outcome_label = f"🔴 LOST (EXPIRY {ret_pct:+.2f}%)"
+                    wa_event = "EXPIRED"
                 else:
                     audit_status = "BREAKEVEN_EXP"
                     outcome_label = f"⚪ BREAKEVEN (EXPIRY {ret_pct:+.2f}%)"
+                    wa_event = "BE_HIT"
             else:
                 audit_status = "CLOSED"
                 outcome_label = f"CLOSED ({exit_reason})"
+                wa_event = "CLOSED"
+
+            # Automated WhatsApp Signal Outcome Notification Dispatch
+            try:
+                from app.services.whatsapp_service import whatsapp_service
+                sig_dict = dict(closed_record)
+                sig_dict["signal_id"] = closed_record.get("trade_id") or closed_record.get("signal_id")
+                sig_dict["outcome_label"] = outcome_label
+                sig_dict["status"] = audit_status
+                whatsapp_service.emit_signal_outcome(sig_dict, wa_event, exit_p, ret_pct)
+            except Exception as wa_err:
+                print(f"[WHATSAPP ❌] Error emitting exit outcome {closed_record.get('trade_id')}: {wa_err}", flush=True)
 
             # 1. Update CSV: trader_signals_tracker.csv
             csv_path = os.path.join(EXPORT_DIR, "trader_signals_tracker.csv")

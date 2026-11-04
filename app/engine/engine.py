@@ -36,6 +36,7 @@ class UnifiedCryptoEngine:
         # Macro No Trade Zone (NTZ) State Tracking
         self._macro_ntz_state_file = os.path.join(self.export_dir, "macro_ntz_state.json")
         self._last_macro_ntz = self._load_macro_ntz_state()
+        self._last_market_regime: Optional[str] = None
         print(f"[ENGINE 🛡️] Macro NTZ Initial State: {'ACTIVE 🛑' if self._last_macro_ntz else 'INACTIVE 🟢'}")
 
         # Signal Cooldown Registry (Fix RC-8 & Phase 3): Prevents redundant re-emission of same signal
@@ -279,6 +280,17 @@ class UnifiedCryptoEngine:
             self._update_macro_ntz_state(is_active=True, reason=macro_ntz_reason, btc_shield=btc_shield, is_transition=False)
         else:
             self._update_macro_ntz_state(is_active=False, reason=None, btc_shield=btc_shield, is_transition=False)
+
+        # Detect Market Regime State Transitions (Edge-Triggered) for WhatsApp
+        current_regime = str(btc_shield.get("regime") or btc_shield.get("status_code") or "NORMAL").upper()
+        if self._last_market_regime is not None and current_regime != self._last_market_regime and current_regime not in ["NORMAL", "UNKNOWN"]:
+            print(f"\n🔄 [MARKET REGIME SHIFT] Transitioning from {self._last_market_regime} ➔ {current_regime}", flush=True)
+            try:
+                from app.services.whatsapp_service import whatsapp_service
+                whatsapp_service.emit_regime_alert(btc_shield)
+            except Exception as wa_err:
+                print(f"[WHATSAPP ❌] Error emitting Market Regime Alert: {wa_err}", flush=True)
+        self._last_market_regime = current_regime
 
         if is_macro_ntz:
             print(f"\n🛑 [ENGINE ALERT] MACRO NO TRADE ZONE ACTIVE: {macro_ntz_reason}")
