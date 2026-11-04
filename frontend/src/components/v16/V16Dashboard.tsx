@@ -5,6 +5,7 @@ import V16Header from "@/components/v16/V16Header";
 import V16KpiRow from "@/components/v16/V16KpiRow";
 import V16RegimeCard from "@/components/v16/V16RegimeCard";
 import V16ThesisPanel from "@/components/v16/V16ThesisPanel";
+import V16SignalCardsGrid from "@/components/v16/V16SignalCardsGrid";
 import V16SignalTable from "@/components/v16/V16SignalTable";
 import V16SignalDetailModal from "@/components/v16/V16SignalDetailModal";
 import V16EventJournal from "@/components/v16/V16EventJournal";
@@ -17,10 +18,11 @@ import {
   useV16Regime,
 } from "@/hooks/useV16Data";
 import { V16SignalEnvelope } from "@/types/v16";
-import { AlertCircle, RefreshCw, Sparkles, Activity } from "lucide-react";
+import { AlertCircle, RefreshCw, Sparkles, Activity, LayoutGrid, Table } from "lucide-react";
 
 export default function V16Dashboard() {
   const [selectedSignal, setSelectedSignal] = useState<V16SignalEnvelope | null>(null);
+  const [displayMode, setDisplayMode] = useState<"CARDS" | "TABLE">("CARDS");
 
   // Live queries to V16 APIs
   const signalsQuery = useV16Signals();
@@ -129,7 +131,7 @@ export default function V16Dashboard() {
         />
       </div>
 
-      {/* 4. Institutional Signal Table */}
+      {/* 4. Qualified V16 Signals Section (Cards & Table Views) */}
       <div className="relative z-10 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-1">
           <div>
@@ -145,25 +147,63 @@ export default function V16Dashboard() {
               Filtered for positive Expected Net Return (EVnet &gt; 0%) after all exchange friction deductions
             </p>
           </div>
-          <button
-            onClick={() => {
-              signalsQuery.refetch();
-              thesesQuery.refetch();
-              eventsQuery.refetch();
-              regimeQuery.refetch();
-            }}
-            className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-xs text-slate-300 hover:text-cyan-300 font-mono font-bold transition-all shadow-sm"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${signalsQuery.isFetching ? "animate-spin text-cyan-400" : "text-slate-400"}`} />
-            <span>Sync Live Matrix</span>
-          </button>
+
+          <div className="flex items-center gap-2.5">
+            {/* View Mode Toggle: Cards vs Table */}
+            <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800 shadow-sm">
+              <button
+                onClick={() => setDisplayMode("CARDS")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all ${
+                  displayMode === "CARDS"
+                    ? "bg-gradient-to-r from-cyan-600/30 to-indigo-600/30 text-cyan-300 border border-cyan-500/50 shadow-sm"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <LayoutGrid className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Cards View</span>
+              </button>
+
+              <button
+                onClick={() => setDisplayMode("TABLE")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all ${
+                  displayMode === "TABLE"
+                    ? "bg-gradient-to-r from-cyan-600/30 to-indigo-600/30 text-cyan-300 border border-cyan-500/50 shadow-sm"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                <Table className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Table View</span>
+              </button>
+            </div>
+
+            <button
+              onClick={() => {
+                signalsQuery.refetch();
+                thesesQuery.refetch();
+                eventsQuery.refetch();
+                regimeQuery.refetch();
+              }}
+              className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-xs text-slate-300 hover:text-cyan-300 font-mono font-bold transition-all shadow-sm"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${signalsQuery.isFetching ? "animate-spin text-cyan-400" : "text-slate-400"}`} />
+              <span className="hidden sm:inline">Sync Live</span>
+            </button>
+          </div>
         </div>
 
-        <V16SignalTable
-          signals={signals}
-          onSelectSignal={(sig) => setSelectedSignal(sig)}
-          selectedSignalId={selectedSignal?.immutable?.signal_id}
-        />
+        {displayMode === "CARDS" ? (
+          <V16SignalCardsGrid
+            signals={signals}
+            onSelectSignal={(sig) => setSelectedSignal(sig)}
+            selectedSignalId={selectedSignal?.immutable?.signal_id}
+          />
+        ) : (
+          <V16SignalTable
+            signals={signals}
+            onSelectSignal={(sig) => setSelectedSignal(sig)}
+            selectedSignalId={selectedSignal?.immutable?.signal_id}
+          />
+        )}
       </div>
 
       {/* 5. Live Top 40 Quantitative Scanner Matrix (All 9 Horizons) */}
