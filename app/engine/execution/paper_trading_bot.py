@@ -61,21 +61,21 @@ class PaperTradingBot:
                             purged_symbols.append(sym)
 
                     # Resynchronize desk targets to Phase 1 Capital Optimization:
-                    # Swing Desk (24H): $450 (45%), 2 slots, 2x leverage (proven 75% WR edge)
-                    # Day Desk (1H): $350 (35%), 2 slots, 3x leverage
-                    # Scalp Desk (15M): $200 (20%), 2 slots, 2x leverage (throttled from 5x to suppress noise)
+                    # Swing Desk (12H-30D): $500 (50%), 3 slots, 2x leverage (proven 53%+ WR edge)
+                    # Day Desk (1H-4H): $350 (35%), 2 slots, 3x leverage
+                    # Scalp Desk (5M-30M): $150 (15%), 1 slot, 2x leverage (strictly Grade A+ only)
                     desks = loaded.get("desks", {})
                     if "swing" in desks:
-                        desks["swing"]["allocated_usd"] = 450.0
-                        desks["swing"]["max_slots"] = 2
+                        desks["swing"]["allocated_usd"] = 500.0
+                        desks["swing"]["max_slots"] = 3
                         desks["swing"]["leverage"] = 2
                     if "day" in desks:
                         desks["day"]["allocated_usd"] = 350.0
                         desks["day"]["max_slots"] = 2
                         desks["day"]["leverage"] = 3
                     if "scalp" in desks:
-                        desks["scalp"]["allocated_usd"] = 200.0
-                        desks["scalp"]["max_slots"] = 2
+                        desks["scalp"]["allocated_usd"] = 150.0
+                        desks["scalp"]["max_slots"] = 1
                         desks["scalp"]["leverage"] = 2
                     for d_key, d_val in desks.items():
                         d_val["active_slots"] = sum(1 for p in valid_positions if p.get("desk") == d_key)
@@ -172,9 +172,9 @@ class PaperTradingBot:
             "winning_trades_count": 0,
             "losing_trades_count": 0,
             "desks": {
-                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": 200.0, "max_slots": 2, "active_slots": 0, "leverage": 2},
+                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": 150.0, "max_slots": 1, "active_slots": 0, "leverage": 2},
                 "day": {"name": "⏳ Day Trading Desk", "allocated_usd": 350.0, "max_slots": 2, "active_slots": 0, "leverage": 3},
-                "swing": {"name": "🌊 Swing Desk", "allocated_usd": 450.0, "max_slots": 2, "active_slots": 0, "leverage": 2}
+                "swing": {"name": "🌊 Swing Desk", "allocated_usd": 500.0, "max_slots": 3, "active_slots": 0, "leverage": 2}
             },
             "open_positions": [],
             "shadow_positions": [],
@@ -205,7 +205,7 @@ class PaperTradingBot:
         desks = self.data.get("desks", {})
 
         # 1. 24H / Daily Swing Desk (Check first so '4h' does not false-match '24h')
-        if any(x in tf for x in ["24h", "1d", "daily", "swing", "macro"]):
+        if any(x in tf for x in ["24h", "1d", "12h", "7d", "15d", "30d", "daily", "swing", "macro"]):
             if "swing" in desks:
                 return "swing"
             if "macro" in desks:
@@ -213,7 +213,7 @@ class PaperTradingBot:
             return list(desks.keys())[-1]
 
         # 2. 1H / Intraday Desk
-        if any(x in tf for x in ["1h", "day", "intraday"]):
+        if any(x in tf for x in ["1h", "4h", "day", "intraday"]):
             if "day" in desks:
                 return "day"
             if "intraday" in desks:
@@ -221,7 +221,7 @@ class PaperTradingBot:
             return list(desks.keys())[0]
 
         # 3. 15M / Scalp Desk
-        if any(x in tf for x in ["5m", "15m", "scalp"]):
+        if any(x in tf for x in ["5m", "15m", "30m", "scalp"]):
             if "scalp" in desks:
                 return "scalp"
             return list(desks.keys())[0]
@@ -351,8 +351,69 @@ class PaperTradingBot:
                 desk_key = list(desks.keys())[0] if desks else "default"
                 desk = desks.get(desk_key, {"name": "Standard Desk", "allocated_usd": 350.0, "max_slots": 2, "leverage": 3})
 
-            # Check desk availability
+            # Check desk availability with Dynamic Regime Modulation (Phase 3)
             max_slots = int(desk.get("max_slots", 2))
+            if btc_shield_state:
+                regime = str(btc_shield_state.get("regime", "")).upper()
+                if regime in ["RANGE", "CHOPPY", "COMPRESSION", "HIGH_VOLATILITY_CHOP"]:
+                    if desk_key == "scalp":
+                        max_slots = 0
+                        print(f"[PAPER BOT [REGIME GATING]] Scalp slots throttled to 0 in {regime} market regime.")
+                    elif desk_key == "day":
+                        max_slots = min(max_slots, 1)
+                    elif desk_key == "swing":
+                        max_slots = min(max_slots, 2)
+                elif regime in ["BULL_TREND", "BEAR_TREND"]:
+                    if desk_key == "swing":
+                        max_slots = max(max_slots, 3)
+                    elif desk_key == "scalp":
+                        max_slots = min(max_slots, 1)
+
+            # 4b. Desk Quality Admission Gating (Phase 2)
+            quality_grade = str(signal.get("quality_grade") or signal.get("grade") or "").upper()
+            raw_ev = signal.get("ev_net") if signal.get("ev_net") is not None else signal.get("expected_return_pct")
+            if raw_ev is not None:
+                ev_net = float(raw_ev)
+            else:
+                # Dynamically calculate estimated net EV from targets if not explicitly set
+                win_p = float(signal.get("meta_win_prob_pct", signal.get("p_tp1", 65.0))) / 100.0
+                e_p = float(signal.get("entry_price", 1.0))
+                tp_p = float(signal.get("tp1_price", e_p))
+                sl_p = float(signal.get("sl_price", e_p))
+                if e_p > 0:
+                    r_gain = abs(tp_p - e_p) / e_p
+                    r_loss = abs(e_p - sl_p) / e_p
+                    gross_ev = (win_p * r_gain) - ((1.0 - win_p) * r_loss)
+                    friction = 0.0025  # ~0.25% estimated round-trip friction
+                    ev_net = round((gross_ev - friction) * 100.0, 2)
+                else:
+                    ev_net = 0.0
+
+            if desk_key == "scalp":
+                # Scalp Desk requires Grade A+ and EVnet >= 1.25%
+                if "A+" not in quality_grade:
+                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Requires Grade A+ (got {quality_grade})")
+                    return False
+                if ev_net < 1.25:
+                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Requires EVnet >= 1.25% (got {ev_net:.2f}%)")
+                    return False
+            elif desk_key == "day":
+                # Day Desk requires Grade A or A+ and EVnet >= 0.75%
+                if "A" not in quality_grade:
+                    print(f"[PAPER BOT [QUALITY GATE]] Day Desk rejected for {symbol}: Requires Grade A or A+ (got {quality_grade})")
+                    return False
+                if ev_net < 0.75:
+                    print(f"[PAPER BOT [QUALITY GATE]] Day Desk rejected for {symbol}: Requires EVnet >= 0.75% (got {ev_net:.2f}%)")
+                    return False
+            elif desk_key == "swing":
+                # Swing Desk requires Grade A or A+ and EVnet >= 0.50%
+                if "A" not in quality_grade:
+                    print(f"[PAPER BOT [QUALITY GATE]] Swing Desk rejected for {symbol}: Requires Grade A or A+ (got {quality_grade})")
+                    return False
+                if ev_net < 0.50:
+                    print(f"[PAPER BOT [QUALITY GATE]] Swing Desk rejected for {symbol}: Requires EVnet >= 0.50% (got {ev_net:.2f}%)")
+                    return False
+
             active_desk_count = sum(1 for p in self.data.get("open_positions", []) if p.get("desk") == desk_key)
             if active_desk_count >= max_slots:
                 return False

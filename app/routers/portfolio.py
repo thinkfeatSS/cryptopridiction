@@ -75,9 +75,9 @@ def _safe_portfolio(db: Session) -> dict:
                 day_rpnl = round(sum(float(c.get("realized_pnl_usd", 0.0)) for c in closed if (c.get("desk") or "").lower() in ["day", "intraday"] or "1H" in str(c.get("horizon", "")).upper()), 2)
                 swing_rpnl = round(sum(float(c.get("realized_pnl_usd", 0.0)) for c in closed if (c.get("desk") or "").lower() in ["swing", "macro"] or "24H" in str(c.get("horizon", "")).upper()), 2)
 
-                scalp_d = {"name": "⚡ Scalp Desk", "allocated_usd": 350.0, "max_slots": 2, "active_slots": scalp_c, "open_positions": scalp_c, "leverage": 5, "realized_pnl_usd": scalp_rpnl, "total_pnl_usd": scalp_rpnl}
-                day_d = {"name": "⏳ Day Trading Desk", "allocated_usd": 400.0, "max_slots": 2, "active_slots": day_c, "open_positions": day_c, "leverage": 3, "realized_pnl_usd": day_rpnl, "total_pnl_usd": day_rpnl}
-                swing_d = {"name": "🌊 Swing Desk", "allocated_usd": 250.0, "max_slots": 1, "active_slots": swing_c, "open_positions": swing_c, "leverage": 2, "realized_pnl_usd": swing_rpnl, "total_pnl_usd": swing_rpnl}
+                scalp_d = {"name": "⚡ Scalp Desk", "allocated_usd": 150.0, "max_slots": 1, "active_slots": scalp_c, "open_positions": scalp_c, "leverage": 2, "realized_pnl_usd": scalp_rpnl, "total_pnl_usd": scalp_rpnl}
+                day_d = {"name": "⏳ Day Trading Desk", "allocated_usd": 350.0, "max_slots": 2, "active_slots": day_c, "open_positions": day_c, "leverage": 3, "realized_pnl_usd": day_rpnl, "total_pnl_usd": day_rpnl}
+                swing_d = {"name": "🌊 Swing Desk", "allocated_usd": 500.0, "max_slots": 3, "active_slots": swing_c, "open_positions": swing_c, "leverage": 2, "realized_pnl_usd": swing_rpnl, "total_pnl_usd": swing_rpnl}
                 desks_enriched = {
                     "scalp": scalp_d,
                     "day": day_d,

@@ -300,17 +300,26 @@ class UnifiedCryptoEngine:
                 and not s.get("is_ntz_active", False)
                 and "NO_TRADE_ZONE" not in s.get("signal_status", "")
             ]
-            active_trade_signals.sort(key=lambda s: (
-                1 if "A+" in s.get("quality_grade", "") else (2 if "Grade A" in s.get("quality_grade", "") else 3),
-                -float(s.get("conviction", 0.0)),
-                -float(s.get("expected_return_pct", 0.0))
-            ))
+            def _signal_sort_rank(s):
+                qg = str(s.get("quality_grade", "")).upper()
+                grade_rank = 1 if "A+" in qg else (2 if "GRADE A" in qg else 3)
+                hz = str(s.get("horizon") or s.get("dominant_timeframe") or "").upper()
+                # Prioritize higher-edge horizons: Swing (1), Day (2), Scalp (3)
+                if any(x in hz for x in ["24H", "1D", "12H", "7D", "15D", "30D"]):
+                    hz_rank = 1
+                elif any(x in hz for x in ["1H", "4H"]):
+                    hz_rank = 2
+                else:
+                    hz_rank = 3
+                return (grade_rank, hz_rank, -float(s.get("conviction", 0.0)), -float(s.get("expected_return_pct", 0.0)))
+
+            active_trade_signals.sort(key=_signal_sort_rank)
 
         # Admit ONLY active, strictly-aligned signals to Paper Trading Bot (Strict NTZ Gating)
         admitted_count = 0
         if not is_macro_ntz:
             now_ts = time.time()
-            for s in active_trade_signals[:10]:
+            for s in active_trade_signals[:15]:
                 sym_key = s.get("symbol", "")
                 hz_key = str(s.get("horizon", s.get("dominant_timeframe", "1H"))).upper()
                 norm_hz_key = "15M" if "15" in hz_key else ("24H" if "24" in hz_key or "1D" in hz_key else "1H")

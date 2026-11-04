@@ -115,11 +115,11 @@ class InstitutionalBacktestEngine:
         """Returns (desk_key, allocation_pct, max_slots, leverage, holding_duration_hours)."""
         hz = str(horizon).upper()
         if any(k in hz for k in ["24H", "1D", "4D", "7D", "WEEK", "15D", "30D", "MONTH", "SWING", "MACRO"]):
-            return "swing", 0.25, 1, 2, 24.0
+            return "swing", 0.50, 3, 2, 24.0
         elif any(k in hz for k in ["5M", "15M", "30M", "SCALP"]):
-            return "scalp", 0.35, 2, 5, 0.5
+            return "scalp", 0.15, 1, 2, 0.5
         else:
-            return "day", 0.40, 2, 3, 4.0
+            return "day", 0.35, 2, 3, 4.0
 
     def run_simulation(
         self,
