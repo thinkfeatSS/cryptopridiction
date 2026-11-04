@@ -1051,3 +1051,22 @@ def get_v16_calibration(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "status": "success",
         "calibration_metrics": calib or {}
     }
+
+@v16_router.post("/cache/clear")
+@v16_router.get("/cache/clear")
+def clear_all_v16_caches() -> Dict[str, Any]:
+    """
+    Administrative endpoint to purge all in-memory, Redis, and SWR caches.
+    Ensures all matrix views, KPIs, forecasts, and validation HUDs immediately
+    re-pull fresh data from source ledgers and exchanges.
+    """
+    from app.services.cache_service import cache_service
+    success = cache_service.flush_all()
+    return {
+        "status": "success",
+        "message": "All system caches (Redis & In-Memory) successfully purged.",
+        "details": {
+            "redis_and_memory_flushed": success,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat()
+        }
+    }

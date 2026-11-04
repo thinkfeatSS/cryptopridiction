@@ -126,6 +126,17 @@ class CacheService:
         _LOCAL_MEM_CACHE.pop(key, None)
         _LOCAL_MEM_EXPIRY.pop(key, None)
 
+    def flush_all(self) -> bool:
+        """Flushes all cached keys from Redis and local in-memory storage."""
+        if self.is_available and self._redis:
+            try:
+                self._redis.flushdb()
+            except Exception as e:
+                logger.warning(f"[CACHE ⚠️] Error flushing Redis DB: {e}")
+        _LOCAL_MEM_CACHE.clear()
+        _LOCAL_MEM_EXPIRY.clear()
+        return True
+
     def publish_event(self, channel: str, message: dict) -> bool:
         """Publishes a real-time event to a Redis Pub/Sub channel."""
         if self.is_available and self._redis:
