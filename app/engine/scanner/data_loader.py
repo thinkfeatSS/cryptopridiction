@@ -24,6 +24,7 @@ BINANCE_HOST_MIRRORS = [
 BYBIT_KLINES_URL = "https://api.bybit.com/v5/market/kline"
 BYBIT_TICKERS_URL = "https://api.bybit.com/v5/market/tickers?category=spot"
 BYBIT_TF_MAP = {
+    "1m": "1",
     "5m": "5",
     "15m": "15",
     "1h": "60",
@@ -38,6 +39,7 @@ BYBIT_TF_MAP = {
 OKX_KLINES_URL = "https://www.okx.com/api/v5/market/candles"
 OKX_TICKERS_URL = "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
 OKX_TF_MAP = {
+    "1m": "1m",
     "5m": "5m",
     "15m": "15m",
     "1h": "1H",
@@ -53,6 +55,7 @@ OKX_TF_MAP = {
 MEXC_KLINES_URL = "https://api.mexc.com/api/v3/klines"
 MEXC_TICKERS_URL = "https://api.mexc.com/api/v3/ticker/price"
 MEXC_TF_MAP = {
+    "1m": "1m",
     "5m": "5m",
     "15m": "15m",
     "1h": "60m",
@@ -66,6 +69,7 @@ MEXC_TF_MAP = {
 GATEIO_KLINES_URL = "https://api.gateio.ws/api/v4/spot/candlesticks"
 GATEIO_TICKERS_URL = "https://api.gateio.ws/api/v4/spot/tickers"
 GATEIO_TF_MAP = {
+    "1m": "1m",
     "5m": "5m",
     "15m": "15m",
     "1h": "1h",
@@ -79,6 +83,7 @@ GATEIO_TF_MAP = {
 KUCOIN_KLINES_URL = "https://api.kucoin.com/api/v1/market/candles"
 KUCOIN_TICKERS_URL = "https://api.kucoin.com/api/v1/market/allTickers"
 KUCOIN_TF_MAP = {
+    "1m": "1min",
     "5m": "5min",
     "15m": "15min",
     "1h": "1hour",
@@ -160,6 +165,7 @@ class MultiHorizonDataLoader:
         self._is_price_fresh_15s: bool = True
         self._price_freshness_age: float = 0.0
         self._symbol_price_timestamps: Dict[str, float] = {}
+        self._rest_outage_start_ts: Optional[float] = None
 
         # Regional geo-restriction and Cloudflare/WAF IP block tracking
         self._exchange_geo_cooldowns: Dict[str, float] = {}
@@ -914,6 +920,7 @@ class MultiHorizonDataLoader:
                     self._coincap_rates_cache = res
                     self._coincap_rates_ts = now
                     self._coincap_consecutive_429 = 0
+                    self._save_tickers_to_swr_disk(res, now)
                     print(f"[DATA LOADER [TIER-6.5]] Engaged CoinCap Global Rates Aggregator ({len(res)} prices).", flush=True)
             elif resp.status_code == 429:
                 self._coincap_consecutive_429 = getattr(self, '_coincap_consecutive_429', 0) + 1
@@ -1195,6 +1202,7 @@ class MultiHorizonDataLoader:
                 self._is_price_fresh_15s = True
                 self._price_freshness_age = 0.0
                 self._is_global_outage = False
+                self._rest_outage_start_ts = None
                 for s in res:
                     self._symbol_price_timestamps[s] = now
             self._save_tickers_to_swr_disk(res, now)
@@ -1209,6 +1217,7 @@ class MultiHorizonDataLoader:
                 self._is_price_fresh_15s = True
                 self._price_freshness_age = 0.0
                 self._is_global_outage = False
+                self._rest_outage_start_ts = None
                 for s in bybit_ticks:
                     self._symbol_price_timestamps[s] = now
             return bybit_ticks
@@ -1222,6 +1231,7 @@ class MultiHorizonDataLoader:
                 self._is_price_fresh_15s = True
                 self._price_freshness_age = 0.0
                 self._is_global_outage = False
+                self._rest_outage_start_ts = None
                 for s in okx_ticks:
                     self._symbol_price_timestamps[s] = now
             return okx_ticks
@@ -1235,6 +1245,7 @@ class MultiHorizonDataLoader:
                 self._is_price_fresh_15s = True
                 self._price_freshness_age = 0.0
                 self._is_global_outage = False
+                self._rest_outage_start_ts = None
                 for s in gate_ticks:
                     self._symbol_price_timestamps[s] = now
             return gate_ticks
@@ -1248,6 +1259,7 @@ class MultiHorizonDataLoader:
                 self._is_price_fresh_15s = True
                 self._price_freshness_age = 0.0
                 self._is_global_outage = False
+                self._rest_outage_start_ts = None
                 for s in kucoin_ticks:
                     self._symbol_price_timestamps[s] = now
             return kucoin_ticks
@@ -1261,84 +1273,90 @@ class MultiHorizonDataLoader:
                 self._is_price_fresh_15s = True
                 self._price_freshness_age = 0.0
                 self._is_global_outage = False
+                self._rest_outage_start_ts = None
                 for s in mexc_ticks:
                     self._symbol_price_timestamps[s] = now
             return mexc_ticks
 
         # Tier-6.5 Failover: Global Decentralized Price Aggregator (CoinCap)
-        coincap_ticks = self._fetch_coincap_tickers()
-        if coincap_ticks:
-            with self._cache_lock:
-                self._live_tickers_cache = coincap_ticks
-                self._live_tickers_ts = now
-                self._is_price_fresh_15s = True
-                self._price_freshness_age = 0.0
-                self._is_global_outage = False
-                for s in coincap_ticks:
-                    self._symbol_price_timestamps[s] = now
-            return coincap_ticks
+        is_coincap_throttled = (now < getattr(self, '_coincap_throttled_until', 0.0))
+        if not is_coincap_throttled:
+            coincap_ticks = self._fetch_coincap_tickers()
+            if coincap_ticks and (now >= getattr(self, '_coincap_throttled_until', 0.0)):
+                with self._cache_lock:
+                    self._live_tickers_cache = coincap_ticks
+                    self._live_tickers_ts = now
+                    self._is_price_fresh_15s = True
+                    self._price_freshness_age = 0.0
+                    self._is_global_outage = False
+                    self._rest_outage_start_ts = None
+                    for s in coincap_ticks:
+                        self._symbol_price_timestamps[s] = now
+                return coincap_ticks
 
         # Tier-6.6 Failover: Coinpaprika Global Rates Aggregator (Fallback on CoinCap 429/DNS drops)
-        paprika_ticks = self._fetch_coinpaprika_tickers()
-        if paprika_ticks and now >= getattr(self, '_paprika_throttled_until', 0.0):
-            with self._cache_lock:
-                self._live_tickers_cache = paprika_ticks
-                self._live_tickers_ts = now
-                self._is_price_fresh_15s = True
-                self._price_freshness_age = 0.0
-                self._is_global_outage = False
-                for s in paprika_ticks:
-                    self._symbol_price_timestamps[s] = now
-            return paprika_ticks
+        is_paprika_throttled = (now < getattr(self, '_paprika_throttled_until', 0.0))
+        if not is_paprika_throttled:
+            paprika_ticks = self._fetch_coinpaprika_tickers()
+            if paprika_ticks and (now >= getattr(self, '_paprika_throttled_until', 0.0)):
+                with self._cache_lock:
+                    self._live_tickers_cache = paprika_ticks
+                    self._live_tickers_ts = now
+                    self._is_price_fresh_15s = True
+                    self._price_freshness_age = 0.0
+                    self._is_global_outage = False
+                    self._rest_outage_start_ts = None
+                    for s in paprika_ticks:
+                        self._symbol_price_timestamps[s] = now
+                return paprika_ticks
 
         # Tier-6.7 Failover: Bitget Global Spot Tickers (Public endpoint, 3500+ pairs)
-        bitget_ticks = self._fetch_bitget_tickers()
-        if bitget_ticks and now >= getattr(self, '_bitget_throttled_until', 0.0):
-            with self._cache_lock:
-                self._live_tickers_cache = bitget_ticks
-                self._live_tickers_ts = now
-                self._is_price_fresh_15s = True
-                self._price_freshness_age = 0.0
-                self._is_global_outage = False
-                for s in bitget_ticks:
-                    self._symbol_price_timestamps[s] = now
-            return bitget_ticks
+        is_bitget_throttled = (now < getattr(self, '_bitget_throttled_until', 0.0))
+        if not is_bitget_throttled:
+            bitget_ticks = self._fetch_bitget_tickers()
+            if bitget_ticks and (now >= getattr(self, '_bitget_throttled_until', 0.0)):
+                with self._cache_lock:
+                    self._live_tickers_cache = bitget_ticks
+                    self._live_tickers_ts = now
+                    self._is_price_fresh_15s = True
+                    self._price_freshness_age = 0.0
+                    self._is_global_outage = False
+                    self._rest_outage_start_ts = None
+                    for s in bitget_ticks:
+                        self._symbol_price_timestamps[s] = now
+                return bitget_ticks
 
         # Catastrophic Global Multi-Exchange Outage / Multi-Exchange Rate Limiting
-        cache_age = max(0.0, now - self._live_tickers_ts) if self._live_tickers_ts > 0 else 999.0
-        is_fresh = (cache_age <= self.MAX_LIVE_PRICE_AGE_SECONDS) and bool(self._live_tickers_cache)
+        # Engaged when Tier-1 through Tier-6 CEXs are geo-blocked/unreachable, and Tier-6.5, Tier-6.6, Tier-6.7
+        # are all concurrently throttled or unavailable.
+        if getattr(self, '_rest_outage_start_ts', None) is None:
+            self._rest_outage_start_ts = self._live_tickers_ts if self._live_tickers_ts > 0 else now
 
-        # Graceful step-down to SWR disk cache if in-memory cache is missing or stale
-        if not is_fresh or not self._live_tickers_cache:
-            swr_ticks, swr_ts = self._load_tickers_from_swr_disk()
-            if swr_ticks:
-                swr_age = max(0.0, now - swr_ts) if swr_ts > 0 else 999.0
-                if swr_age < cache_age or not self._live_tickers_cache:
-                    with self._cache_lock:
-                        self._live_tickers_cache = swr_ticks
-                        self._live_tickers_ts = swr_ts
-                        cache_age = swr_age
-                        is_fresh = (cache_age <= self.MAX_LIVE_PRICE_AGE_SECONDS)
-                        for s in swr_ticks:
-                            self._symbol_price_timestamps[s] = swr_ts
-                    print(f"[DATA LOADER [SWR STEP-DOWN]] Gracefully stepped down to SWR disk cache ({len(swr_ticks)} prices, age={swr_age:.1f}s).", flush=True)
+        outage_age = max(0.0, now - self._rest_outage_start_ts)
+        is_fresh = (outage_age <= self.MAX_LIVE_PRICE_AGE_SECONDS)
+
+        # Step down to SWR disk cache
+        swr_ticks, swr_ts = self._load_tickers_from_swr_disk()
+        served_ticks = swr_ticks or self._live_tickers_cache or getattr(self, '_coincap_rates_cache', {}) or {}
 
         with self._cache_lock:
+            self._live_tickers_cache = served_ticks
             self._is_price_fresh_15s = is_fresh
-            self._price_freshness_age = cache_age
+            self._price_freshness_age = outage_age
             if not is_fresh:
                 self._is_global_outage = True
                 self._global_outage_reason = (
-                    f"PRICE_STALENESS_EXCEEDED: Live market ticker freshness ({cache_age:.1f}s) "
+                    f"PRICE_STALENESS_EXCEEDED: Live market ticker freshness ({outage_age:.1f}s) "
                     f"exceeded {self.MAX_LIVE_PRICE_AGE_SECONDS:.0f}s maximum constraint. "
-                    "All upstream exchange gateways rate-limited or unreachable. Holding entries."
+                    "All Tier-1 through Tier-6 CEXs geo-blocked and Tier-6.5/6.6/6.7 concurrently throttled. Halting new signal emissions."
                 )
                 now_log = time.time()
                 if (now_log - self._last_outage_log_ts) > 30.0:
                     self._last_outage_log_ts = now_log
                     print(f"[DATA LOADER [PRICE STALENESS CRITICAL]] {self._global_outage_reason} (Partition log throttled 30s).", flush=True)
             else:
-                print(f"[DATA LOADER [RATE-LIMIT RECOVERY]] Serving warm cached prices ({cache_age:.1f}s <= 15.0s constraint) while upstream gateways rate-limited.", flush=True)
+                self._is_global_outage = False
+                print(f"[DATA LOADER [RATE-LIMIT RECOVERY]] Serving warm SWR disk cache ({outage_age:.1f}s <= 15.0s constraint) while Tier-6.5/6.6/6.7 REST endpoints throttled.", flush=True)
             return self._live_tickers_cache.copy()
 
     def get_funding_rate(self, symbol: str) -> float:

@@ -479,14 +479,22 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
     if curr_status in ["ALERT_DUMP", "FLASH_DUMP", "BEAR_CASCADE_BLACKOUT"] or curr_reg == "FLASH_DUMP":
         return shield
 
-    # If prolonged multi-day micro-volatility is active, preserve capital preservation NTZ
+    metrics = v16_regime.get("metrics", {})
+    adx_val = metrics.get("adx", 25.0)
+    rsi_val = metrics.get("rsi", 50.0)
+
+    # If prolonged multi-day micro-volatility was flagged, lift it if live regime is trending or active range
     if shield.get("is_prolonged_micro_volatility"):
-        shield["status_code"] = "NO_TRADE_ZONE"
-        shield["regime"] = "RANGE_SQUEEZE"
-        shield["regime_label"] = "🛑 PROLONGED MULTI-DAY MICRO-VOLATILITY (NO TRADE ZONE ACTIVE)"
-        shield["altcoin_posture"] = "NO_TRADE_ZONE_CAPITAL_PRESERVATION"
-        shield["is_ntz_active"] = True
-        return shield
+        if v16_reg in ["BULL_TREND", "BEAR_TREND", "BREAKOUT", "HIGH_VOLATILITY"] or (v16_reg == "RANGE" and adx_val >= 20.0):
+            shield["is_prolonged_micro_volatility"] = False
+            shield["is_ntz_active"] = False
+        else:
+            shield["status_code"] = "NO_TRADE_ZONE"
+            shield["regime"] = "RANGE_SQUEEZE"
+            shield["regime_label"] = "🛑 PROLONGED MULTI-DAY MICRO-VOLATILITY (NO TRADE ZONE ACTIVE)"
+            shield["altcoin_posture"] = "NO_TRADE_ZONE_CAPITAL_PRESERVATION"
+            shield["is_ntz_active"] = True
+            return shield
 
     # Synchronize authoritative V16 regime properties
     shield["regime"] = v16_reg
@@ -496,10 +504,6 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
     shield["confidence"] = v16_regime.get("confidence", 0.85)
     shield["sizing_multiplier"] = v16_regime.get("sizing_multiplier", 1.0)
     shield["is_squeeze_transition"] = bool(v16_regime.get("is_squeeze_transition") or shield.get("is_squeeze_transition"))
-
-    metrics = v16_regime.get("metrics", {})
-    adx_val = metrics.get("adx", 25.0)
-    rsi_val = metrics.get("rsi", 50.0)
 
     if v16_reg == "BEAR_TREND":
         shield["regime_label"] = "🔴 BEAR TREND (SHORT ALPHA AUTHORIZED)"

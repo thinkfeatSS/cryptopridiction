@@ -98,6 +98,9 @@ def map_canonical_strategy(
         return raw
 
     # Keyword mapping — DIRECTIONAL/TREND checked BEFORE EXPANSION to avoid false BREAKOUT routing (Fix RC-4)
+    if "RECTANGLE" in raw:
+        return StrategyArchetype.RECTANGLE_STRATEGY_LONG.value if is_long else StrategyArchetype.RECTANGLE_STRATEGY_SHORT.value
+
     if "FVG" in raw or "FAIR_VALUE" in raw or "IMBALANCE" in raw:
         return StrategyArchetype.FVG_RETEST_LONG.value if is_long else StrategyArchetype.FVG_RETEST_SHORT.value
 

@@ -26,6 +26,7 @@ TIMEFRAMES_9 = [
 
 # Timeframe metadata: native Binance interval strings vs resampling requirements
 TIMEFRAME_META = {
+    "1m":  {"label": "1M (1 Minute)",    "binance_tf": "1m",  "is_native": True,  "seconds": 60},
     "5m":  {"label": "5M (5 Minutes)",   "binance_tf": "5m",  "is_native": True,  "seconds": 300},
     "15m": {"label": "15M (15 Minutes)", "binance_tf": "15m", "is_native": True,  "seconds": 900},
     "1h":  {"label": "1H (1 Hour)",      "binance_tf": "1h",  "is_native": True,  "seconds": 3600},

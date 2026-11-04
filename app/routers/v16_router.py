@@ -864,8 +864,12 @@ def _compute_live_market_regime() -> Dict[str, Any]:
                 with open(fc_path, "r", encoding="utf-8") as f:
                     fc_data = json.load(f)
                 shield = fc_data.get("btc_market_shield", {})
-                is_ntz = fc_data.get("is_no_trade_zone_active", False)
-                if is_ntz or shield.get("is_ntz_active") or shield.get("status_code") == "NO_TRADE_ZONE":
+                is_partition = bool(shield.get("is_partition_stale") or shield.get("is_global_outage"))
+                is_emergency_dump = str(shield.get("status_code", "")).upper() in ["ALERT_DUMP", "FLASH_DUMP", "BEAR_CASCADE_BLACKOUT"]
+                is_fc_ntz = bool(fc_data.get("is_no_trade_zone_active") or shield.get("is_ntz_active") or shield.get("status_code") == "NO_TRADE_ZONE")
+                is_live_active = res.get("regime") in ["BULL_TREND", "BEAR_TREND", "BREAKOUT", "HIGH_VOLATILITY"] or (res.get("regime") == "RANGE" and res.get("metrics", {}).get("adx", 20.0) >= 20.0)
+
+                if (is_partition or is_emergency_dump) or (is_fc_ntz and not is_live_active):
                     res["is_no_trade_zone_active"] = True
                     res["no_trade_zone_reason"] = fc_data.get("no_trade_zone_reason") or shield.get("reason")
                     res["sizing_multiplier"] = 0.0

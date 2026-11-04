@@ -120,6 +120,7 @@ export interface BtcMarketShield {
   is_ntz_active?: boolean;
   macro_ntz_active?: boolean;
   ntz_reason?: string;
+  v16_regime?: string;
 }
 
 export interface EngineStatus {

@@ -190,8 +190,10 @@ class BtcPredictiveMarketShield:
         bbw_pctile = float(metrics.get("bb_width_percentile", 15.0))
         # Severe flatline stagnation: Extreme dead market (ADX < 12 or BBW <= 3%ile)
         is_dead_flatline = is_squeeze and ((adx_val < 12.0) or (bbw_pctile <= 3.0))
-        # Prolonged Multi-Day Micro-Volatility: Ultra-tight band (< 0.50% ATR over 48 hours)
-        is_prolonged_micro_vol = (btc_atr_48h_pct > 0.0 and btc_atr_48h_pct < 0.50)
+        # Prolonged Multi-Day Micro-Volatility: Ultra-tight band (< 0.50% ATR over 48 hours) during non-trending compression
+        is_prolonged_micro_vol = (btc_atr_48h_pct > 0.0 and btc_atr_48h_pct < 0.50) and (
+            regime_v16 not in ['BULL_TREND', 'BEAR_TREND', 'BREAKOUT', 'HIGH_VOLATILITY'] and adx_val < 20.0
+        )
         # Flash dump cascade: Extreme liquidation event
         is_dump_cascade = (ret_15m <= -0.025) or (ret_1h <= -0.05) or (c_now < ema50_1h * 0.95)
 

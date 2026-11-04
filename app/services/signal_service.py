@@ -1934,8 +1934,9 @@ class SignalService:
             v16_r = _compute_live_market_regime()
             if v16_r and "btc_market_shield" in res:
                 res["btc_market_shield"] = reconcile_btc_shield(res["btc_market_shield"], v16_r)
-                if v16_r.get("regime") in ["BEAR_TREND", "BULL_TREND", "BREAKOUT"] and not res["btc_market_shield"].get("is_ntz_active"):
+                if not res["btc_market_shield"].get("is_ntz_active"):
                     res["is_no_trade_zone_active"] = False
+                    res["no_trade_zone_reason"] = None
                     has_signals = bool(res.get("top_round_signals") or res.get("active_trade_signals_count", 0) > 0)
                     res["market_trade_posture"] = "ACTIVE_SIGNALS" if has_signals else "WAITING_FOR_ALIGNMENT"
         except Exception:

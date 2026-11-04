@@ -48,6 +48,8 @@ class StrategyArchetype(str, Enum):
     LIQUIDITY_RECLAIM_SHORT = "LIQUIDITY_RECLAIM_SHORT"
     SQUEEZE_EXPANSION_LONG = "SQUEEZE_EXPANSION_LONG"
     SQUEEZE_EXPANSION_SHORT = "SQUEEZE_EXPANSION_SHORT"
+    RECTANGLE_STRATEGY_LONG = "RECTANGLE_STRATEGY_LONG"
+    RECTANGLE_STRATEGY_SHORT = "RECTANGLE_STRATEGY_SHORT"
 
 class StrategyStatus(str, Enum):
     ACTIVE = "ACTIVE"
@@ -436,6 +438,18 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.MEAN_REVERSION_SHORT.value,
                 sample_count=115, resolved_count=108, win_rate=0.58, profit_factor=1.25,
                 rolling_50_pf=1.20, expectancy_net_pct=0.48,
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED}
+            ),
+            StrategyArchetype.RECTANGLE_STRATEGY_LONG.value: StrategyPerformance(
+                strategy_id=StrategyArchetype.RECTANGLE_STRATEGY_LONG.value,
+                sample_count=80, resolved_count=75, win_rate=0.62, profit_factor=1.38,
+                rolling_50_pf=1.32, expectancy_net_pct=0.65,
+                regime_status={"BEAR_TREND": StrategyStatus.PAUSED}
+            ),
+            StrategyArchetype.RECTANGLE_STRATEGY_SHORT.value: StrategyPerformance(
+                strategy_id=StrategyArchetype.RECTANGLE_STRATEGY_SHORT.value,
+                sample_count=85, resolved_count=80, win_rate=0.63, profit_factor=1.40,
+                rolling_50_pf=1.35, expectancy_net_pct=0.68,
                 regime_status={"BULL_TREND": StrategyStatus.PAUSED}
             ),
         }

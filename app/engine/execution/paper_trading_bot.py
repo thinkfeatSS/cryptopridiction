@@ -27,6 +27,8 @@ class PaperTradingBot:
     def __init__(self, ledger_file: str = None):
         self.ledger_file = ledger_file or os.path.join(EXPORT_DIR, "paper_trading_ledger.json")
         self.taker_fee_rate = 0.000405 # 0.045% with 10% BNB discount
+        self.MAX_SAFEGUARD_VOID_HOLD_SECONDS: float = 1800.0  # 30m maximum safeguard hold before auto-liquidation
+        self.ABANDONED_MICRO_CAP_VOID_TIMEOUT: float = 60.0  # 60s fast auto-liquidation on abandoned/depleted micro-caps
         self._lock = threading.RLock()
         self._running = False
         self._worker_thread = None
@@ -690,7 +692,39 @@ class PaperTradingBot:
                         )
                         self._archive_cancelled_order(canc_rec, pos.get("desk"))
                         continue
-                    elif is_emergency_liq:
+
+                    # Track when position entered SAFEGUARD_HOLD for order book void
+                    pos["safeguard_hold_ts"] = float(pos.get("safeguard_hold_ts") or time.time())
+                    void_dur = max(0.0, time.time() - pos["safeguard_hold_ts"])
+
+                    # Prolonged Single-Side Order Book Void / Abandoned Micro-Cap Sentinel
+                    v_dict = v_entry if (order_book_voids and isinstance(v_entry, dict)) else {}
+                    is_explicit_abandoned = bool(v_dict.get("is_abandoned") or v_dict.get("abandoned_token") or pos.get("is_abandoned_micro_cap"))
+                    v_24h = float(pos.get("volume_24h_usd") or pos.get("volume_24h") or v_dict.get("volume_24h", 0.0) or 0.0)
+                    is_depleted_volume = (0.0 < v_24h < 100_000.0) or (v_24h == 0.0 and pos.get("volume_24h_usd") is not None)
+
+                    max_void_hold_secs = float(pos.get("max_void_hold_secs") or getattr(self, "MAX_SAFEGUARD_VOID_HOLD_SECONDS", 1800.0))
+                    abandoned_timeout = float(getattr(self, "ABANDONED_MICRO_CAP_VOID_TIMEOUT", 60.0))
+
+                    if not is_emergency_liq:
+                        if void_dur >= max_void_hold_secs:
+                            is_emergency_liq = True
+                            pos["is_auto_abandoned_liq"] = True
+                            void_reason = f"Automated emergency liquidation: Prolonged order book void ({void_dur:.1f}s >= {max_void_hold_secs:.0f}s timeout)"
+                            try:
+                                print(f"[PAPER BOT [AUTO-LIQUIDATION]] {sym} Auto Emergency Liquidation triggered after prolonged order book void ({void_dur:.1f}s >= {max_void_hold_secs:.0f}s).", flush=True)
+                            except Exception:
+                                pass
+                        elif (is_explicit_abandoned or is_depleted_volume) and void_dur >= abandoned_timeout:
+                            is_emergency_liq = True
+                            pos["is_auto_abandoned_liq"] = True
+                            void_reason = f"Automated emergency liquidation: Abandoned micro-cap book void persistent for {void_dur:.1f}s >= {abandoned_timeout:.0f}s"
+                            try:
+                                print(f"[PAPER BOT [AUTO-LIQUIDATION]] {sym} Auto Emergency Liquidation triggered on abandoned micro-cap ({void_dur:.1f}s >= {abandoned_timeout:.0f}s).", flush=True)
+                            except Exception:
+                                pass
+
+                    if is_emergency_liq:
                         pass # Liquidated below
                     else:
                         pos["safeguard_state"] = "SAFEGUARD_HOLD"
@@ -702,6 +736,8 @@ class PaperTradingBot:
                     pos["safeguard_state"] = "ACTIVE_MONITORING"
                     pos.pop("safeguard_reason", None)
                     pos.pop("safeguard_detail", None)
+                    pos.pop("safeguard_hold_ts", None)
+                    pos.pop("is_auto_abandoned_liq", None)
 
                 # Calculate elapsed time and duration
                 opened_dt = None
@@ -1067,8 +1103,17 @@ class PaperTradingBot:
                 # Check Exit Triggers (TP, SL, Horizon Expiry, Emergency Macro Impulse, or Order Book Void Emergency Liquidation)
                 if hit_tp or hit_sl or hit_expiry or hit_emergency_exit or hit_order_book_void_exit:
                     if hit_order_book_void_exit:
-                        exit_reason = "CLOSED_ORDER_BOOK_VOID_EMERGENCY_LIQUIDATION"
-                        exit_p = curr_p if curr_p > 0 else entry_p
+                        if pos.get("is_auto_abandoned_liq"):
+                            exit_reason = "CLOSED_ORDER_BOOK_VOID_ABANDONED_AUTO_LIQUIDATION"
+                        else:
+                            exit_reason = "CLOSED_ORDER_BOOK_VOID_EMERGENCY_LIQUIDATION"
+                        v_dict = v_entry if (order_book_voids and isinstance(v_entry, dict)) else {}
+                        haircut_pct = float(v_dict.get("liquidation_haircut_pct", 5.0))
+                        base_p = curr_p if curr_p > 0 else entry_p
+                        if direction == "LONG":
+                            exit_p = base_p * (1.0 - haircut_pct / 100.0)
+                        else:
+                            exit_p = base_p * (1.0 + haircut_pct / 100.0)
                     elif hit_emergency_exit:
                         exit_reason = "EMERGENCY_MACRO_IMPULSE_EXIT"
                         exit_p = curr_p

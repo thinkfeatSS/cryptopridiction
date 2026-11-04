@@ -67,6 +67,13 @@ from .order_blocks import (
     OrderBlockState,
     order_block_engine
 )
+from .rectangle_strategy import (
+    RectangleStrategyConfig,
+    RectangleStrategyOrchestrator,
+    RectangleBacktestingEngine,
+    WalkForwardValidator,
+    RectanglePaperTradingTracker
+)
 
 __all__ = [
     "DataValidator",
@@ -110,5 +117,10 @@ __all__ = [
     "OrderBlock",
     "OrderBlockType",
     "OrderBlockState",
-    "order_block_engine"
+    "order_block_engine",
+    "RectangleStrategyConfig",
+    "RectangleStrategyOrchestrator",
+    "RectangleBacktestingEngine",
+    "WalkForwardValidator",
+    "RectanglePaperTradingTracker"
 ]

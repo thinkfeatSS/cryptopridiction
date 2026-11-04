@@ -39,6 +39,47 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
     };
   }
 
+  // 1b. NO_TRADE_ZONE / PROLONGED MICRO-VOLATILITY (Capital Preservation Mode)
+  const isTrendActive =
+    regime === "BULL_TREND" ||
+    regime === "BULLISH" ||
+    regime === "BEAR_TREND" ||
+    regime === "BEARISH" ||
+    regime === "BREAKOUT" ||
+    shield?.predicted_trend === "BULL_TREND" ||
+    shield?.predicted_trend === "BULLISH" ||
+    shield?.predicted_trend === "BEAR_TREND" ||
+    shield?.predicted_trend === "BEARISH" ||
+    shield?.predicted_trend === "BREAKOUT" ||
+    shield?.v16_regime === "BULL_TREND" ||
+    shield?.v16_regime === "BEAR_TREND" ||
+    shield?.v16_regime === "BREAKOUT";
+
+  const isNtzActive =
+    !isTrendActive &&
+    (code === "NO_TRADE_ZONE" ||
+      Boolean(shield?.is_ntz_active) ||
+      regime.includes("NO_TRADE") ||
+      (shield?.is_ntz_active !== false &&
+        (reason.toUpperCase().startsWith("NO TRADE ZONE") || reason.toUpperCase().includes("NO TRADE ZONE ACTIVE"))));
+
+  if (isNtzActive) {
+    return {
+      border: "border-amber-500/70 bg-amber-950/60 text-amber-300 shadow-amber-500/20",
+      iconColor: "text-amber-400",
+      dotColor: "bg-amber-500",
+      pingColor: "bg-amber-400",
+      isAlert: true,
+      badgeBg: "bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm shadow-amber-500/20",
+      glowBg: "bg-amber-500/20",
+      headline: "🛑 No Trade Zone Active",
+      subline: reason || "Prolonged micro-volatility or high-risk chop. Capital preservation active.",
+      label: "NO_TRADE_ZONE",
+      regimeBadge: "NO TRADE ZONE",
+      statusTitle: reason || "NO TRADE ZONE ACTIVE",
+    };
+  }
+
   // 2. DEFENSIVE (BTC Dump / Circuit Breaker Active / High Bear Probability)
   if (code === "DEFENSIVE" || regime === "DEFENSIVE" || isActive || reason.toUpperCase().includes("DEFENSIVE") || reason.toUpperCase().includes("CIRCUIT BREAKER")) {
     return {
@@ -122,11 +163,14 @@ export function getShieldTheme(shield?: BtcMarketShield): ShieldTheme {
 
   // 5b. BREAKOUT / MOMENTUM EXPANSION
   if (
-    code === "BREAKOUT" ||
-    regime === "BREAKOUT" ||
-    reason.toUpperCase().includes("BREAKOUT") ||
-    shield?.predicted_trend === "BREAKOUT" ||
-    shield?.predicted_trend === "BREAKOUT_EXPANSION"
+    !shield?.is_ntz_active &&
+    code !== "NO_TRADE_ZONE" &&
+    (code === "BREAKOUT" ||
+      regime === "BREAKOUT" ||
+      reason.toUpperCase().includes("MOMENTUM BREAKOUT") ||
+      reason.toUpperCase().includes("BREAKOUT EXPANSION") ||
+      shield?.predicted_trend === "BREAKOUT" ||
+      shield?.predicted_trend === "BREAKOUT_EXPANSION")
   ) {
     return {
       border: "border-sky-500/60 bg-sky-950/40 text-sky-300 shadow-sky-500/25",

@@ -1569,6 +1569,106 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
 
 
 
+    def test_abandoned_micro_cap_order_book_void_auto_liquidation(self):
+        """
+        Validates that an obscure micro-cap token experiencing persistent single-side
+        order book void is NOT left frozen in SAFEGUARD_HOLD indefinitely.
+        When abandoned or persistent beyond timeout, PaperTradingBot auto-promotes
+        to emergency liquidation with a realistic salvage haircut.
+        """
+        from datetime import datetime, timezone
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+        bot = PaperTradingBot(ledger_file="scratch/test_abandoned_void_ledger.json")
+        bot.data["open_positions"] = []
+        bot.data["closed_trades"] = []
+        bot.data["cancelled_orders"] = []
+
+        open_pos = {
+            "trade_id": "OBSCURE_001",
+            "symbol": "OBSCURE/USDT",
+            "direction": "LONG",
+            "status": "OPEN",
+            "is_limit_resting": False,
+            "entry_price": 0.50,
+            "current_price": 0.50,
+            "sl_price": 0.45,
+            "tp1_price": 0.60,
+            "leverage": 1,
+            "initial_position_size_usd": 100.0,
+            "remaining_position_size_usd": 100.0,
+            "volume_24h_usd": 25000.0,
+            "opened_at_utc": datetime.now(timezone.utc).isoformat()
+        }
+        bot.data["open_positions"] = [open_pos]
+
+        # Tick 1: First appearance of void freezes position into SAFEGUARD_HOLD
+        voids_map = {
+            "OBSCURE/USDT": {"is_void": True, "reason": "Complete bid book void", "is_abandoned": True}
+        }
+        bot.on_tick({"OBSCURE/USDT": 0.50}, order_book_voids=voids_map)
+        self.assertEqual(len(bot.data["open_positions"]), 1)
+        self.assertEqual(bot.data["open_positions"][0]["safeguard_state"], "SAFEGUARD_HOLD")
+        self.assertEqual(bot.data["open_positions"][0]["safeguard_reason"], "ORDER_BOOK_VOID_ACTIVE")
+        self.assertIsNotNone(bot.data["open_positions"][0].get("safeguard_hold_ts"))
+
+        # Tick 2: Simulate prolonged void exceeding abandoned timeout (e.g. 65s > 60s)
+        bot.data["open_positions"][0]["safeguard_hold_ts"] = time.time() - 65.0
+        bot.on_tick({"OBSCURE/USDT": 0.50}, order_book_voids=voids_map)
+
+        # Position must be automatically liquidated, removed from open positions, and recorded in closed trades
+        self.assertEqual(len(bot.data["open_positions"]), 0)
+        self.assertEqual(len(bot.data["closed_trades"]), 1)
+        closed_rec = bot.data["closed_trades"][0]
+        self.assertEqual(closed_rec["symbol"], "OBSCURE/USDT")
+        self.assertEqual(closed_rec["exit_reason"], "CLOSED_ORDER_BOOK_VOID_ABANDONED_AUTO_LIQUIDATION")
+        # 5% salvage haircut on 0.50 -> 0.475 exit price
+        self.assertAlmostEqual(closed_rec["exit_price"], 0.475, places=4)
+
+    def test_third_party_rate_limit_staleness_and_signal_halt(self):
+        """
+        Validates that when all Tier-1 to Tier-6 CEXs are geo-blocked and Tier-6.5, 6.6, 6.7
+        are concurrently throttled (HTTP 429):
+        1. SWR disk cache serves warm prices while outage <= 15.0s.
+        2. When outage exceeds 15.0s, global price staleness protection trips:
+           - is_price_fresh_15s = False
+           - is_global_outage = True
+           - is_partition_stale_active() = True
+        """
+        from unittest.mock import patch
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        loader = MultiHorizonDataLoader()
+
+        now = time.time()
+        # Seed SWR disk cache with valid prices
+        loader._save_tickers_to_swr_disk({"BTC/USDT": 67000.0, "ETH/USDT": 3500.0}, now)
+        loader._binance_ip_throttled_until = now + 999.0
+
+        # Simulate all Tier-6.5, 6.6, 6.7 throttled
+        loader._coincap_throttled_until = now + 60.0
+        loader._paprika_throttled_until = now + 60.0
+        loader._bitget_throttled_until = now + 60.0
+        loader._live_tickers_cache = {}
+        loader._live_tickers_ts = 0.0
+
+        with patch.object(loader, "ws_feed", None),              patch.object(loader, "_fetch_bybit_tickers", return_value={}),              patch.object(loader, "_fetch_okx_tickers", return_value={}),              patch.object(loader, "_fetch_gateio_tickers", return_value={}),              patch.object(loader, "_fetch_kucoin_tickers", return_value={}),              patch.object(loader, "_fetch_mexc_tickers", return_value={}):
+
+            # Sub-case A: Outage just started (5.0s ago <= 15.0s constraint)
+            loader._rest_outage_start_ts = time.time() - 5.0
+            ticks = loader.fetch_all_tickers(max_age_seconds=1.0)
+            self.assertEqual(ticks.get("BTC/USDT"), 67000.0)
+            self.assertTrue(loader._is_price_fresh_15s)
+            self.assertFalse(loader._is_global_outage)
+            self.assertFalse(loader.is_partition_stale_active())
+
+            # Sub-case B: Outage persists beyond 15.0s (e.g. 20.0s)
+            loader._rest_outage_start_ts = time.time() - 20.0
+            ticks_stale = loader.fetch_all_tickers(max_age_seconds=1.0)
+            self.assertFalse(loader._is_price_fresh_15s)
+            self.assertTrue(loader._is_global_outage)
+            self.assertTrue(loader.is_partition_stale_active())
+            self.assertIn("PRICE_STALENESS_EXCEEDED", loader._global_outage_reason)
+
+
 if __name__ == "__main__":
     unittest.main()
 

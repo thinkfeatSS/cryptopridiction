@@ -33,9 +33,11 @@ def get_live_forecast(response: Response, db: Session = Depends(get_db)):
                 v16_r = _compute_live_market_regime()
                 if v16_r and "btc_market_shield" in f_data:
                     f_data["btc_market_shield"] = reconcile_btc_shield(f_data["btc_market_shield"], v16_r)
-                    if v16_r.get("regime") in ["BEAR_TREND", "BULL_TREND", "BREAKOUT"] and not f_data["btc_market_shield"].get("is_ntz_active"):
+                    if not f_data["btc_market_shield"].get("is_ntz_active"):
                         f_data["is_no_trade_zone_active"] = False
-                        f_data["market_trade_posture"] = "ACTIVE_SIGNALS"
+                        f_data["no_trade_zone_reason"] = None
+                        has_signals = bool(f_data.get("top_round_signals") or f_data.get("active_trade_signals_count", 0) > 0)
+                        f_data["market_trade_posture"] = "ACTIVE_SIGNALS" if has_signals else "WAITING_FOR_ALIGNMENT"
             except Exception:
                 pass
             content = json.dumps(f_data)

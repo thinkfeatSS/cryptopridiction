@@ -54,6 +54,8 @@ export default function MarketShieldBanner() {
   // Visual container styling based on market regime
   const containerStyle = shield.active
     ? "border-rose-500/70 bg-gradient-to-r from-rose-950/50 via-dark-900/90 to-red-950/40 shadow-lg shadow-rose-500/15"
+    : theme.label === "NO_TRADE_ZONE" || shield.is_ntz_active
+    ? "border-amber-500/70 bg-gradient-to-r from-amber-950/50 via-dark-900/90 to-amber-950/30 shadow-lg shadow-amber-500/20"
     : theme.label === "CAUTION"
     ? "border-amber-500/60 bg-gradient-to-r from-amber-950/40 via-dark-900/90 to-orange-950/20 shadow-lg shadow-amber-500/10"
     : theme.label === "BULLISH EXPANSION"
