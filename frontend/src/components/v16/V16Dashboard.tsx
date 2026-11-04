@@ -123,15 +123,6 @@ export default function V16Dashboard() {
         isEngineOnline={isEngineOnline}
       />
 
-      {/* 2.5 Institutional Macro, Fed/FOMC, Spot ETF & Whale Depth Command HUD */}
-      <div className="relative z-10">
-        <V16InstitutionalIntelligenceHUD
-          intelligence={intelligenceData}
-          isLoading={intelligenceQuery.isLoading}
-          onRefresh={() => intelligenceQuery.refetch()}
-        />
-      </div>
-
       {/* 3. Qualified V16 Signals Section (Cards & Table Views) - Positioned Above Market State & Trade Theses */}
       <div className="relative z-10 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-1">
@@ -220,7 +211,16 @@ export default function V16Dashboard() {
         />
       </div>
 
-      {/* 5. Performance and Event Audit Stream */}
+      {/* 5. Institutional Macro, Fed/FOMC, Spot ETF & Whale Depth Command HUD */}
+      <div className="relative z-10">
+        <V16InstitutionalIntelligenceHUD
+          intelligence={intelligenceData}
+          isLoading={intelligenceQuery.isLoading}
+          onRefresh={() => intelligenceQuery.refetch()}
+        />
+      </div>
+
+      {/* 6. Performance and Event Audit Stream */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 relative z-10">
         <V16PerformancePanel signals={signals} />
         <V16EventJournal
