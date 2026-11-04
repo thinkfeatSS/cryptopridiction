@@ -118,19 +118,7 @@ export default function V16Dashboard() {
         isEngineOnline={isEngineOnline}
       />
 
-      {/* 3. Core Operational Intelligence Grid: Regime & Trade Theses */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 relative z-10">
-        <V16RegimeCard
-          regimeData={regimeData}
-          isLoading={regimeQuery.isLoading}
-        />
-        <V16ThesisPanel
-          theses={theses}
-          isLoading={thesesQuery.isLoading}
-        />
-      </div>
-
-      {/* 4. Qualified V16 Signals Section (Cards & Table Views) */}
+      {/* 3. Qualified V16 Signals Section (Cards & Table Views) - Positioned Above Market State & Trade Theses */}
       <div className="relative z-10 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-1">
           <div>
@@ -203,6 +191,18 @@ export default function V16Dashboard() {
             selectedSignalId={selectedSignal?.immutable?.signal_id}
           />
         )}
+      </div>
+
+      {/* 4. Core Operational Intelligence Grid: Market State Regime & Trade Thesis Clusters */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 relative z-10">
+        <V16RegimeCard
+          regimeData={regimeData}
+          isLoading={regimeQuery.isLoading}
+        />
+        <V16ThesisPanel
+          theses={theses}
+          isLoading={thesesQuery.isLoading}
+        />
       </div>
 
       {/* 5. Performance and Event Audit Stream */}
