@@ -242,9 +242,9 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
             try:
                 fsig_rr = float(raw_rr.split(":")[1])
             except Exception:
-                fsig_rr = round(abs(tp2 - entry) / max(1e-9, abs(entry - sl)), 2)
+                fsig_rr = round(abs(tp1 - entry) / max(1e-9, abs(entry - sl)), 2)
         else:
-            fsig_rr = round(abs(tp2 - entry) / max(1e-9, abs(entry - sl)), 2)
+            fsig_rr = round(abs(tp1 - entry) / max(1e-9, abs(entry - sl)), 2)
 
         fsig_score = float(fsig.get("conviction") or fsig.get("conviction_pct") or fsig.get("signal_score") or 88.0)
         exp_gross = float(fsig.get("ev_gross") or (exp_net + fsig_cost))

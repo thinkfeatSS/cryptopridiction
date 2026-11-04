@@ -201,7 +201,7 @@ export default function V16SignalCard({ signal, onSelect, isSelected = false }: 
           <div className="flex flex-col">
             <span className="text-[9px] text-slate-400 uppercase tracking-wider font-semibold">Risk:Reward</span>
             <span className="text-xs sm:text-sm font-black text-amber-300 mt-0.5">
-              1:{imm.risk_reward ? imm.risk_reward.toFixed(2) : "2.50"}
+              1:{imm.risk_reward ? imm.risk_reward.toFixed(2) : "2.00"}
             </span>
           </div>
         </div>

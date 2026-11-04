@@ -403,26 +403,39 @@ class SignalGenerationSystem:
             cand_sl = format_dynamic_precision(order_block_setup["sl_price"])
 
             # Guarantee strict price invariants against exec_entry_price
+            sl_dist = max(1e-9, abs(exec_entry_price - cand_sl))
+            min_tp1_dist = max(2.0 * sl_dist, active_atr * 2.0)
+            min_tp2_dist = max(3.0 * sl_dist, active_atr * 3.0)
+            min_tp3_dist = max(4.5 * sl_dist, active_atr * 4.5)
             if direction == "LONG":
                 if cand_sl >= exec_entry_price:
                     cand_sl = format_dynamic_precision(exec_entry_price - (active_atr * 1.2))
-                if cand_tp1 <= exec_entry_price:
-                    cand_tp1 = format_dynamic_precision(exec_entry_price + (active_atr * 1.5))
-                if cand_tp2 <= cand_tp1:
-                    cand_tp2 = format_dynamic_precision(cand_tp1 + (active_atr * 1.0))
-                if cand_tp3 <= cand_tp2:
-                    cand_tp3 = format_dynamic_precision(cand_tp2 + (active_atr * 1.5))
+                    sl_dist = max(1e-9, abs(exec_entry_price - cand_sl))
+                    min_tp1_dist = max(2.0 * sl_dist, active_atr * 2.0)
+                    min_tp2_dist = max(3.0 * sl_dist, active_atr * 3.0)
+                    min_tp3_dist = max(4.5 * sl_dist, active_atr * 4.5)
+                if (cand_tp1 - exec_entry_price) < min_tp1_dist:
+                    cand_tp1 = format_dynamic_precision(exec_entry_price + min_tp1_dist)
+                if cand_tp2 <= cand_tp1 or (cand_tp2 - exec_entry_price) < min_tp2_dist:
+                    cand_tp2 = format_dynamic_precision(max(cand_tp1 + (active_atr * 0.8), exec_entry_price + min_tp2_dist))
+                if cand_tp3 <= cand_tp2 or (cand_tp3 - exec_entry_price) < min_tp3_dist:
+                    cand_tp3 = format_dynamic_precision(max(cand_tp2 + (active_atr * 1.2), exec_entry_price + min_tp3_dist))
             else: # SHORT
                 if cand_sl <= exec_entry_price:
                     cand_sl = format_dynamic_precision(exec_entry_price + (active_atr * 1.2))
-                if cand_tp1 >= exec_entry_price:
-                    cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (active_atr * 1.5)))
-                if cand_tp2 >= cand_tp1:
-                    cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, cand_tp1 - (active_atr * 1.0)))
-                if cand_tp3 >= cand_tp2:
-                    cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, cand_tp2 - (active_atr * 1.5)))
+                    sl_dist = max(1e-9, abs(exec_entry_price - cand_sl))
+                    min_tp1_dist = max(2.0 * sl_dist, active_atr * 2.0)
+                    min_tp2_dist = max(3.0 * sl_dist, active_atr * 3.0)
+                    min_tp3_dist = max(4.5 * sl_dist, active_atr * 4.5)
+                if (exec_entry_price - cand_tp1) < min_tp1_dist:
+                    cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - min_tp1_dist))
+                if cand_tp2 >= cand_tp1 or (exec_entry_price - cand_tp2) < min_tp2_dist:
+                    cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, min(cand_tp1 - (active_atr * 0.8), exec_entry_price - min_tp2_dist)))
+                if cand_tp3 >= cand_tp2 or (exec_entry_price - cand_tp3) < min_tp3_dist:
+                    cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, min(cand_tp2 - (active_atr * 1.2), exec_entry_price - min_tp3_dist)))
 
-            actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
+            # Primary R:R is anchored strictly to TP1 (Reward >= 2.0x Risk)
+            actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
         elif direction == "LONG":
             # Phase 4C: Volatility-adjusted dynamic target scaling (BBW scale factor)
@@ -439,13 +452,13 @@ class SignalGenerationSystem:
 
             is_range_regime = any(k in str(active_market_regime).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP", "SIDEWAYS"])
             if is_range_regime:
-                tp1_mult = 1.30 * (0.85 if bbw_val <= 1.50 else 1.00)
-                tp2_mult = 2.40 * (0.85 if bbw_val <= 1.50 else 1.00)
-                tp3_mult = 3.80 * (0.85 if bbw_val <= 1.50 else 1.00)
+                tp1_mult = 2.00 * (0.90 if bbw_val <= 1.50 else 1.00)
+                tp2_mult = 3.00 * (0.90 if bbw_val <= 1.50 else 1.00)
+                tp3_mult = 4.50 * (0.90 if bbw_val <= 1.50 else 1.00)
             elif bbw_val <= 1.50:
-                tp1_mult = 1.70
-                tp2_mult = 2.975
-                tp3_mult = 4.675
+                tp1_mult = 2.00
+                tp2_mult = 3.00
+                tp3_mult = 4.50
             elif bbw_val >= 4.50 and active_market_regime in ["TREND", "BULLISH", "BEARISH"]:
                 tp1_mult = 2.50
                 tp2_mult = 4.375
@@ -455,13 +468,19 @@ class SignalGenerationSystem:
                 tp2_mult = 3.50
                 tp3_mult = 5.50
 
-            # Phase 2: Dynamic 15M Noise Floor Hardening (Prevent premature microstructure wick-outs)
+            # Phase 1 & 2: Dynamic Noise Floor & Symmetrical 1:2.0+ Primary Target Geometry
             min_sl_dist = max(exec_entry_price * 0.010, active_atr * 1.25) if horizon_label == "15M" else (active_atr * 1.20)
             cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - min_sl_dist))
-            cand_tp1 = format_dynamic_precision(exec_entry_price + max(active_atr * tp1_mult, 1.30 * min_sl_dist if horizon_label == "15M" else 0.0))
-            cand_tp2 = format_dynamic_precision(exec_entry_price + max(active_atr * tp2_mult, 2.20 * min_sl_dist if horizon_label == "15M" else 0.0))
-            cand_tp3 = format_dynamic_precision(exec_entry_price + max(active_atr * tp3_mult, 3.40 * min_sl_dist if horizon_label == "15M" else 0.0))
-            actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
+            
+            # Anchor primary TP1 to at least 2.0x SL distance (True 1:2.0+ R:R)
+            target_tp1_dist = max(min_sl_dist * 2.0, active_atr * max(tp1_mult, 2.0))
+            target_tp2_dist = max(min_sl_dist * 3.0, active_atr * tp2_mult, target_tp1_dist + active_atr * 0.8)
+            target_tp3_dist = max(min_sl_dist * 4.5, active_atr * tp3_mult, target_tp2_dist + active_atr * 1.2)
+            
+            cand_tp1 = format_dynamic_precision(exec_entry_price + target_tp1_dist)
+            cand_tp2 = format_dynamic_precision(exec_entry_price + target_tp2_dist)
+            cand_tp3 = format_dynamic_precision(exec_entry_price + target_tp3_dist)
+            actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
         else: # SHORT
             bbw_val = 3.0
@@ -477,13 +496,13 @@ class SignalGenerationSystem:
 
             is_range_regime = any(k in str(active_market_regime).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP", "SIDEWAYS"])
             if is_range_regime:
-                tp1_mult = 1.30 * (0.85 if bbw_val <= 1.50 else 1.00)
-                tp2_mult = 2.40 * (0.85 if bbw_val <= 1.50 else 1.00)
-                tp3_mult = 3.80 * (0.85 if bbw_val <= 1.50 else 1.00)
+                tp1_mult = 2.00 * (0.90 if bbw_val <= 1.50 else 1.00)
+                tp2_mult = 3.00 * (0.90 if bbw_val <= 1.50 else 1.00)
+                tp3_mult = 4.50 * (0.90 if bbw_val <= 1.50 else 1.00)
             elif bbw_val <= 1.50:
-                tp1_mult = 1.70
-                tp2_mult = 2.975
-                tp3_mult = 4.675
+                tp1_mult = 2.00
+                tp2_mult = 3.00
+                tp3_mult = 4.50
             elif bbw_val >= 4.50 and active_market_regime in ["TREND", "BULLISH", "BEARISH"]:
                 tp1_mult = 2.50
                 tp2_mult = 4.375
@@ -493,13 +512,19 @@ class SignalGenerationSystem:
                 tp2_mult = 3.50
                 tp3_mult = 5.50
 
-            # Phase 2: Dynamic 15M Noise Floor Hardening for SHORT
+            # Phase 1 & 2: Dynamic Noise Floor & Symmetrical 1:2.0+ Primary Target Geometry for SHORT
             min_sl_dist = max(exec_entry_price * 0.010, active_atr * 1.25) if horizon_label == "15M" else (active_atr * 1.20)
             cand_sl = format_dynamic_precision(exec_entry_price + min_sl_dist)
-            cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - max(active_atr * tp1_mult, 1.30 * min_sl_dist if horizon_label == "15M" else 0.0)))
-            cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - max(active_atr * tp2_mult, 2.20 * min_sl_dist if horizon_label == "15M" else 0.0)))
-            cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - max(active_atr * tp3_mult, 3.40 * min_sl_dist if horizon_label == "15M" else 0.0)))
-            actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
+            
+            # Anchor primary TP1 to at least 2.0x SL distance (True 1:2.0+ R:R)
+            target_tp1_dist = max(min_sl_dist * 2.0, active_atr * max(tp1_mult, 2.0))
+            target_tp2_dist = max(min_sl_dist * 3.0, active_atr * tp2_mult, target_tp1_dist + active_atr * 0.8)
+            target_tp3_dist = max(min_sl_dist * 4.5, active_atr * tp3_mult, target_tp2_dist + active_atr * 1.2)
+            
+            cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp1_dist))
+            cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp2_dist))
+            cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp3_dist))
+            actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
 
         if arch_type == InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value:
@@ -512,7 +537,7 @@ class SignalGenerationSystem:
                     cand_tp3 = min(cand_tp3, format_dynamic_precision(htf_high))
                     cand_tp2 = min(cand_tp2, format_dynamic_precision(exec_entry_price + (avail_span * 0.85)))
                     cand_tp1 = min(cand_tp1, format_dynamic_precision(exec_entry_price + (avail_span * 0.60)))
-                    actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
+                    actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
                     cand_rr = f"1:{actual_rr:.1f}"
             elif direction == "SHORT" and archetype_info.get("htf_range_low"):
                 htf_low = float(archetype_info["htf_range_low"])
@@ -521,7 +546,7 @@ class SignalGenerationSystem:
                     cand_tp3 = max(cand_tp3, format_dynamic_precision(htf_low))
                     cand_tp2 = max(cand_tp2, format_dynamic_precision(exec_entry_price - (avail_span * 0.85)))
                     cand_tp1 = max(cand_tp1, format_dynamic_precision(exec_entry_price - (avail_span * 0.60)))
-                    actual_rr = round(abs(cand_tp2 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
+                    actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
                     cand_rr = f"1:{actual_rr:.1f}"
 
         # Evaluate setup against this coin's dedicated Meta-Labeler

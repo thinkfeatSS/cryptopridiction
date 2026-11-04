@@ -600,12 +600,12 @@ class InstitutionalOrderBlockEngine:
 
         # Dynamic target multipliers: in range/consolidation, scale targets so TP1 is quickly reachable
         is_range_regime = bool(market_regime and any(k in str(market_regime).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP", "SIDEWAYS"]))
-        ob_tp1_mult = 1.65 if is_range_regime else 2.80
-        ob_tp2_mult = 2.80 if is_range_regime else 4.50
+        ob_tp1_mult = 2.00 if is_range_regime else 2.80
+        ob_tp2_mult = 3.00 if is_range_regime else 4.50
         ob_tp3_mult = 4.50 if is_range_regime else 7.00
 
-        bb_tp1_mult = 1.60 if is_range_regime else 2.20
-        bb_tp2_mult = 2.60 if is_range_regime else 3.50
+        bb_tp1_mult = 2.00 if is_range_regime else 2.50
+        bb_tp2_mult = 3.00 if is_range_regime else 3.50
         bb_tp3_mult = 4.00 if is_range_regime else 5.50
 
         live_p = current_price or float(df['close'].iloc[-1])

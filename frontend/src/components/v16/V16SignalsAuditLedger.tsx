@@ -743,7 +743,7 @@ export default function V16SignalsAuditLedger() {
                       {/* Risk Reward */}
                       <td className="py-3 px-3 text-right">
                         <span className="font-bold text-amber-300">
-                          1:{imm.risk_reward ? imm.risk_reward.toFixed(2) : "2.50"}
+                          1:{imm.risk_reward ? imm.risk_reward.toFixed(2) : "2.00"}
                         </span>
                       </td>
 

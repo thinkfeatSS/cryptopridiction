@@ -896,7 +896,8 @@ class SignalService:
                         evt = "TRAIL_SL_HIT"
                     elif s.status == "TP1_LOCKED_BREAKEVEN":
                         ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
-                        blended_ret = 0.50 * ret_tp1
+                        ret_runner = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                        blended_ret = (0.70 * ret_tp1) + (0.30 * max(0.0, ret_runner))
                         s.status = "WON_TP1_BE"
                         s.exit_price = round(entry_p, 6)
                         s.realized_return_pct = round(blended_ret, 2)
@@ -946,7 +947,8 @@ class SignalService:
                             ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
                             s.status = "WON_TP1_BE"
                             s.exit_price = round(entry_p, 6)
-                            s.realized_return_pct = round(0.5 * ret_tp1, 2)
+                            ret_runner = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                            s.realized_return_pct = round((0.70 * ret_tp1) + (0.30 * max(0.0, ret_runner)), 2)
                             s.outcome_label = "🟢 WON (TP1 + BE RUNNER)"
                         else:
                             s.status = "LOST_SL"

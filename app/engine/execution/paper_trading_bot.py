@@ -996,8 +996,11 @@ class PaperTradingBot:
 
                     if "original_tp1_price" not in pos:
                         pos["original_tp1_price"] = tp1_p
+                    if "original_sl_price" not in pos:
+                        pos["original_sl_price"] = float(pos.get("sl_price", 0.0))
 
                     orig_tp1 = float(pos["original_tp1_price"])
+                    orig_sl = float(pos["original_sl_price"])
                     # Compact towards entry, retaining at least 35% of original profit target
                     cand_compacted = entry_p + (orig_tp1 - entry_p) * (0.35 + 0.65 * decay_lambda)
 
@@ -1010,6 +1013,10 @@ class PaperTradingBot:
                             pos["is_tp_compacted"] = True
                             tp1_p = cand_p
                             is_tp1 = curr_p >= tp1_p
+                            # Symmetrically compact SL towards entry so downside risk shrinks proportionally
+                            if not pos.get("is_breakeven_locked") and orig_sl < entry_p:
+                                sl_compacted = entry_p - (entry_p - orig_sl) * (0.35 + 0.65 * decay_lambda)
+                                pos["sl_price"] = format_dynamic_precision(max(orig_sl, sl_compacted))
                     elif direction == "SHORT" and cand_compacted < (entry_p - min_friction_buffer):
                         cand_p = format_dynamic_precision(cand_compacted)
                         if cand_p > tp1_p:
@@ -1017,6 +1024,10 @@ class PaperTradingBot:
                             pos["is_tp_compacted"] = True
                             tp1_p = cand_p
                             is_tp1 = curr_p <= tp1_p
+                            # Symmetrically compact SL towards entry for SHORT
+                            if not pos.get("is_breakeven_locked") and orig_sl > entry_p:
+                                sl_compacted = entry_p + (orig_sl - entry_p) * (0.35 + 0.65 * decay_lambda)
+                                pos["sl_price"] = format_dynamic_precision(min(orig_sl, sl_compacted))
 
                 # Tier-0 Breakeven Ratchet: Tied to TP1 proximity (65% of TP1 range touched OR peak_gain reaches tier0 threshold)
                 tp1_p_pos = float(pos.get("tp1_price", 0.0))
@@ -1036,13 +1047,13 @@ class PaperTradingBot:
                     except Exception:
                         pass
 
-                # Multi-Tranche Scale Check 1: TP1 Hit (Realize 50%, lock Breakeven, hold 50% for TP2)
+                # Multi-Tranche Scale Check 1: TP1 Hit (Realize 70%, lock Profit Buffer, hold 30% for TP2)
                 if policy == "MULTI_TRANCHE_SCALE" and has_multi_tp and is_tp1 and not pos.get("tp1_hit"):
                     pos["tp1_hit"] = True
-                    t1_notional = initial_size_usd * 0.50
+                    t1_notional = initial_size_usd * 0.70
                     t1_gain = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
                     t1_gross = (t1_gain / 100.0) * t1_notional
-                    t1_fee = (float(pos.get("entry_fee_usd", initial_size_usd * self.taker_fee_rate)) * 0.50) + (t1_notional * (1.0 + t1_gain / 100.0) * self.taker_fee_rate)
+                    t1_fee = (float(pos.get("entry_fee_usd", initial_size_usd * self.taker_fee_rate)) * 0.70) + (t1_notional * (1.0 + t1_gain / 100.0) * self.taker_fee_rate)
                     t1_spread = (float(pos.get("spread_bps", 4.0)) / 20000.0) * t1_notional if not pos.get("optimal_entry_limit") else 0.0
                     dyn_entry_slip_rate, dyn_exit_slip_rate = _calc_tick_slip_rates(pos)
                     t1_slip = dyn_entry_slip_rate * t1_notional if not pos.get("optimal_entry_limit") else 0.0
@@ -1052,13 +1063,15 @@ class PaperTradingBot:
                     pos["total_realized_partial_usd"] = float(pos.get("total_realized_partial_usd", 0.0)) + t1_net
                     pos["total_gross_partial_usd"] = float(pos.get("total_gross_partial_usd", 0.0)) + t1_gross
                     pos["total_frictions_partial_usd"] = float(pos.get("total_frictions_partial_usd", 0.0)) + t1_friction
-                    pos["remaining_position_size_usd"] = initial_size_usd * 0.50
+                    pos["remaining_position_size_usd"] = initial_size_usd * 0.30
                     pos["is_breakeven_locked"] = True
-                    pos["sl_price"] = entry_p * (1.0005 if direction == "LONG" else 0.9995)
+                    # Lock in +0.5R profit buffer (covering all trading fees and guaranteeing net profit on runner stop)
+                    lock_buffer = max(0.0035 * entry_p, abs(tp1_p - entry_p) * 0.25)
+                    pos["sl_price"] = format_dynamic_precision(entry_p + lock_buffer if direction == "LONG" else entry_p - lock_buffer)
                     pos["status"] = "OPEN_TP1_LOCKED_BREAKEVEN"
 
                     try:
-                        print(f"[PAPER BOT 🎯 TP1 SCALED] {sym} TP1 Hit at ${tp1_p:,.4f}! 50% locked (${t1_net:+,.2f}). SL ratcheted to Breakeven (${pos['sl_price']:,.4f}). Holding 50% for TP2.", flush=True)
+                        print(f"[PAPER BOT 🎯 TP1 SCALED] {sym} TP1 Hit at ${tp1_p:,.4f}! 70% locked (${t1_net:+,.2f}). SL ratcheted to Profit Buffer (${pos['sl_price']:,.4f}). Holding 30% for TP2.", flush=True)
                     except Exception:
                         pass
 
@@ -1075,13 +1088,13 @@ class PaperTradingBot:
                     remaining_positions.append(pos)
                     continue
 
-                # Multi-Tranche Scale Check 2: TP2 Hit (Realize 30%, ratchet SL to TP1, hold 20% for TP3)
+                # Multi-Tranche Scale Check 2: TP2 Hit (Realize 20%, ratchet SL to TP1, hold 10% for TP3)
                 if policy == "MULTI_TRANCHE_SCALE" and has_tp3 and is_tp2 and pos.get("tp1_hit") and not pos.get("tp2_hit"):
                     pos["tp2_hit"] = True
-                    t2_notional = initial_size_usd * 0.30
+                    t2_notional = initial_size_usd * 0.20
                     t2_gain = ((tp2_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp2_p) / entry_p) * 100.0
                     t2_gross = (t2_gain / 100.0) * t2_notional
-                    t2_fee = (float(pos.get("entry_fee_usd", initial_size_usd * self.taker_fee_rate)) * 0.30) + (t2_notional * (1.0 + t2_gain / 100.0) * self.taker_fee_rate)
+                    t2_fee = (float(pos.get("entry_fee_usd", initial_size_usd * self.taker_fee_rate)) * 0.20) + (t2_notional * (1.0 + t2_gain / 100.0) * self.taker_fee_rate)
                     t2_spread = (float(pos.get("spread_bps", 4.0)) / 20000.0) * t2_notional if not pos.get("optimal_entry_limit") else 0.0
                     dyn_entry_slip_rate, dyn_exit_slip_rate = _calc_tick_slip_rates(pos)
                     t2_slip = dyn_entry_slip_rate * t2_notional if not pos.get("optimal_entry_limit") else 0.0
@@ -1091,12 +1104,12 @@ class PaperTradingBot:
                     pos["total_realized_partial_usd"] = float(pos.get("total_realized_partial_usd", 0.0)) + t2_net
                     pos["total_gross_partial_usd"] = float(pos.get("total_gross_partial_usd", 0.0)) + t2_gross
                     pos["total_frictions_partial_usd"] = float(pos.get("total_frictions_partial_usd", 0.0)) + t2_friction
-                    pos["remaining_position_size_usd"] = initial_size_usd * 0.20
+                    pos["remaining_position_size_usd"] = initial_size_usd * 0.10
                     pos["sl_price"] = tp1_p
                     pos["status"] = "OPEN_TP2_LOCKED_TRAIL"
 
                     try:
-                        print(f"[PAPER BOT 🎯 TP2 SCALED] {sym} TP2 Hit at ${tp2_p:,.4f}! 30% locked (${t2_net:+,.2f}). SL ratcheted to TP1 (${tp1_p:,.4f}). Holding 20% runner for TP3.", flush=True)
+                        print(f"[PAPER BOT 🎯 TP2 SCALED] {sym} TP2 Hit at ${tp2_p:,.4f}! 20% locked (${t2_net:+,.2f}). SL ratcheted to TP1 (${tp1_p:,.4f}). Holding 10% runner for TP3.", flush=True)
                     except Exception:
                         pass
 
