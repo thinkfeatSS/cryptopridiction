@@ -614,9 +614,9 @@ class SignalGenerationSystem:
             # 1. Hyperliquid Whale Wall alignment across ALL coins
             hl_radar = institutional_intelligence_service.get_hyperliquid_whale_radar(clean_sym)
             hl_bias = hl_radar.get("whale_bias", "")
-            if direction == "LONG" and hl_bias == "BULLISH_WHALE_BID_ABSORPTION":
+            if direction == "LONG" and hl_bias in ["BULLISH_WHALE_BID_ABSORPTION", "BULLISH_AGGREGATE_BID_PRESSURE"]:
                 inst_conviction_bonus += 5.0
-            elif direction == "SHORT" and hl_bias == "BEARISH_WHALE_ASK_RESISTANCE":
+            elif direction == "SHORT" and hl_bias in ["BEARISH_WHALE_ASK_RESISTANCE", "BEARISH_AGGREGATE_ASK_PRESSURE"]:
                 inst_conviction_bonus += 5.0
 
             # 2. Spot ETF institutional momentum alignment

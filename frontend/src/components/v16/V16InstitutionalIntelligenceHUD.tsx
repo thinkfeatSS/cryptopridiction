@@ -427,13 +427,13 @@ export default function V16InstitutionalIntelligenceHUD({
                       {whales?.symbol || "BTC"} Whale Bias
                     </span>
                     <span className={`text-[10px] px-2 py-0.5 rounded font-mono font-bold ${
-                      whales?.whale_bias === "BULLISH_WHALE_BID_ABSORPTION"
+                      whales?.whale_bias?.includes("BULLISH")
                         ? "bg-emerald-950 border border-emerald-600 text-emerald-300"
-                        : whales?.whale_bias === "BEARISH_WHALE_ASK_RESISTANCE"
+                        : whales?.whale_bias?.includes("BEARISH")
                         ? "bg-rose-950 border border-rose-600 text-rose-300"
                         : "bg-slate-800 text-slate-300"
                     }`}>
-                      {whales?.whale_bias || "BALANCED"}
+                      {whales?.whale_bias?.replace(/_/g, " ") || "BALANCED"}
                     </span>
                   </div>
 
@@ -463,10 +463,24 @@ export default function V16InstitutionalIntelligenceHUD({
                   </div>
 
                   <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800 text-[11px] font-mono text-slate-300 space-y-1">
-                    <div className="font-bold text-indigo-400">Hyperliquid L2 Book Scan:</div>
-                    <p className="text-slate-400">
-                      Tiered limit order wall filters (Tier 1: &ge;$200K, Tier 2: &ge;$60K, Altcoins: &ge;$15K). Smart money skew dynamically impacts signal conviction.
-                    </p>
+                    <div className="flex justify-between items-center font-bold text-indigo-400">
+                      <span>Order Book Depth Engine:</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-950 border border-indigo-700 text-indigo-300">
+                        {whales?.data_source?.replace("_DEPTH_FALLBACK", " (Binance)") || "HYPERLIQUID"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px] text-slate-400 pt-0.5">
+                      <span>Adaptive Wall Threshold:</span>
+                      <span className="text-cyan-300 font-bold">
+                        &ge;${((whales?.dynamic_threshold_usd ?? 15000) / 1e3).toFixed(1)}K
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-[11px] text-slate-400">
+                      <span>Order Flow Imbalance (OFI):</span>
+                      <span className={`font-bold ${(whales?.order_flow_imbalance_pct ?? 0) > 0 ? "text-emerald-400" : (whales?.order_flow_imbalance_pct ?? 0) < 0 ? "text-rose-400" : "text-slate-400"}`}>
+                        {(whales?.order_flow_imbalance_pct ?? 0) > 0 ? `+${whales?.order_flow_imbalance_pct}%` : `${whales?.order_flow_imbalance_pct ?? 0}%`}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
@@ -476,7 +490,7 @@ export default function V16InstitutionalIntelligenceHUD({
                   <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-3.5 space-y-2">
                     <div className="flex items-center justify-between text-xs font-mono">
                       <span className="text-emerald-400 font-bold flex items-center gap-1.5">
-                        <TrendingUp className="w-3.5 h-3.5" /> Whale Bids (Resting Walls)
+                        <TrendingUp className="w-3.5 h-3.5" /> Whale Bids (&ge;${((whales?.dynamic_threshold_usd ?? 15000) / 1e3).toFixed(1)}K)
                       </span>
                       <span className="text-slate-400">
                         Total: ${((whales?.total_whale_bid_notional_usd ?? 0) / 1e6).toFixed(2)}M
@@ -501,7 +515,7 @@ export default function V16InstitutionalIntelligenceHUD({
                   <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-3.5 space-y-2">
                     <div className="flex items-center justify-between text-xs font-mono">
                       <span className="text-rose-400 font-bold flex items-center gap-1.5">
-                        <TrendingDown className="w-3.5 h-3.5" /> Whale Asks (Resting Walls)
+                        <TrendingDown className="w-3.5 h-3.5" /> Whale Asks (&ge;${((whales?.dynamic_threshold_usd ?? 15000) / 1e3).toFixed(1)}K)
                       </span>
                       <span className="text-slate-400">
                         Total: ${((whales?.total_whale_ask_notional_usd ?? 0) / 1e6).toFixed(2)}M

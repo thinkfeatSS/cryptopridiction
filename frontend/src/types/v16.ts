@@ -248,8 +248,12 @@ export interface HyperliquidWhaleRadar {
   whale_ask_walls: WhaleWall[];
   total_whale_bid_notional_usd: number;
   total_whale_ask_notional_usd: number;
-  whale_bias: "BULLISH_WHALE_BID_ABSORPTION" | "BEARISH_WHALE_ASK_RESISTANCE" | "BALANCED_ORDER_FLOW" | string;
+  whale_bias: "BULLISH_WHALE_BID_ABSORPTION" | "BEARISH_WHALE_ASK_RESISTANCE" | "BULLISH_AGGREGATE_BID_PRESSURE" | "BEARISH_AGGREGATE_ASK_PRESSURE" | "BALANCED_ORDER_FLOW" | string;
   confluence_boost_pct: number;
+  data_source?: string;
+  dynamic_threshold_usd?: number;
+  order_flow_imbalance_pct?: number;
+  total_visible_depth_usd?: number;
   updated_at_utc: string;
 }
 
