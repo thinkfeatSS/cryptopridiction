@@ -793,10 +793,17 @@ class SignalGenerationSystem:
         # News & Event Gating (Black Swan Sentinel & NWS-01 Macro Blackout)
         is_news_vetoed = False
         news_veto_reason = ""
+        acute_news_keywords = ["hack", "exploit", "sec lawsuit", "insolvency", "freeze withdrawal", "emergency upgrade", "fbi", "doj indictment", "halt trading", "depeg"]
+        has_breaking_shock = any(kw in news_headline.lower() for kw in acute_news_keywords) if news_headline else False
+
         if is_macro_blackout:
             # Blackout halts both LONG and SHORT setups during high-impact US macro release
             is_news_vetoed = True
             news_veto_reason = f"🚨 {macro_blackout_reason}"
+        elif has_breaking_shock:
+            # Acute breaking news shock halts both LONG and SHORT entries
+            is_news_vetoed = True
+            news_veto_reason = f"🚨 Acute Breaking News Shock Alert: {news_headline[:60]}"
         elif direction == "LONG":
             if has_severe_negative_news or news_score <= -0.40:
                 is_news_vetoed = True
@@ -1000,9 +1007,13 @@ class SignalGenerationSystem:
             sl_price = cand_sl
             rr_ratio = cand_rr
         elif not is_candle_confirmed:
-            status = "HOLD_AWAITING_CANDLE_TRIGGER_CONFIRMATION"
+            if candle_metrics and candle_metrics.get("is_news_volatility_shock"):
+                status = "HOLD_FLASH_NEWS_VOLATILITY_SHOCK"
+                grade = f"Grade C (NEWS VOLATILITY SHOCK: {candle_trigger_reason})"
+            else:
+                status = "HOLD_AWAITING_CANDLE_TRIGGER_CONFIRMATION"
+                grade = f"Grade C (AWAITING CANDLE TRIGGER: {candle_trigger_reason})"
             trade_active = False
-            grade = f"Grade C (AWAITING CANDLE TRIGGER: {candle_trigger_reason})"
             conviction = float(meta_eval.get("win_probability_pct", 65.0))
             tp1_price = cand_tp1
             tp2_price = cand_tp2

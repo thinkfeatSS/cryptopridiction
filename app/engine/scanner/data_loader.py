@@ -1,4 +1,5 @@
 import os
+import math
 import time
 import json
 import threading
@@ -238,6 +239,54 @@ class MultiHorizonDataLoader:
         now = time.time()
         with self._cache_lock:
             return all(now < self._exchange_geo_cooldowns.get(v, 0.0) for v in venues)
+
+    @staticmethod
+    def synthesize_bvc_taker_volume(
+        open_p: float,
+        high_p: float,
+        low_p: float,
+        close_p: float,
+        volume: float,
+        prev_close: Optional[float] = None
+    ) -> float:
+        """
+        Institutional Bulk Volume Classification (BVC) & Microstructure Order Flow Synthesizer
+        (Easley, Lopez de Prado, O'Hara, 2012; de Prado, AFML 2018).
+        Reconstructs high-fidelity aggressive taker buy volume for secondary fallback exchanges
+        and synthetic candle bars that lack native aggressor tick flags.
+        
+        Mathematical Formulation:
+        1. Normalized Price Displacement: z = (Close - Open) / max(High - Low, 1e-9)
+        2. Cumulative Probability of Buy Pressure: P_buy = 0.5 * (1.0 + erf(z / sqrt(2)))
+        3. Wick Rejection Asymmetry:
+           - Lower wick: buyers actively absorbing at lows
+           - Upper wick: sellers actively absorbing at highs
+           Tail Skew = 0.25 * (Lower_Wick - Upper_Wick) / Range
+        4. Inter-candle Momentum Confluence: (Close - PrevClose) / Range * 0.10
+        5. Composite Aggressor Ratio strictly bounded [0.05, 0.95].
+        """
+        if volume <= 0.0:
+            return 0.0
+
+        bar_range = max(1e-9, high_p - low_p)
+        body = close_p - open_p
+        z = body / bar_range
+
+        # Normal cumulative distribution approximation using erf
+        p_buy = 0.5 * (1.0 + math.erf(z / 1.4142135623730951))
+
+        # Wick absorption dynamics
+        upper_wick = max(0.0, high_p - max(open_p, close_p))
+        lower_wick = max(0.0, min(open_p, close_p) - low_p)
+        wick_skew = 0.25 * ((lower_wick - upper_wick) / bar_range)
+
+        # Inter-bar momentum confluence
+        mom_confluence = 0.0
+        if prev_close is not None and prev_close > 0:
+            mom_confluence = 0.10 * float(np.clip((close_p - prev_close) / bar_range, -1.0, 1.0))
+
+        aggressor_ratio = float(np.clip(p_buy + wick_skew + mom_confluence, 0.05, 0.95))
+        return round(float(volume * aggressor_ratio), 6)
 
     def _is_exchange_geo_blocked(self, exchange_name: str) -> bool:
         """Returns True if the upstream exchange is currently in a geo-restriction / cloud IP ban cooldown."""
@@ -582,16 +631,24 @@ class MultiHorizonDataLoader:
                         if raw_list and len(raw_list) >= (2 if tf in ["1w", "15d", "1M"] else 5):
                             raw_list = raw_list[::-1]  # Chronological order
                             records = []
+                            prev_c = None
                             for c in raw_list:
+                                o_p = float(c[1])
+                                h_p = float(c[2])
+                                l_p = float(c[3])
+                                c_p = float(c[4])
+                                v_p = float(c[5])
+                                tbv = self.synthesize_bvc_taker_volume(o_p, h_p, l_p, c_p, v_p, prev_close=prev_c)
                                 records.append({
                                     "timestamp": int(c[0]),
-                                    "open": float(c[1]),
-                                    "high": float(c[2]),
-                                    "low": float(c[3]),
-                                    "close": float(c[4]),
-                                    "volume": float(c[5]),
-                                    "taker_buy_vol": float(c[5]) * 0.5
+                                    "open": o_p,
+                                    "high": h_p,
+                                    "low": l_p,
+                                    "close": c_p,
+                                    "volume": v_p,
+                                    "taker_buy_vol": tbv
                                 })
+                                prev_c = c_p
                             df = pd.DataFrame(records)
                             df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
                             if tf == "15d":
@@ -650,16 +707,24 @@ class MultiHorizonDataLoader:
                         if raw_list and len(raw_list) >= (2 if tf in ["1w", "15d", "1M"] else 5):
                             raw_list = raw_list[::-1]
                             records = []
+                            prev_c = None
                             for c in raw_list:
+                                o_p = float(c[1])
+                                h_p = float(c[2])
+                                l_p = float(c[3])
+                                c_p = float(c[4])
+                                v_p = float(c[5])
+                                tbv = self.synthesize_bvc_taker_volume(o_p, h_p, l_p, c_p, v_p, prev_close=prev_c)
                                 records.append({
                                     "timestamp": int(c[0]),
-                                    "open": float(c[1]),
-                                    "high": float(c[2]),
-                                    "low": float(c[3]),
-                                    "close": float(c[4]),
-                                    "volume": float(c[5]),
-                                    "taker_buy_vol": float(c[5]) * 0.5
+                                    "open": o_p,
+                                    "high": h_p,
+                                    "low": l_p,
+                                    "close": c_p,
+                                    "volume": v_p,
+                                    "taker_buy_vol": tbv
                                 })
+                                prev_c = c_p
                             df = pd.DataFrame(records)
                             df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
                             if tf == "15d":
@@ -760,16 +825,24 @@ class MultiHorizonDataLoader:
                     return None
                 if raw_candles and isinstance(raw_candles, list) and len(raw_candles) >= (2 if tf in ["1w", "15d", "1M"] else 5):
                     records = []
+                    prev_c = None
                     for c in raw_candles:
+                        o_p = float(c[1])
+                        h_p = float(c[2])
+                        l_p = float(c[3])
+                        c_p = float(c[4])
+                        v_p = float(c[5])
+                        tbv = self.synthesize_bvc_taker_volume(o_p, h_p, l_p, c_p, v_p, prev_close=prev_c)
                         records.append({
                             "timestamp": int(c[0]),
-                            "open": float(c[1]),
-                            "high": float(c[2]),
-                            "low": float(c[3]),
-                            "close": float(c[4]),
-                            "volume": float(c[5]),
-                            "taker_buy_vol": float(c[5]) * 0.5
+                            "open": o_p,
+                            "high": h_p,
+                            "low": l_p,
+                            "close": c_p,
+                            "volume": v_p,
+                            "taker_buy_vol": tbv
                         })
+                        prev_c = c_p
                     df = pd.DataFrame(records)
                     df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
                     if tf == "15d":
@@ -813,16 +886,24 @@ class MultiHorizonDataLoader:
                     # Gate.io returns newest first: [ [t_sec, vol, close, high, low, open], ... ]
                     raw_candles = raw_candles[::-1]
                     records = []
+                    prev_c = None
                     for c in raw_candles:
+                        o_p = float(c[5])
+                        h_p = float(c[3])
+                        l_p = float(c[4])
+                        c_p = float(c[2])
+                        v_p = float(c[1])
+                        tbv = self.synthesize_bvc_taker_volume(o_p, h_p, l_p, c_p, v_p, prev_close=prev_c)
                         records.append({
                             "timestamp": int(c[0]) * 1000,
-                            "open": float(c[5]),
-                            "high": float(c[3]),
-                            "low": float(c[4]),
-                            "close": float(c[2]),
-                            "volume": float(c[1]),
-                            "taker_buy_vol": float(c[1]) * 0.5
+                            "open": o_p,
+                            "high": h_p,
+                            "low": l_p,
+                            "close": c_p,
+                            "volume": v_p,
+                            "taker_buy_vol": tbv
                         })
+                        prev_c = c_p
                     df = pd.DataFrame(records)
                     df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
                     if tf == "15d":
@@ -898,16 +979,24 @@ class MultiHorizonDataLoader:
                         # KuCoin returns newest first: [ [time_sec, open, close, high, low, volume, turnover], ... ]
                         raw_candles = raw_candles[::-1]
                         records = []
+                        prev_c = None
                         for c in raw_candles:
+                            o_p = float(c[1])
+                            h_p = float(c[3])
+                            l_p = float(c[4])
+                            c_p = float(c[2])
+                            v_p = float(c[5])
+                            tbv = self.synthesize_bvc_taker_volume(o_p, h_p, l_p, c_p, v_p, prev_close=prev_c)
                             records.append({
                                 "timestamp": int(c[0]) * 1000,
-                                "open": float(c[1]),
-                                "high": float(c[3]),
-                                "low": float(c[4]),
-                                "close": float(c[2]),
-                                "volume": float(c[5]),
-                                "taker_buy_vol": float(c[5]) * 0.5
+                                "open": o_p,
+                                "high": h_p,
+                                "low": l_p,
+                                "close": c_p,
+                                "volume": v_p,
+                                "taker_buy_vol": tbv
                             })
+                            prev_c = c_p
                         df = pd.DataFrame(records)
                         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
                         if tf == "15d":
@@ -1499,16 +1588,27 @@ class MultiHorizonDataLoader:
                             continue
 
                         records = []
+                        prev_c = None
                         for c in raw_candles:
+                            o_p = float(c[1])
+                            h_p = float(c[2])
+                            l_p = float(c[3])
+                            c_p = float(c[4])
+                            v_p = float(c[5])
+                            if len(c) > 9 and float(c[9]) > 0:
+                                tbv = float(c[9])
+                            else:
+                                tbv = self.synthesize_bvc_taker_volume(o_p, h_p, l_p, c_p, v_p, prev_close=prev_c)
                             records.append({
                                 "timestamp": int(c[0]),
-                                "open": float(c[1]),
-                                "high": float(c[2]),
-                                "low": float(c[3]),
-                                "close": float(c[4]),
-                                "volume": float(c[5]),
-                                "taker_buy_vol": float(c[9]) if len(c) > 9 else float(c[5]) * 0.5
+                                "open": o_p,
+                                "high": h_p,
+                                "low": l_p,
+                                "close": c_p,
+                                "volume": v_p,
+                                "taker_buy_vol": tbv
                             })
+                            prev_c = c_p
 
                         df = pd.DataFrame(records)
                         if df.empty or len(df) < (2 if tf in ["1w", "15d", "1M"] else 5):
@@ -1634,6 +1734,16 @@ class MultiHorizonDataLoader:
             chunk = df.iloc[i:min(i + chunk_size, n)]
             if len(chunk) < 1:
                 continue
+            if "taker_buy_vol" in chunk.columns:
+                tb_sum = float(chunk["taker_buy_vol"].sum())
+            else:
+                tb_sum = cls.synthesize_bvc_taker_volume(
+                    float(chunk["open"].iloc[0]),
+                    float(chunk["high"].max()),
+                    float(chunk["low"].min()),
+                    float(chunk["close"].iloc[-1]),
+                    float(chunk["volume"].sum())
+                )
             resampled_rows.append({
                 "timestamp": int(chunk["timestamp"].iloc[0]),
                 "datetime": chunk["datetime"].iloc[0] if "datetime" in chunk.columns else pd.to_datetime(int(chunk["timestamp"].iloc[0]), unit="ms", utc=True),
@@ -1642,7 +1752,7 @@ class MultiHorizonDataLoader:
                 "low": float(chunk["low"].min()),
                 "close": float(chunk["close"].iloc[-1]),
                 "volume": float(chunk["volume"].sum()),
-                "taker_buy_vol": float(chunk.get("taker_buy_vol", chunk["volume"] * 0.5).sum())
+                "taker_buy_vol": tb_sum
             })
 
         if not resampled_rows:

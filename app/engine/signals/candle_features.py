@@ -92,11 +92,28 @@ class CandleDynamicsFeatureExtractor:
         feats[f"{pfx}obv_slope_5"] = (pd.Series(obv, index=data.index).diff(5) / (v.rolling(5).sum() + 1e-10)).clip(-2.0, 2.0)
 
         # Taker Buy Volume Ratio & Cumulative Volume Delta (CVD) Order Flow Dynamics
-        if "taker_buy_vol" in data.columns:
+        has_tb = "taker_buy_vol" in data.columns and not data["taker_buy_vol"].isna().all() and (data["taker_buy_vol"] > 0).any()
+        if has_tb:
             tb_vol = pd.Series(data["taker_buy_vol"], index=data.index, dtype=float).fillna(v * 0.5)
         else:
-            # High-fidelity continuous neutral proxy based on candle wick and close dynamics
-            tb_vol = v * (0.5 + 0.5 * ((c - l) / bar_range - 0.5).clip(-0.5, 0.5))
+            # High-fidelity continuous Bulk Volume Classification (BVC) proxy based on de Prado AFML formulation
+            # z = (Close - Open) / Range; P_buy = 0.5 * (1 + erf(z / sqrt(2)))
+            # Tail skew = 0.25 * (LowerWick - UpperWick) / Range
+            # Inter-bar momentum = 0.10 * (Close - PrevClose) / Range
+            z = (c - o) / bar_range
+            try:
+                import scipy.special
+                p_buy = 0.5 * (1.0 + scipy.special.erf(z / 1.4142135623730951))
+            except Exception:
+                p_buy = 0.5 * (1.0 + np.tanh(z * 0.7978845608))
+
+            upper_w = (h - np.maximum(c, o)) / bar_range
+            lower_w = (np.minimum(c, o) - l) / bar_range
+            wick_skew = 0.25 * (lower_w - upper_w)
+            prev_c = c.shift(1).fillna(c)
+            mom = 0.10 * ((c - prev_c) / bar_range).clip(-1.0, 1.0)
+            bvc_ratio = pd.Series(p_buy + wick_skew + mom, index=data.index).clip(0.05, 0.95)
+            tb_vol = v * bvc_ratio
 
         tb_vol = tb_vol.clip(lower=0.0)
         feats[f"{pfx}taker_buy_ratio"] = (tb_vol / (v + 1e-10)).clip(0.0, 1.0)

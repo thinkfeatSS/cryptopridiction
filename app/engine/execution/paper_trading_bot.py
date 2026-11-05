@@ -770,7 +770,7 @@ class PaperTradingBot:
                 pos["current_price"] = curr_p
                 entry_p = pos["entry_price"]
                 direction = pos["direction"]
-                leverage = pos["leverage"]
+                leverage = float(pos.get("leverage", 1.0))
                 norm_h = pos.get("signal_horizon") or pos.get("horizon", "1H")
 
                 # Single-Side Order Book Void Sentinel
@@ -1036,15 +1036,36 @@ class PaperTradingBot:
                 pos["unrealized_pnl_usd"] = (gain_pct / 100.0) * remaining_size_usd
                 pos["peak_gain_pct"] = max(float(pos.get("peak_gain_pct") or 0.0), gain_pct)
 
-                # Emergency Macro Impulse Exit for Open Positions:
-                # If an active position experiences an extreme sudden adverse spike (gain_pct <= -2.5%)
-                # while BTC shield enters FLASH_DUMP or acute cascade, enforce emergency stop-out:
+                # Emergency News Volatility Shock & Macro Impulse Sentinel for Open Positions:
                 is_macro_severe = bool(btc_shield_state and (
                     btc_shield_state.get("regime") in ["FLASH_DUMP"] or
                     btc_shield_state.get("status_code") == "FLASH_DUMP" or
                     "FLASH_DUMP" in str(btc_shield_state.get("altcoin_posture", ""))
                 ))
-                hit_emergency_exit = (gain_pct <= -2.50) and is_macro_severe
+                is_news_shock_active = bool(pos.get("is_news_shock_active", False))
+                if not is_news_shock_active:
+                    try:
+                        from app.services.institutional_intelligence_service import institutional_intelligence_service
+                        inst_cal = institutional_intelligence_service.get_macro_economic_calendar()
+                        if inst_cal.get("is_volatility_pause_active"):
+                            is_news_shock_active = True
+                    except Exception:
+                        pass
+
+                # If news shock or macro impulse strikes while position touched profit (>= 0.30%), lock stop loss to BE
+                if (is_news_shock_active or is_macro_severe) and pos["peak_gain_pct"] >= 0.30 and not pos.get("is_breakeven_locked"):
+                    pos["is_breakeven_locked"] = True
+                    pos["sl_price"] = format_dynamic_precision(entry_p * (1.0005 if direction == "LONG" else 0.9995))
+                    try:
+                        print(f"[PAPER BOT 🛡️ SHOCK BREAKER] Volatility shock triggered Breakeven Lock for {sym} at ${pos['sl_price']:,.4f}.")
+                    except Exception:
+                        pass
+
+                # If news shock strikes and position experiences an adverse move, cut at half-loss to prevent blowout slippage
+                init_sl_p = float(pos.get("initial_sl_price") or (entry_p * (0.98 if direction == "LONG" else 1.02)))
+                init_sl_dist_pct = abs(entry_p - init_sl_p) / max(1e-8, entry_p) * 100.0
+                hit_news_shock_cut = is_news_shock_active and (gain_pct <= -max(0.50, 0.50 * init_sl_dist_pct))
+                hit_emergency_exit = ((gain_pct <= -2.50) and is_macro_severe) or hit_news_shock_cut
 
                 # Calculate elapsed time and duration
                 opened_dt = None
@@ -1245,7 +1266,7 @@ class PaperTradingBot:
                         else:
                             exit_p = base_p * (1.0 + haircut_pct / 100.0)
                     elif hit_emergency_exit:
-                        exit_reason = "EMERGENCY_MACRO_IMPULSE_EXIT"
+                        exit_reason = "EMERGENCY_NEWS_SHOCK_EXIT" if hit_news_shock_cut else "EMERGENCY_MACRO_IMPULSE_EXIT"
                         exit_p = curr_p
                     elif hit_tp3:
                         exit_reason = "TAKE_PROFIT_3"
@@ -1325,7 +1346,7 @@ class PaperTradingBot:
                         outcome = "BREAKEVEN"
 
                     closed_record = {
-                        "trade_id": pos["trade_id"],
+                        "trade_id": pos.get("trade_id") or pos.get("signal_id") or f"TRADE_{int(time.time()*1000)}",
                         "symbol": sym,
                         "horizon": norm_h,
                         "desk": pos.get("desk", "default"),
@@ -1638,10 +1659,24 @@ class PaperTradingBot:
                 audit_status = "BREAKEVEN_GUARD"
                 outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_pct:+.2f}%)"
                 wa_event = "BE_HIT"
-            elif "STOP_LOSS" in exit_reason:
-                audit_status = "LOST_SL"
-                outcome_label = "🔴 LOST (SL HIT)"
-                wa_event = "SL_HIT"
+            elif "STOP_LOSS" in exit_reason or "EMERGENCY" in exit_reason:
+                if "EMERGENCY" in exit_reason:
+                    if ret_pct >= 0.05:
+                        audit_status = "WON_EXP_PROFIT"
+                        outcome_label = f"🟢 WON (EMERGENCY EXIT {ret_pct:+.2f}%)"
+                        wa_event = "EXPIRED"
+                    elif ret_pct <= -0.05:
+                        audit_status = "LOST_SL"
+                        outcome_label = f"🔴 LOST (EMERGENCY SHOCK {ret_pct:+.2f}%)"
+                        wa_event = "SL_HIT"
+                    else:
+                        audit_status = "BREAKEVEN_GUARD"
+                        outcome_label = f"🛡️ BREAKEVEN (EMERGENCY SHOCK {ret_pct:+.2f}%)"
+                        wa_event = "BE_HIT"
+                else:
+                    audit_status = "LOST_SL"
+                    outcome_label = "🔴 LOST (SL HIT)"
+                    wa_event = "SL_HIT"
             elif "TAKE_PROFIT_3" in exit_reason or "TP3" in exit_reason:
                 audit_status = "WON_TP3"
                 outcome_label = "🟢 WON (TP3 HIT)"

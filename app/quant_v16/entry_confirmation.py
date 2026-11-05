@@ -85,6 +85,31 @@ class EntryConfirmationEngine:
             l_upper_wick = max(0.0, l_high - max(l_open, l_close)) / l_rng
             l_close_pos = (l_close - l_low) / l_rng
 
+            # Live Bar Acute Volatile News Spike Shock
+            if len(df) >= 15:
+                try:
+                    hist_ranges = (df["high"].iloc[-15:-1].astype(float) - df["low"].iloc[-15:-1].astype(float)).values
+                    live_atr = float(np.mean(hist_ranges)) if len(hist_ranges) > 0 else l_rng
+                    if live_atr > 0:
+                        l_expansion = l_rng / live_atr
+                        l_dual_wick = (l_upper_wick >= 0.35 and l_lower_wick >= 0.35 and l_expansion >= 1.8)
+                        l_hyper_exp = (l_expansion >= 3.2)
+                        if l_hyper_exp or l_dual_wick:
+                            reason_msg = f"Live News Volatility Shock: Developing bar expanded {l_expansion:.1f}x ATR-14. Trading paused during news whipsaw."
+                            live_metrics = {
+                                "candle_range": l_rng,
+                                "upper_wick_ratio": round(l_upper_wick, 4),
+                                "lower_wick_ratio": round(l_lower_wick, 4),
+                                "body_ratio": round(abs(l_close - l_open) / l_rng, 4),
+                                "close_pos_in_range": round(l_close_pos, 4),
+                                "is_live_blowout": True,
+                                "is_news_volatility_shock": True,
+                                "expansion_ratio": round(l_expansion, 2)
+                            }
+                            return False, reason_msg, live_metrics
+                except Exception:
+                    pass
+
             if is_long and l_ret <= -0.012 and l_lower_wick < 0.15 and l_close_pos <= 0.20:
                 live_metrics = {
                     "candle_range": l_rng,
@@ -158,20 +183,29 @@ class EntryConfirmationEngine:
             except Exception:
                 volume_surge_ratio = 1.0
 
-        # Calculate Taker Buy Volume and CVD Surge Metrics
+        # Calculate Taker Buy Volume and CVD Surge Metrics with Institutional BVC Synthesis Fallback
         tb_ratio = 0.50
         cvd_surge = 0.0
-        if "taker_buy_vol" in df.columns and c_vol > 0:
+        if c_vol > 0:
             try:
-                tb_vol = float(trigger_candle.get("taker_buy_vol", c_vol * 0.5) or (c_vol * 0.5))
-                tb_ratio = round(float(np.clip(tb_vol / (c_vol + 1e-10), 0.0, 1.0)), 4)
-                if len(df) >= 5:
-                    v_slice = df["volume"].iloc[-5:].values
-                    tb_slice = df["taker_buy_vol"].iloc[-5:].values
-                    tot_v = float(np.sum(v_slice))
-                    tot_tb = float(np.sum(tb_slice))
-                    if tot_v > 0:
-                        cvd_surge = round(float(np.clip((2.0 * tot_tb - tot_v) / tot_v, -1.0, 1.0)), 4)
+                has_valid_tb = "taker_buy_vol" in df.columns and not df["taker_buy_vol"].isna().all() and (df["taker_buy_vol"] > 0).any()
+                if has_valid_tb:
+                    tb_vol = float(trigger_candle.get("taker_buy_vol", c_vol * 0.5) or (c_vol * 0.5))
+                    tb_ratio = round(float(np.clip(tb_vol / (c_vol + 1e-10), 0.0, 1.0)), 4)
+                    if len(df) >= 5:
+                        v_slice = df["volume"].iloc[-5:].values
+                        tb_slice = df["taker_buy_vol"].iloc[-5:].values
+                        tot_v = float(np.sum(v_slice))
+                        tot_tb = float(np.sum(tb_slice))
+                        if tot_v > 0:
+                            cvd_surge = round(float(np.clip((2.0 * tot_tb - tot_v) / tot_v, -1.0, 1.0)), 4)
+                else:
+                    # Institutional Bulk Volume Classification (BVC) synthesis
+                    z_val = (c_close - c_open) / rng
+                    p_buy_val = 0.5 * (1.0 + math.erf(z_val / 1.4142135623730951))
+                    w_skew = 0.25 * (lower_wick_ratio - upper_wick_ratio)
+                    tb_ratio = round(float(np.clip(p_buy_val + w_skew, 0.05, 0.95)), 4)
+                    cvd_surge = round(float(np.clip((2.0 * tb_ratio - 1.0), -1.0, 1.0)), 4)
             except Exception:
                 tb_ratio = 0.50
                 cvd_surge = 0.0
@@ -190,6 +224,30 @@ class EntryConfirmationEngine:
             elif spread_val > 25.0:
                 is_flash_liquidity_drain = True
                 flash_drain_reason = f"Flash spread expansion ({spread_val:.1f} bps > 25.0 bps limit)"
+
+        # Acute News Volatility Shock & Dual-Wick Whipsaw Detection on Closed Trigger Candle
+        is_news_volatility_shock = False
+        news_shock_reason = ""
+        expansion_ratio = 1.0
+        if len(df) >= 15:
+            try:
+                t_bar_idx = -2 if (len(df) >= 2) else -1
+                hist_slice = df.iloc[max(0, len(df) + t_bar_idx - 14):max(1, len(df) + t_bar_idx)]
+                if len(hist_slice) > 0 and "high" in hist_slice.columns and "low" in hist_slice.columns:
+                    h_tr = (hist_slice["high"].astype(float) - hist_slice["low"].astype(float)).values
+                    atr14_val = float(np.mean(h_tr)) if len(h_tr) > 0 else rng
+                    if atr14_val > 0:
+                        expansion_ratio = rng / atr14_val
+                        is_dual_wick_churn = (upper_wick_ratio >= 0.35 and lower_wick_ratio >= 0.35 and expansion_ratio >= 1.8)
+                        is_hyper_expansion = (expansion_ratio >= 3.2)
+                        if is_hyper_expansion or is_dual_wick_churn:
+                            is_news_volatility_shock = True
+                            if is_hyper_expansion:
+                                news_shock_reason = f"Hyper volatility expansion ({expansion_ratio:.1f}x ATR-14 >= 3.2x limit)"
+                            else:
+                                news_shock_reason = f"Extreme dual-wick whipsaw churn ({expansion_ratio:.1f}x ATR-14 with upper {upper_wick_ratio*100:.0f}%, lower {lower_wick_ratio*100:.0f}%)"
+            except Exception:
+                pass
 
         # Multi-candle Institutional Patterns: Engulfing Momentum Flip
         is_engulfing = False
@@ -327,6 +385,9 @@ class EntryConfirmationEngine:
             "is_range_support_rejection": bool(is_long and (lower_wick_ratio >= 0.30 and close_pos_in_range >= 0.40)),
             "is_flash_liquidity_drain": is_flash_liquidity_drain,
             "flash_drain_reason": flash_drain_reason,
+            "is_news_volatility_shock": is_news_volatility_shock,
+            "news_shock_reason": news_shock_reason,
+            "expansion_ratio": round(expansion_ratio, 2),
             "taker_buy_ratio": tb_ratio,
             "cvd_surge_5": cvd_surge
         }
@@ -336,6 +397,10 @@ class EntryConfirmationEngine:
             metrics["fvg_gap_ce"] = fvg_gap_ce
         if rolling_vwap is not None:
             metrics["rolling_vwap"] = round(rolling_vwap, 6)
+
+        # Rejection of All Trades: Acute News Volatility Shock / Violent Dual-Wick Whipsaw
+        if is_news_volatility_shock:
+            return False, f"Volatile News Spike Shock: {news_shock_reason}. Trading paused to prevent slippage traps.", metrics
 
         # ----------------------------------------------------------------------
         # 1. LONG ENTRY CONFIRMATION

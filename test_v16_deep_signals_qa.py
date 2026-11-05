@@ -635,6 +635,250 @@ class TestDeepSignalQA(unittest.TestCase):
         soft_be_p = entry_p * 1.0005
         self.assertGreater(soft_be_p, sig.sl_price)
 
+    # =========================================================================
+    # 16. INSTITUTIONAL BVC TAKER VOLUME SYNTHESIS MECHANICS
+    # =========================================================================
+    def test_bvc_taker_volume_synthesis_mechanics(self):
+        """Tests that Bulk Volume Classification (BVC) dynamically synthesizes order flow without static splits."""
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+
+        vol = 1000.0
+
+        # Case 1: Strong Bullish Candle (Close near High, small upper wick, lower wick absorption)
+        tbv_bull = MultiHorizonDataLoader.synthesize_bvc_taker_volume(
+            open_p=100.0, high_p=105.0, low_p=99.5, close_p=104.5, volume=vol, prev_close=99.8
+        )
+        ratio_bull = tbv_bull / vol
+        self.assertGreater(ratio_bull, 0.60, f"Bullish candle ratio should be >0.60, got {ratio_bull}")
+        self.assertLessEqual(ratio_bull, 0.95)
+
+        # Case 2: Strong Bearish Candle (Close near Low, heavy selling pressure)
+        tbv_bear = MultiHorizonDataLoader.synthesize_bvc_taker_volume(
+            open_p=105.0, high_p=105.5, low_p=100.0, close_p=100.5, volume=vol, prev_close=105.2
+        )
+        ratio_bear = tbv_bear / vol
+        self.assertLess(ratio_bear, 0.40, f"Bearish candle ratio should be <0.40, got {ratio_bear}")
+        self.assertGreaterEqual(ratio_bear, 0.05)
+
+        # Case 3: Doji with massive lower wick absorption (Hammer / Pin Bar bounce)
+        tbv_hammer = MultiHorizonDataLoader.synthesize_bvc_taker_volume(
+            open_p=100.0, high_p=100.2, low_p=95.0, close_p=100.1, volume=vol, prev_close=99.0
+        )
+        ratio_hammer = tbv_hammer / vol
+        self.assertGreater(ratio_hammer, 0.55, f"Lower wick hammer should exhibit buyer absorption >0.55, got {ratio_hammer}")
+
+        # Case 4: Doji with massive upper wick rejection (Shooting star / supply overhang)
+        tbv_star = MultiHorizonDataLoader.synthesize_bvc_taker_volume(
+            open_p=100.0, high_p=105.0, low_p=99.8, close_p=99.9, volume=vol, prev_close=101.0
+        )
+        ratio_star = tbv_star / vol
+        self.assertLess(ratio_star, 0.45, f"Upper wick shooting star should exhibit seller rejection <0.45, got {ratio_star}")
+
+    # =========================================================================
+    # 17. BVC FEATURE EXTRACTION WITHOUT NATIVE AGGRESSOR FLAGS
+    # =========================================================================
+    def test_bvc_feature_extraction_without_native_flags(self):
+        """Tests that CandleDynamicsFeatureExtractor computes dynamic order flow even if exchange lacks taker flags."""
+        from app.engine.signals.candle_features import CandleDynamicsFeatureExtractor
+
+        # Synthetic 30-bar dataset WITHOUT taker_buy_vol column
+        np.random.seed(42)
+        closes = 100.0 + np.cumsum(np.random.randn(30) * 0.5)
+        highs = closes + np.abs(np.random.randn(30) * 0.4) + 0.1
+        lows = closes - np.abs(np.random.randn(30) * 0.4) - 0.1
+        opens = (closes + lows) / 2.0
+        volumes = np.random.uniform(500, 2500, size=30)
+
+        df = pd.DataFrame({
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes
+        })
+
+        feats = CandleDynamicsFeatureExtractor.extract_features(df, prefix="1h_")
+        self.assertIn("1h_taker_buy_ratio", feats.columns)
+        self.assertIn("1h_cvd_surge_5", feats.columns)
+
+        # Confirm non-static dynamic values across bars
+        unique_tb_ratios = feats["1h_taker_buy_ratio"].dropna().unique()
+        self.assertGreater(len(unique_tb_ratios), 10, "BVC should generate continuous, non-static taker ratios")
+        self.assertTrue((feats["1h_taker_buy_ratio"] >= 0.05).all() and (feats["1h_taker_buy_ratio"] <= 0.95).all())
+
+    # =========================================================================
+    # 18. VOLATILE NEWS SPIKE SHOCK DETECTION ON CLOSED CANDLE
+    # =========================================================================
+    def test_volatile_news_spike_detection_closed_candle(self):
+        """Tests that hyper-expanded bars (>= 3.2x ATR) or violent dual-wick churn are rejected as news shocks."""
+        from app.quant_v16.entry_confirmation import EntryConfirmationEngine
+
+        # Build baseline 20 candles with ATR ~ 1.0
+        records = []
+        base = 100.0
+        for i in range(20):
+            records.append({
+                "open": base,
+                "high": base + 0.6,
+                "low": base - 0.4,
+                "close": base + 0.2,
+                "volume": 1000.0
+            })
+            base += 0.2
+
+        # 1. Hyper-Expansion Bar (Range = 4.5, which is 4.5x normal ATR ~ 1.0)
+        records_hyper = list(records)
+        records_hyper.append({
+            "open": 104.0,
+            "high": 108.5,
+            "low": 104.0,
+            "close": 108.0,
+            "volume": 5000.0
+        })
+        records_hyper.append({  # Developing bar
+            "open": 108.0,
+            "high": 108.2,
+            "low": 107.9,
+            "close": 108.1,
+            "volume": 200.0
+        })
+        df_hyper = pd.DataFrame(records_hyper)
+
+        is_conf, reason, metrics = EntryConfirmationEngine.validate_candle_trigger(
+            df=df_hyper, direction="LONG", current_price=108.1
+        )
+        self.assertFalse(is_conf, "Hyper-expansion bar must fail candle trigger validation")
+        self.assertTrue(metrics.get("is_news_volatility_shock"), "Must be flagged as is_news_volatility_shock")
+        self.assertIn("Volatile News Spike Shock", reason)
+
+        # 2. Dual-Wick Whipsaw Churn Bar (Upper wick 50%, Lower wick 45%, Range 2.2x ATR)
+        records_churn = list(records)
+        records_churn.append({
+            "open": 104.0,
+            "high": 105.2,   # Upper wick = 105.2 - 104.1 = 1.1 (50% of 2.2 range)
+            "low": 103.0,    # Lower wick = 104.0 - 103.0 = 1.0 (45% of 2.2 range)
+            "close": 104.1,  # Small body = 0.1
+            "volume": 4000.0
+        })
+        records_churn.append({  # Developing bar
+            "open": 104.1,
+            "high": 104.2,
+            "low": 104.0,
+            "close": 104.1,
+            "volume": 200.0
+        })
+        df_churn = pd.DataFrame(records_churn)
+
+        is_conf_c, reason_c, metrics_c = EntryConfirmationEngine.validate_candle_trigger(
+            df=df_churn, direction="LONG", current_price=104.1
+        )
+        self.assertFalse(is_conf_c, "Dual-wick whipsaw churn bar must fail candle trigger validation")
+        self.assertTrue(metrics_c.get("is_news_volatility_shock"))
+
+    # =========================================================================
+    # 19. VOLATILE NEWS SPIKE SHOCK DETECTION ON DEVELOPING LIVE CANDLE
+    # =========================================================================
+    def test_volatile_news_spike_live_candle(self):
+        """Tests that an acute news explosion in the developing live candle intercepts entry."""
+        from app.quant_v16.entry_confirmation import EntryConfirmationEngine
+
+        records = []
+        base = 100.0
+        for i in range(20):
+            records.append({
+                "open": base,
+                "high": base + 0.5,
+                "low": base - 0.5,
+                "close": base + 0.1,
+                "volume": 1000.0
+            })
+            base += 0.1
+
+        # Developing live candle suddenly explodes with range 4.0 (4.0x ATR)
+        records.append({
+            "open": 102.0,
+            "high": 106.0,
+            "low": 102.0,
+            "close": 105.8,
+            "volume": 3000.0
+        })
+        df_live_shock = pd.DataFrame(records)
+
+        is_conf, reason, metrics = EntryConfirmationEngine.validate_candle_trigger(
+            df=df_live_shock, direction="LONG", current_price=105.8
+        )
+        self.assertFalse(is_conf)
+        self.assertTrue(metrics.get("is_news_volatility_shock"))
+        self.assertIn("Live News Volatility Shock", reason)
+
+    # =========================================================================
+    # 20. EMERGENCY NEWS SHOCK CAPITAL PROTECTION ON OPEN POSITIONS
+    # =========================================================================
+    def test_emergency_news_shock_capital_protection_on_open_positions(self):
+        """Tests that PaperTradingBot ratchets stops to BE when in profit and cuts half-loss when adverse during news shocks."""
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+
+        bot = PaperTradingBot()
+
+        # Position A: Was in profit (+0.45%), acute shock hits -> Stop ratchets to Breakeven
+        now_iso = datetime.now(timezone.utc).isoformat()
+        pos_profit = {
+            "trade_id": "TEST_SHOCK_01",
+            "symbol": "BTC/USDT",
+            "direction": "LONG",
+            "entry_price": 50000.0,
+            "current_price": 50150.0,
+            "initial_sl_price": 49000.0,
+            "sl_price": 49000.0,
+            "tp1_price": 52000.0,
+            "leverage": 1.0,
+            "position_size_usd": 1000.0,
+            "remaining_position_size_usd": 1000.0,
+            "peak_gain_pct": 0.45,  # Touched +0.45%
+            "is_breakeven_locked": False,
+            "is_news_shock_active": True,
+            "desk": "scalp",
+            "opened_at_utc": now_iso
+        }
+        bot.data["open_positions"] = [pos_profit]
+
+        # Feed tick at current price
+        bot.on_tick(live_prices={"BTC/USDT": 50100.0})
+
+        self.assertTrue(pos_profit["is_breakeven_locked"], "Stop loss must be ratcheted to Breakeven during news shock")
+        self.assertGreaterEqual(pos_profit["sl_price"], 50000.0)
+
+        # Position B: Adverse position (-1.2% drop, 50% of 2% initial SL), acute shock strikes -> Cut loss at half-risk
+        pos_adverse = {
+            "trade_id": "TEST_SHOCK_02",
+            "symbol": "ETH/USDT",
+            "direction": "LONG",
+            "entry_price": 3000.0,
+            "current_price": 2960.0,  # Dropped -1.33%
+            "initial_sl_price": 2940.0,  # 2.0% initial SL
+            "sl_price": 2940.0,
+            "tp1_price": 3120.0,
+            "leverage": 1.0,
+            "position_size_usd": 1000.0,
+            "remaining_position_size_usd": 1000.0,
+            "peak_gain_pct": 0.05,
+            "is_breakeven_locked": False,
+            "is_news_shock_active": True,
+            "desk": "scalp",
+            "opened_at_utc": now_iso
+        }
+        bot.data["open_positions"] = [pos_adverse]
+        bot.data["closed_trades"] = []
+
+        bot.on_tick(live_prices={"ETH/USDT": 2960.0})
+
+        # Confirm position was exited via EMERGENCY_NEWS_SHOCK_EXIT
+        self.assertEqual(len(bot.data["open_positions"]), 0, "Adverse position must be liquidated under acute news shock")
+        self.assertEqual(len(bot.data["closed_trades"]), 1)
+        closed = bot.data["closed_trades"][0]
+        self.assertEqual(closed.get("exit_reason"), "EMERGENCY_NEWS_SHOCK_EXIT")
+        self.assertLess(closed.get("return_pct", 0.0), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -811,11 +811,23 @@ class SignalService:
                     if sig_age_sec is not None and sig_age_sec >= max_sec:
                         is_expired = True
 
-                # 0. Tier-0 Early Breakeven Guard (Requires at least 50% of TP1 distance or +0.60% gain in range)
+                # 0. Acute Volatile News Shock & Tier-0 Early Breakeven Guard
+                is_news_shock_active = False
+                try:
+                    from app.services.institutional_intelligence_service import institutional_intelligence_service
+                    inst_cal = institutional_intelligence_service.get_macro_economic_calendar()
+                    if inst_cal.get("is_volatility_pause_active"):
+                        is_news_shock_active = True
+                except Exception:
+                    pass
+
                 tp1_dist = abs(tp1_p - entry_p) / max(1e-12, entry_p) * 100.0
                 is_range_regime = any(k in str(getattr(s, "market_shield", "")).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP"])
                 t0_hurdle = min(1.00, max(0.60, 0.45 * tp1_dist)) if is_range_regime else min(1.20, max(0.80, 0.50 * tp1_dist))
-                if max_gain >= t0_hurdle and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
+
+                # If news shock is active, trigger protection earlier once +0.30% gain is reached
+                effective_t0_gate = 0.30 if is_news_shock_active else t0_hurdle
+                if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
                     s.status = "TIER0_PROTECTED_BREAKEVEN"
                     soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)
                     s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
