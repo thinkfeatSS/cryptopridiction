@@ -58,6 +58,7 @@ interface ValidationReport {
   realized_avg_net_return: number | null;
   realized_profit_factor: number | null;
   realized_max_drawdown_pct: number | null;
+  raw_max_drawdown_pct?: number | null;
   brier_score: number | null;
   expected_calibration_error: number | null;
   calibration_curve: CalibrationBucket[];
@@ -421,6 +422,25 @@ export default function V16PerformancePanel({ signals }: Props) {
             ) : (
               <span className="text-rose-400 font-bold flex items-center gap-1 text-[10px]">
                 <AlertTriangle className="w-3 h-3 text-rose-400" /> FAIL (PF &lt; 1.20)
+              </span>
+            )}
+          </div>
+
+          {/* Gate 5 */}
+          <div className="flex justify-between items-center bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800 sm:col-span-2">
+            <span>Gate 5: Portfolio Risk Drawdown (1% Risk Unit Sizing)</span>
+            {report?.promotion_gates?.gate_5_risk_drawdown?.status === "PASS" ? (
+              <span className="text-emerald-400 font-bold flex items-center gap-1 text-[10px]">
+                <CheckCircle2 className="w-3 h-3 text-emerald-400" /> PASS (DD:{" "}
+                {report.realized_max_drawdown_pct !== null && report.realized_max_drawdown_pct !== undefined
+                  ? `${report.realized_max_drawdown_pct.toFixed(1)}%`
+                  : "0.0%"}{" "}
+                ≤ 6.0%)
+              </span>
+            ) : (
+              <span className="text-rose-400 font-bold flex items-center gap-1 text-[10px]">
+                <AlertTriangle className="w-3 h-3 text-rose-400" /> FAIL (DD:{" "}
+                {report?.realized_max_drawdown_pct?.toFixed(1) || "0.0"}% &gt; 6.0%)
               </span>
             )}
           </div>

@@ -403,6 +403,12 @@ class CoinSpecificMetaLabeler:
             calibrated_prob = (raw_prob / pi1) / max(1e-6, ((raw_prob / pi1) + ((1.0 - raw_prob) / pi0)))
             calibrated_prob = float(np.clip(calibrated_prob, 0.05, 0.95))
 
+            # Phase 2 Calibration Shrinkage: Mitigate extreme overconfidence in upper probability bins
+            # When Saerens shifts probability > 0.55, anchor back toward empirical base rate (50-58% range)
+            if calibrated_prob > 0.55:
+                calibrated_prob = 0.50 + min(0.08, (calibrated_prob - 0.50) * 0.35)
+                calibrated_prob = float(np.clip(calibrated_prob, 0.05, 0.95))
+
         return round(calibrated_prob, 4), model_type, sample_sz
 
     @staticmethod

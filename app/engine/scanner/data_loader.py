@@ -1758,7 +1758,7 @@ class MultiHorizonDataLoader:
         """
         now = time.time()
         limits = limits or {
-            "5m": 120, "15m": 120, "1h": 120, "4h": 120, "12h": 120,
+            "5m": 120, "15m": 250, "1h": 120, "4h": 120, "12h": 120,
             "1d": 180, "1w": 60, "15d": 60, "1M": 36
         }
 

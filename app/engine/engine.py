@@ -192,7 +192,8 @@ class UnifiedCryptoEngine:
                         bid_price=bid_p if bid_p > 0 else None,
                         ask_price=ask_p if ask_p > 0 else None
                     )
-                    if rect_res.get("signal_status") == "VALID" and float(rect_res.get("signal_score", 0.0)) >= 85.0:
+                    min_score_hurdle = float(getattr(self.rectangle_config, "min_signal_score", 75.0))
+                    if rect_res.get("signal_status") == "VALID" and float(rect_res.get("signal_score", 0.0)) >= min_score_hurdle:
                         rect_dir = rect_res.get("direction")
                         rect_entry = float(rect_res.get("entry_price", 0.0))
                         rect_sl = float(rect_res.get("stop_loss", 0.0))
@@ -205,7 +206,7 @@ class UnifiedCryptoEngine:
                         if is_valid_geom and rect_entry > 0 and actual_rect_rr >= 2.0:
                             print(f"[RECTANGLE STRATEGY 📐] Triggered {sym} {rect_dir} M1 Setup! Score: {rect_res.get('signal_score'):.1f} | Entry: ${rect_entry} | TP1: ${rect_tp1} | SL: ${rect_sl} | RR: 1:{actual_rect_rr:.1f}", flush=True)
                             now_iso = datetime.now(timezone.utc).isoformat()
-                            rect_sig = {
+                            rect_sig_core = {
                                 "symbol": sym,
                                 "horizon": "15M",
                                 "horizon_key": "15m",
@@ -216,6 +217,7 @@ class UnifiedCryptoEngine:
                                 "decision": f"🟢 BUY 1M RECTANGLE" if rect_dir == "LONG" else f"🔴 SELL 1M RECTANGLE",
                                 "entry_price": rect_entry,
                                 "current_price": rect_entry,
+                                "live_price": rect_entry,
                                 "tp1_price": rect_tp1,
                                 "tp2_price": rect_tp2,
                                 "tp3_price": rect_tp3,
@@ -225,6 +227,9 @@ class UnifiedCryptoEngine:
                                 "win_probability_pct": 72.0,
                                 "meta_win_probability_pct": 72.0,
                                 "meta_win_prob_pct": 72.0,
+                                "p_tp1": 0.72,
+                                "p_tp1_pct": 72.0,
+                                "p_sl": 0.28,
                                 "quality_grade": "💎 Grade A+ (THE ONLY 1 MINUTE RECTANGLE STRATEGY)",
                                 "strategy": "THE_ONLY_1_MINUTE_RECTANGLE_STRATEGY",
                                 "canonical_strategy": "THE_ONLY_1_MINUTE_RECTANGLE_STRATEGY",
@@ -237,8 +242,12 @@ class UnifiedCryptoEngine:
                                 "sizing_multiplier": 1.15,
                                 "ev_net": 1.25,
                                 "ev_gross": 1.55,
-                                "costs_total_pct": 0.30
+                                "costs_total_pct": 0.30,
+                                "volume_24h_usd": float(coin_meta.get("volume_24h_usd", 0.0) or 0.0),
+                                "change_24h_pct": float(coin_meta.get("change_24h_pct", 0.0) or 0.0)
                             }
+                            rect_sig = dict(rect_sig_core)
+                            rect_sig["qualified_signals_by_horizon"] = {"15M": dict(rect_sig_core)}
                             generated_signals.append(rect_sig)
                 except Exception as r_err:
                     print(f"[RECTANGLE STRATEGY ⚠️] Error evaluating {sym}: {r_err}", flush=True)

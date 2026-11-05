@@ -67,8 +67,9 @@ class RectangleStrategyOrchestrator:
         if not self.config.enabled:
             return self._build_rejected_response(symbol, "Strategy is disabled by administrator")
 
-        if len(df_m15) < max(self.config.ema_slow_period, 35):
-            return self._build_rejected_response(symbol, "Insufficient M15 history for market analysis")
+        min_history_required = max(self.config.ema_fast_period, 35)
+        if len(df_m15) < min_history_required:
+            return self._build_rejected_response(symbol, f"Insufficient M15 history for market analysis (got {len(df_m15)}, need {min_history_required})")
 
         atr_series = TrendDetector.compute_atr(df_m15, period=14)
         n_m15 = len(df_m15)
