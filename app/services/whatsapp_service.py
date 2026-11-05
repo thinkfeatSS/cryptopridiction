@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import queue
+import uuid
 import requests
 from typing import Dict, Any, Optional, List, Union, Set
 from datetime import datetime, timezone
@@ -77,9 +78,86 @@ class WhatsAppService:
         self._lock = threading.Lock()
         self._broadcasted_signals: Set[str] = set()
         self._enabled_override: Optional[bool] = None
+
+        # Persistent Alert Spool & Gateway Resilience
+        export_dir = getattr(settings, "EXPORT_DIR", None) or os.getenv("EXPORT_DIR", "export_app_data")
+        self._spool_file = os.path.join(export_dir, "whatsapp_alert_spool.json")
+        self._dead_letter_file = os.path.join(export_dir, "whatsapp_dead_letter.json")
+        self._spool: Dict[str, Dict[str, Any]] = {}
+        self._max_retries: int = 5
+        self._gateway_circuit_breaker_until: float = 0.0
+        self._last_health_check_ts: float = 0.0
+        self._gateway_connected: bool = True
+
+        # Preload pending alerts from persistent disk spool
+        self._load_spool_from_disk()
         
         # Start async consumer worker
         self._start_worker()
+
+    def _save_spool_to_disk(self):
+        """Persists pending outbound alerts atomically to disk so they survive restarts."""
+        try:
+            os.makedirs(os.path.dirname(self._spool_file), exist_ok=True)
+            tmp_file = f"{self._spool_file}.tmp_{os.getpid()}_{threading.get_ident()}"
+            with self._lock:
+                data = list(self._spool.values())
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_file, self._spool_file)
+        except Exception as e:
+            logger.warning(f"[WHATSAPP ⚠️] Failed to persist alert spool: {e}")
+
+    def _load_spool_from_disk(self):
+        """Preloads pending alerts from disk spool on daemon/backend boot."""
+        try:
+            if os.path.exists(self._spool_file):
+                with open(self._spool_file, "r", encoding="utf-8") as f:
+                    items = json.load(f)
+                now = time.time()
+                restored = 0
+                with self._lock:
+                    for it in items:
+                        msg_id = it.get("id") or str(uuid.uuid4())
+                        it["id"] = msg_id
+                        # Discard stale alerts older than 24 hours
+                        if now - it.get("ts", now) < 86400.0:
+                            self._spool[msg_id] = it
+                            try:
+                                self._queue.put_nowait(it)
+                                restored += 1
+                            except queue.Full:
+                                break
+                if restored > 0:
+                    logger.info(f"[WHATSAPP 🔄] Restored {restored} pending alerts from persistent disk spool.")
+        except Exception as e:
+            logger.warning(f"[WHATSAPP ⚠️] Failed to load alert spool: {e}")
+
+    def _archive_dead_letter(self, item: Dict[str, Any], reason: str = ""):
+        """Archives dropped messages that exceeded max retries for audit."""
+        try:
+            os.makedirs(os.path.dirname(self._dead_letter_file), exist_ok=True)
+            dead_entry = {
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+                "reason": reason,
+                "item": item
+            }
+            dead_letters = []
+            if os.path.exists(self._dead_letter_file):
+                try:
+                    with open(self._dead_letter_file, "r", encoding="utf-8") as f:
+                        dead_letters = json.load(f)
+                except Exception:
+                    dead_letters = []
+            dead_letters.append(dead_entry)
+            if len(dead_letters) > 100:
+                dead_letters = dead_letters[-100:]
+            tmp_f = f"{self._dead_letter_file}.tmp_{os.getpid()}_{threading.get_ident()}"
+            with open(tmp_f, "w", encoding="utf-8") as f:
+                json.dump(dead_letters, f, indent=2)
+            os.replace(tmp_f, self._dead_letter_file)
+        except Exception:
+            pass
 
     def _start_worker(self):
         """Starts background worker thread to process outbound messages with pacing."""
@@ -869,30 +947,62 @@ class WhatsAppService:
     # =========================================================================
     # DISPATCH QUEUE & WORKER
     # =========================================================================
-    def _enqueue_message(self, target_jid: str, text: str, priority: int = 10):
+    def _enqueue_message(self, target_jid: str, text: str, priority: int = 10, dedup_key: Optional[str] = None):
         if not self.enabled or not target_jid:
             return
+        msg_id = str(uuid.uuid4())
         item = {
+            "id": msg_id,
             "target": target_jid,
             "text": text,
             "ts": time.time(),
-            "priority": priority
+            "priority": priority,
+            "retries": 0,
+            "next_retry_ts": 0.0,
+            "dedup_key": dedup_key
         }
+        with self._lock:
+            # Enforce max spool size (200) to protect memory and disk
+            if len(self._spool) >= 200:
+                oldest_k = min(self._spool.keys(), key=lambda k: self._spool[k].get("ts", 0))
+                del self._spool[oldest_k]
+            self._spool[msg_id] = item
+        self._save_spool_to_disk()
+
         try:
             self._queue.put_nowait(item)
             logger.info(f"[WHATSAPP 📤] Queued message to {target_jid[:15]}... (Queue size: {self._queue.qsize()})")
         except queue.Full:
-            logger.error("[WHATSAPP ❌] Outbound queue full! Dropping message.")
+            logger.error("[WHATSAPP ❌] Outbound queue full! Retaining in disk spool for subsequent retry.")
 
     def _process_queue(self):
-        """Worker loop that sends messages with anti-ban delay."""
+        """Worker loop that sends messages with anti-ban pacing, exponential retry, and session health checks."""
         while self._running:
             try:
                 item = self._queue.get(timeout=1.0)
             except queue.Empty:
+                # Periodic health check during idle queue periods (every 60s)
+                now = time.time()
+                if now - self._last_health_check_ts > 60.0:
+                    try:
+                        self.check_gateway_health()
+                    except Exception:
+                        pass
                 continue
 
             try:
+                now = time.time()
+                # Gateway Circuit Breaker: Wait out active gateway cooldown
+                if now < self._gateway_circuit_breaker_until:
+                    sleep_time = min(5.0, max(0.5, self._gateway_circuit_breaker_until - now))
+                    time.sleep(sleep_time)
+
+                # Retry Timing Check
+                if item.get("next_retry_ts", 0.0) > now:
+                    time.sleep(min(1.0, max(0.1, item["next_retry_ts"] - now)))
+                    self._queue.put(item)
+                    continue
+
                 # Anti-ban Pacing delay: Ensure at least rate_limit_seconds between messages
                 now = time.time()
                 elapsed = now - self._last_dispatch_ts
@@ -900,12 +1010,108 @@ class WhatsAppService:
                 if elapsed < required_delay:
                     time.sleep(required_delay - elapsed)
 
-                self._send_http(item["target"], item["text"])
+                success = self._send_http(item["target"], item["text"])
                 self._last_dispatch_ts = time.time()
+
+                if success:
+                    msg_id = item.get("id")
+                    with self._lock:
+                        if msg_id in self._spool:
+                            del self._spool[msg_id]
+                    self._save_spool_to_disk()
+                    self._gateway_connected = True
+                else:
+                    # Gateway dispatch failed: Engage bounded exponential backoff
+                    retries = item.get("retries", 0) + 1
+                    item["retries"] = retries
+                    if retries <= self._max_retries:
+                        backoff = min(120.0, 5.0 * (2 ** (retries - 1)))
+                        item["next_retry_ts"] = time.time() + backoff
+                        logger.warning(f"[WHATSAPP 🔄] Gateway dispatch failed for {item['target'][:15]}... Retrying #{retries} in {backoff:.1f}s.")
+                        # Trip a 10s gateway circuit breaker to prevent rapid hammering on a broken/restarting gateway
+                        self._gateway_circuit_breaker_until = time.time() + 10.0
+                        with self._lock:
+                            if item.get("id") in self._spool:
+                                self._spool[item["id"]] = item
+                        self._save_spool_to_disk()
+                        self._queue.put(item)
+                    else:
+                        # Max retries exceeded: Archive to dead-letter storage
+                        logger.error(f"[WHATSAPP ❌] Max retries ({self._max_retries}) exceeded for {item['target']}. Moving to dead-letter.")
+                        self._archive_dead_letter(item, reason=f"Max retries ({self._max_retries}) exceeded")
+                        msg_id = item.get("id")
+                        with self._lock:
+                            if msg_id in self._spool:
+                                del self._spool[msg_id]
+                        self._save_spool_to_disk()
+
             except Exception as e:
                 logger.error(f"[WHATSAPP ❌] Error sending queued message: {e}")
             finally:
                 self._queue.task_done()
+
+    def check_gateway_health(self) -> Dict[str, Any]:
+        """
+        Actively checks gateway connection status.
+        For Evolution API / Baileys: Inspects instance connectionState.
+        If instance is disconnected or session closed, triggers automatic reconnection.
+        """
+        self._last_health_check_ts = time.time()
+        if not self.enabled:
+            return {"status": "disabled", "healthy": True}
+
+        gateway_type = self.gateway_type
+        base_api_url = self.api_url
+        api_key = self.api_key
+        instance = self.instance_name
+
+        urls_to_try = [base_api_url]
+        if "://whatsapp:" in base_api_url or "://whatsapp/" in base_api_url or base_api_url.endswith("://whatsapp"):
+            urls_to_try.append(base_api_url.replace("://whatsapp", "://127.0.0.1"))
+
+        for api_url in urls_to_try:
+            try:
+                if gateway_type == "evolution_api":
+                    headers = {"apikey": api_key}
+                    endpoint = f"{api_url}/instance/connectionState/{instance}"
+                    resp = requests.get(endpoint, headers=headers, timeout=4.0)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        state = data.get("instance", {}).get("state", "unknown")
+                        is_open = (state == "open")
+                        self._gateway_connected = is_open
+                        if not is_open:
+                            logger.warning(f"[WHATSAPP ⚠️] Evolution API instance '{instance}' state is '{state}'. Triggering auto-reconnect...")
+                            reconnect_endpoint = f"{api_url}/instance/connect/{instance}"
+                            try:
+                                requests.get(reconnect_endpoint, headers=headers, timeout=4.0)
+                            except Exception:
+                                pass
+                        return {
+                            "healthy": is_open,
+                            "state": state,
+                            "gateway_type": gateway_type,
+                            "instance": instance,
+                            "pending_spool_count": len(self._spool)
+                        }
+                    elif resp.status_code == 404:
+                        logger.warning(f"[WHATSAPP ⚠️] Evolution API instance '{instance}' not found. Initializing...")
+                        create_endpoint = f"{api_url}/instance/create"
+                        try:
+                            requests.post(create_endpoint, json={"instanceName": instance, "qrcode": True}, headers=headers, timeout=5.0)
+                        except Exception:
+                            pass
+                        return {"healthy": False, "state": "initializing", "gateway_type": gateway_type}
+            except Exception:
+                pass
+
+        self._gateway_connected = False
+        return {
+            "healthy": False,
+            "state": "unreachable",
+            "gateway_type": gateway_type,
+            "pending_spool_count": len(self._spool)
+        }
 
     def _send_http(self, target_jid: str, text: str) -> bool:
         """Sends payload to configured WhatsApp gateway.

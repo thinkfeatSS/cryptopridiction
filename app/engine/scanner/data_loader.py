@@ -188,8 +188,9 @@ class MultiHorizonDataLoader:
         except Exception:
             pass
 
-        # Zero-Cold-Start Disk Pre-Warm: Load hot tickers and funding rates on instant boot
+        # Zero-Cold-Start Disk Pre-Warm: Load hot tickers, funding rates, and geo-cooldowns on instant boot
         try:
+            self._load_geo_cooldowns_from_disk()
             swr_ticks, swr_ts = self._load_tickers_from_swr_disk()
             if swr_ticks:
                 self._live_tickers_cache = swr_ticks
@@ -202,6 +203,42 @@ class MultiHorizonDataLoader:
         except Exception:
             pass
 
+    def _save_geo_cooldowns_to_disk(self):
+        """Persists upstream exchange geo-cooldowns so container reboots don't waste retry cycles on cloud IPs."""
+        try:
+            cache_file = os.path.join(self._disk_cache_dir, "geo_cooldowns.json")
+            tmp_file = f"{cache_file}.tmp_{os.getpid()}_{threading.get_ident()}"
+            with self._cache_lock:
+                data = {k: v for k, v in self._exchange_geo_cooldowns.items()}
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp_file, cache_file)
+        except Exception:
+            pass
+
+    def _load_geo_cooldowns_from_disk(self):
+        """Preloads persistent geo-restriction cooldowns to achieve 0ms fast-fail on container reboots."""
+        try:
+            cache_file = os.path.join(self._disk_cache_dir, "geo_cooldowns.json")
+            if os.path.exists(cache_file):
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                now = time.time()
+                with self._cache_lock:
+                    for k, v in data.items():
+                        exp = float(v)
+                        if exp > now:
+                            self._exchange_geo_cooldowns[k.lower()] = exp
+        except Exception:
+            pass
+
+    def _are_all_secondary_exchanges_geo_blocked(self) -> bool:
+        """Returns True if all secondary venues (Bybit, OKX, Gate.io, KuCoin, MEXC) are under active geo-cooldown."""
+        venues = ["bybit", "okx", "gateio", "kucoin", "mexc"]
+        now = time.time()
+        with self._cache_lock:
+            return all(now < self._exchange_geo_cooldowns.get(v, 0.0) for v in venues)
+
     def _is_exchange_geo_blocked(self, exchange_name: str) -> bool:
         """Returns True if the upstream exchange is currently in a geo-restriction / cloud IP ban cooldown."""
         with self._cache_lock:
@@ -212,6 +249,7 @@ class MultiHorizonDataLoader:
         now = time.time()
         with self._cache_lock:
             self._exchange_geo_cooldowns[exchange_name.lower()] = now + 900.0
+        self._save_geo_cooldowns_to_disk()
         print(f"[DATA LOADER [GEO-RESTRICTION CIRCUIT BREAKER]] Upstream {exchange_name.upper()} returned {status_code} ({reason}). Fast-fail bypass active for 900s.", flush=True)
 
     def preload_bulk_funding_rates(self):
@@ -1532,30 +1570,33 @@ class MultiHorizonDataLoader:
                 except Exception:
                     continue
 
-        # All Binance mirrors failed or under cooldown -> Tier-2 Bybit Gateway
-        bybit_df = self._fetch_bybit_timeframe_raw(symbol, tf, limit=limit)
-        if bybit_df is not None and len(bybit_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
-            return bybit_df
+        # All Binance mirrors failed or under cooldown -> Multi-Tier Secondary Fallback
+        # Fast-Path Guard: If all secondary venues are blocked by Cloudflare/compliance on this IP, bypass to SWR disk cache instantly
+        if not self._are_all_secondary_exchanges_geo_blocked():
+            # Tier-2 Bybit Gateway
+            bybit_df = self._fetch_bybit_timeframe_raw(symbol, tf, limit=limit)
+            if bybit_df is not None and len(bybit_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
+                return bybit_df
 
-        # Tier-3 OKX Gateway
-        okx_df = self._fetch_okx_timeframe_raw(symbol, tf, limit=limit)
-        if okx_df is not None and len(okx_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
-            return okx_df
+            # Tier-3 OKX Gateway
+            okx_df = self._fetch_okx_timeframe_raw(symbol, tf, limit=limit)
+            if okx_df is not None and len(okx_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
+                return okx_df
 
-        # Tier-4 Gate.io Gateway
-        gateio_df = self._fetch_gateio_timeframe_raw(symbol, tf, limit=limit)
-        if gateio_df is not None and len(gateio_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
-            return gateio_df
+            # Tier-4 Gate.io Gateway
+            gateio_df = self._fetch_gateio_timeframe_raw(symbol, tf, limit=limit)
+            if gateio_df is not None and len(gateio_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
+                return gateio_df
 
-        # Tier-5 KuCoin Gateway
-        kucoin_df = self._fetch_kucoin_timeframe_raw(symbol, tf, limit=limit)
-        if kucoin_df is not None and len(kucoin_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
-            return kucoin_df
+            # Tier-5 KuCoin Gateway
+            kucoin_df = self._fetch_kucoin_timeframe_raw(symbol, tf, limit=limit)
+            if kucoin_df is not None and len(kucoin_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
+                return kucoin_df
 
-        # Tier-6 MEXC Gateway
-        mexc_df = self._fetch_mexc_timeframe_raw(symbol, tf, limit=limit)
-        if mexc_df is not None and len(mexc_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
-            return mexc_df
+            # Tier-6 MEXC Gateway
+            mexc_df = self._fetch_mexc_timeframe_raw(symbol, tf, limit=limit)
+            if mexc_df is not None and len(mexc_df) >= (2 if tf in ["1w", "15d", "1M"] else 5):
+                return mexc_df
 
         # Tier-6 Persistent Disk Cache SWR Fallback (Catastrophic Multi-Exchange Outage Recovery)
         cached_entry = self._load_from_disk_cache(f"{symbol}_{tf}")
@@ -1800,16 +1841,59 @@ class MultiHorizonDataLoader:
         if not missing_tfs:
             return output_dfs
 
-        # Fetch remaining timeframes using failover gateways & SWR disk cache
+        # Fetch remaining timeframes using anchor-first hierarchical execution
+        # Anchors: 5m (micro), 15m (scalp), 1h (hourly), 1d (daily)
+        # Synthesized: 4h & 12h (from 1h), 1w, 15d, 1M (from 1d)
         stale_intraday_detected = False
         stale_count = 0
 
-        for tf_target in missing_tfs:
-            # High-efficiency in-memory resampling: If 15D is needed and 1D is already available, resample directly
+        # Prioritize anchor timeframes first: 5m, 15m, 1h, 1d
+        anchor_order = ["5m", "15m", "1h", "1d"]
+        ordered_missing = [tf for tf in anchor_order if tf in missing_tfs]
+        ordered_missing += [tf for tf in missing_tfs if tf not in ordered_missing]
+
+        for tf_target in ordered_missing:
+            # 1. 15D Resampling from 1D
             if tf_target == "15d" and "1d" in output_dfs and len(output_dfs["1d"]) >= 30:
                 df_result = self._resample_15d(output_dfs["1d"])
+
+            # 2. 4H and 12H Hierarchical Synthesis from 1H (Saves 2 HTTP calls per coin)
+            elif tf_target == "4h" and "1h" in output_dfs and len(output_dfs["1h"]) >= 8:
+                df_result = self._resample_chunk(output_dfs["1h"], chunk_size=4)
+                if df_result is not None and len(df_result) >= 2:
+                    df_result.attrs["is_synthetic"] = False
+                    df_result.attrs["native_candle_count"] = len(df_result)
+                    df_result.attrs["resampled_from"] = "1h"
+
+            elif tf_target == "12h" and "1h" in output_dfs and len(output_dfs["1h"]) >= 16:
+                df_result = self._resample_chunk(output_dfs["1h"], chunk_size=12)
+                if df_result is not None and len(df_result) >= 2:
+                    df_result.attrs["is_synthetic"] = False
+                    df_result.attrs["native_candle_count"] = len(df_result)
+                    df_result.attrs["resampled_from"] = "1h"
+
+            # 3. 1W and 1M Hierarchical Synthesis from 1D (Saves 2 HTTP calls per coin)
+            elif tf_target == "1w" and "1d" in output_dfs and len(output_dfs["1d"]) >= 14:
+                df_result = self._resample_chunk(output_dfs["1d"], chunk_size=7)
+                if df_result is not None and len(df_result) >= 2:
+                    df_result.attrs["is_synthetic"] = False
+                    df_result.attrs["native_candle_count"] = len(df_result)
+                    df_result.attrs["resampled_from"] = "1d"
+
+            elif tf_target == "1M" and "1d" in output_dfs and len(output_dfs["1d"]) >= 30:
+                df_result = self._resample_chunk(output_dfs["1d"], chunk_size=30)
+                if df_result is not None and len(df_result) >= 2:
+                    df_result.attrs["is_synthetic"] = False
+                    df_result.attrs["native_candle_count"] = len(df_result)
+                    df_result.attrs["resampled_from"] = "1d"
+
             else:
-                df_result = self.fetch_single_timeframe_raw(symbol, tf_target, limit=limits.get(tf_target, 120))
+                fetch_limit = limits.get(tf_target, 120)
+                if tf_target == "1h":
+                    fetch_limit = max(fetch_limit, 240)
+                elif tf_target == "1d":
+                    fetch_limit = max(fetch_limit, 180)
+                df_result = self.fetch_single_timeframe_raw(symbol, tf_target, limit=fetch_limit)
 
             if df_result is not None and len(df_result) >= (2 if tf_target in ["1w", "15d", "1M"] else 5):
                 output_dfs[tf_target] = df_result

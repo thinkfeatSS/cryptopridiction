@@ -18,6 +18,7 @@ import os
 import tempfile
 import json
 import csv
+import pandas as pd
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List
 
@@ -352,6 +353,160 @@ class TestDeepSignalQA(unittest.TestCase):
                 loaded = json.load(f)
             self.assertEqual(loaded["symbol"], "BTC/USDT")
             self.assertEqual(loaded["pnl"], 12.5)
+
+    # =========================================================================
+    # 11. UPSTREAM LATENCY HARDENING & HIERARCHICAL SYNTHESIS
+    # =========================================================================
+    def test_hierarchical_candle_synthesis_anchors(self):
+        """Tests that 4H and 12H synthesize from 1H, and 1W, 15D, 1M synthesize from 1D without network calls."""
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        loader = MultiHorizonDataLoader()
+
+        # Create 240 synthetic 1H candles (10 days)
+        now_ts = int(time.time() * 1000)
+        records_1h = []
+        for i in range(240):
+            t = now_ts - (240 - i) * 3600 * 1000
+            p = 100.0 + i * 0.1
+            records_1h.append({
+                "timestamp": t,
+                "datetime": pd.to_datetime(t, unit="ms", utc=True),
+                "open": p,
+                "high": p + 0.5,
+                "low": p - 0.5,
+                "close": p + 0.2,
+                "volume": 1000.0,
+                "taker_buy_vol": 500.0
+            })
+        df_1h = pd.DataFrame(records_1h)
+
+        # Create 180 synthetic 1D candles (180 days)
+        records_1d = []
+        for i in range(180):
+            t = now_ts - (180 - i) * 86400 * 1000
+            p = 100.0 + i * 0.5
+            records_1d.append({
+                "timestamp": t,
+                "datetime": pd.to_datetime(t, unit="ms", utc=True),
+                "open": p,
+                "high": p + 2.0,
+                "low": p - 2.0,
+                "close": p + 1.0,
+                "volume": 50000.0,
+                "taker_buy_vol": 25000.0
+            })
+        df_1d = pd.DataFrame(records_1d)
+
+        # Synthesize 4H (chunk 4): 240 / 4 = 60 bars
+        df_4h = loader._resample_chunk(df_1h, chunk_size=4)
+        self.assertIsNotNone(df_4h)
+        self.assertEqual(len(df_4h), 60)
+
+        # Synthesize 12H (chunk 12): 240 / 12 = 20 bars
+        df_12h = loader._resample_chunk(df_1h, chunk_size=12)
+        self.assertIsNotNone(df_12h)
+        self.assertEqual(len(df_12h), 20)
+
+        # Synthesize 1W (chunk 7): 180 / 7 = 25 bars
+        df_1w = loader._resample_chunk(df_1d, chunk_size=7)
+        self.assertIsNotNone(df_1w)
+        self.assertGreaterEqual(len(df_1w), 25)
+
+        # Synthesize 15D via _resample_15d: 180 / 15 = 12 bars
+        df_15d = loader._resample_15d(df_1d)
+        self.assertIsNotNone(df_15d)
+        self.assertEqual(len(df_15d), 12)
+
+        # Synthesize 1M (chunk 30): 180 / 30 = 6 bars
+        df_1m = loader._resample_chunk(df_1d, chunk_size=30)
+        self.assertIsNotNone(df_1m)
+        self.assertEqual(len(df_1m), 6)
+
+    def test_persistent_geo_cooldown_save_and_reload(self):
+        """Tests that upstream exchange geo-cooldowns persist across container reboots."""
+        from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            loader = MultiHorizonDataLoader()
+            loader._disk_cache_dir = tmp_dir
+
+            # Record geo block on Bybit and OKX
+            now = time.time()
+            loader._record_exchange_geo_block("bybit", 403, "Cloud IP restriction")
+            loader._record_exchange_geo_block("okx", 451, "Compliance block")
+
+            self.assertTrue(loader._is_exchange_geo_blocked("bybit"))
+            self.assertTrue(loader._is_exchange_geo_blocked("okx"))
+            self.assertFalse(loader._is_exchange_geo_blocked("gateio"))
+
+            # Verify persistent file was written
+            cooldown_file = os.path.join(tmp_dir, "geo_cooldowns.json")
+            self.assertTrue(os.path.exists(cooldown_file))
+
+            # Simulate reboot with new loader instance
+            new_loader = MultiHorizonDataLoader()
+            new_loader._disk_cache_dir = tmp_dir
+            new_loader._load_geo_cooldowns_from_disk()
+
+            # Cooldowns must be restored immediately without network latency
+            self.assertTrue(new_loader._is_exchange_geo_blocked("bybit"))
+            self.assertTrue(new_loader._is_exchange_geo_blocked("okx"))
+            self.assertFalse(new_loader._is_exchange_geo_blocked("gateio"))
+
+    # =========================================================================
+    # 12. WHATSAPP GATEWAY DURABILITY & HEALTH CHECK
+    # =========================================================================
+    def test_whatsapp_persistent_alert_spool_and_recovery(self):
+        """Tests that WhatsApp alert spool survives process reboots and recovers unsent messages."""
+        from app.services.whatsapp_service import WhatsAppService
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            wa = WhatsAppService()
+            wa._spool_file = os.path.join(tmp_dir, "whatsapp_alert_spool.json")
+            wa._dead_letter_file = os.path.join(tmp_dir, "whatsapp_dead_letter.json")
+            wa.enabled = True
+
+            # Enqueue test alert
+            wa._enqueue_message("120363431167900107@g.us", "🚨 TEST ALERT: BTC LONG 15M", priority=1)
+
+            # Check spool file exists and has 1 message
+            self.assertTrue(os.path.exists(wa._spool_file))
+            with open(wa._spool_file, "r", encoding="utf-8") as f:
+                spool_items = json.load(f)
+            self.assertEqual(len(spool_items), 1)
+            self.assertIn("BTC LONG 15M", spool_items[0]["text"])
+
+            # Simulate reboot by loading into fresh instance
+            wa2 = WhatsAppService()
+            wa2._spool_file = wa._spool_file
+            wa2._dead_letter_file = wa._dead_letter_file
+            wa2._spool.clear()
+            wa2._load_spool_from_disk()
+
+            self.assertEqual(len(wa2._spool), 1)
+            restored_item = list(wa2._spool.values())[0]
+            self.assertIn("BTC LONG 15M", restored_item["text"])
+
+    def test_whatsapp_dead_letter_archival_and_health_check(self):
+        """Tests dead-letter archival on retry exhaustion and health check diagnostics."""
+        from app.services.whatsapp_service import WhatsAppService
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            wa = WhatsAppService()
+            wa._dead_letter_file = os.path.join(tmp_dir, "whatsapp_dead_letter.json")
+
+            # Archive dead letter
+            test_item = {"target": "120363431167900107@g.us", "text": "FAILED ALERT", "retries": 6}
+            wa._archive_dead_letter(test_item, reason="Max retries (5) exceeded")
+
+            self.assertTrue(os.path.exists(wa._dead_letter_file))
+            with open(wa._dead_letter_file, "r", encoding="utf-8") as f:
+                dead_items = json.load(f)
+            self.assertEqual(len(dead_items), 1)
+            self.assertEqual(dead_items[0]["reason"], "Max retries (5) exceeded")
+
+            # Health check diagnostic check (mocked/safe execution)
+            wa.enabled = False
+            health = wa.check_gateway_health()
+            self.assertEqual(health["status"], "disabled")
+            self.assertTrue(health["healthy"])
 
 
 if __name__ == "__main__":
