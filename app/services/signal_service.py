@@ -814,7 +814,7 @@ class SignalService:
                 # 0. Tier-0 Early Breakeven Guard (Requires at least 50% of TP1 distance or +0.60% gain in range)
                 tp1_dist = abs(tp1_p - entry_p) / max(1e-12, entry_p) * 100.0
                 is_range_regime = any(k in str(getattr(s, "market_shield", "")).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP"])
-                t0_hurdle = min(1.20, max(0.60, 0.50 * tp1_dist)) if is_range_regime else max(1.00, 0.65 * tp1_dist)
+                t0_hurdle = min(1.00, max(0.60, 0.45 * tp1_dist)) if is_range_regime else min(1.20, max(0.80, 0.50 * tp1_dist))
                 if max_gain >= t0_hurdle and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
                     s.status = "TIER0_PROTECTED_BREAKEVEN"
                     soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)

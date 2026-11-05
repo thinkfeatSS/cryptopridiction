@@ -75,6 +75,17 @@ class FiveModelPriceRegressor:
         self.is_fitted = (len(self.fitted_models) >= 2)
         return self.is_fitted
 
+    def check_feature_compatibility(self, n_features: int) -> bool:
+        """Verifies if fitted models match the expected input feature dimension."""
+        if not self.is_fitted or not self.fitted_models:
+            return True
+        for name in self.fitted_models:
+            m = self.models.get(name)
+            if m is not None and hasattr(m, "n_features_in_"):
+                if int(m.n_features_in_) != int(n_features):
+                    return False
+        return True
+
     def predict_price_live(
         self,
         X_live: np.ndarray,
@@ -142,7 +153,16 @@ class FiveModelPriceRegressor:
                 fitted_set = getattr(self, "fitted_models", list(self.models.keys()))
                 if name not in fitted_set and len(fitted_set) > 0:
                     raise RuntimeError(f"Model {name} failed during fit phase")
-                pred_ret = float(model.predict(X_live)[0])
+
+                X_input = X_live
+                if hasattr(model, "n_features_in_"):
+                    n_exp = int(model.n_features_in_)
+                    if X_live.shape[1] > n_exp:
+                        X_input = X_live[:, :n_exp]
+                    elif X_live.shape[1] < n_exp:
+                        X_input = np.pad(X_live, ((0, 0), (0, n_exp - X_live.shape[1])), mode='constant')
+
+                pred_ret = float(model.predict(X_input)[0])
                 pred_ret = float(np.clip(pred_ret, -0.20, 0.20))
                 pred_price = round(current_price * (1.0 + pred_ret), 6 if current_price < 1.0 else 4)
                 predictions[name] = pred_price

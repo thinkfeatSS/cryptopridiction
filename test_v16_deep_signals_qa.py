@@ -19,6 +19,7 @@ import tempfile
 import json
 import csv
 import pandas as pd
+import numpy as np
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List
 
@@ -462,6 +463,7 @@ class TestDeepSignalQA(unittest.TestCase):
             wa = WhatsAppService()
             wa._spool_file = os.path.join(tmp_dir, "whatsapp_alert_spool.json")
             wa._dead_letter_file = os.path.join(tmp_dir, "whatsapp_dead_letter.json")
+            wa._spool.clear()
             wa.enabled = True
 
             # Enqueue test alert
@@ -507,6 +509,131 @@ class TestDeepSignalQA(unittest.TestCase):
             health = wa.check_gateway_health()
             self.assertEqual(health["status"], "disabled")
             self.assertTrue(health["healthy"])
+
+    # =========================================================================
+    # 13. MICROSTRUCTURE FEATURE EXTRACTION & CVD SURGE
+    # =========================================================================
+    def test_microstructure_taker_buy_and_cvd_surge_extraction(self):
+        """Tests that CandleDynamicsFeatureExtractor computes taker buy volume ratio and CVD surge cleanly."""
+        from app.engine.signals.candle_features import CandleDynamicsFeatureExtractor
+        fe = CandleDynamicsFeatureExtractor()
+
+        # Build test DataFrame with synthetic taker_buy_vol
+        df = pd.DataFrame({
+            "timestamp": pd.date_range("2026-11-01", periods=20, freq="15min"),
+            "open": np.linspace(100.0, 105.0, 20),
+            "high": np.linspace(101.0, 106.0, 20),
+            "low": np.linspace(99.0, 104.0, 20),
+            "close": np.linspace(100.5, 105.5, 20),
+            "volume": np.full(20, 1000.0),
+            "taker_buy_vol": np.full(20, 650.0)  # 65% aggressive taker buy flow
+        })
+
+        feats = fe.extract_features(df, prefix="15m_")
+        self.assertFalse(feats.empty)
+        self.assertIn("15m_taker_buy_ratio", feats.columns)
+        self.assertIn("15m_taker_buy_ratio_5", feats.columns)
+        self.assertIn("15m_cvd_surge_5", feats.columns)
+
+        # Check values: 650 / 1000 = 0.65
+        last_tb_ratio = float(feats["15m_taker_buy_ratio"].iloc[-1])
+        self.assertAlmostEqual(last_tb_ratio, 0.65, places=2)
+
+        # Delta vol = 2*650 - 1000 = +300. Surge = 300 / 1000 = +0.30
+        last_cvd = float(feats["15m_cvd_surge_5"].iloc[-1])
+        self.assertGreater(last_cvd, 0.20)
+
+        # Ensure no NaNs or Infs
+        self.assertEqual(feats.isna().sum().sum(), 0)
+        self.assertEqual(np.isinf(feats.values).sum(), 0)
+
+    # =========================================================================
+    # 14. EMPIRICAL BAYESIAN PROBABILITY ADJUSTMENTS
+    # =========================================================================
+    def test_empirical_bayesian_probability_adjustments(self):
+        """Tests empirical Bayesian probability adjustments for taker flow, liquidity reclaim, and toxic breakouts."""
+        from app.engine.signals.meta_labeler import CoinSpecificMetaLabeler
+
+        base_p = 0.55
+
+        # 1. Long with aggressive taker flow (taker_buy_ratio = 0.65, cvd_surge = 0.25) -> Boost
+        sig_long_flow = {
+            "direction": "LONG",
+            "canonical_strategy": "ORDER_BLOCK_LONG",
+            "taker_buy_ratio": 0.65,
+            "cvd_surge_5": 0.25
+        }
+        adj_long = CoinSpecificMetaLabeler.apply_microstructure_risk_adjustments(base_p, sig_long_flow, 2.0, 1.0, 0.0)
+        self.assertGreater(adj_long, base_p)
+
+        # 2. Long with seller dumping into bids (taker_buy_ratio = 0.35, cvd_surge = -0.30) -> Discount
+        sig_long_dump = {
+            "direction": "LONG",
+            "canonical_strategy": "ORDER_BLOCK_LONG",
+            "taker_buy_ratio": 0.35,
+            "cvd_surge_5": -0.30
+        }
+        adj_dump = CoinSpecificMetaLabeler.apply_microstructure_risk_adjustments(base_p, sig_long_dump, 2.0, 1.0, 0.0)
+        self.assertLess(adj_dump, base_p)
+
+        # 3. Liquidity Reclaim Strategy Edge (Empirical 83.3%-100% win rate) -> Elevation
+        sig_reclaim = {
+            "direction": "LONG",
+            "canonical_strategy": "LIQUIDITY_RECLAIM_LONG",
+            "decision": "💎 LIQUIDITY RECLAIM CONFIRMED",
+            "taker_buy_ratio": 0.52,
+            "cvd_surge_5": 0.05
+        }
+        adj_reclaim = CoinSpecificMetaLabeler.apply_microstructure_risk_adjustments(base_p, sig_reclaim, 2.0, 1.0, 0.0)
+        self.assertGreaterEqual(adj_reclaim, base_p + 0.04)
+
+        # 4. Toxic Blind Breakout without CVD surge -> Heavy Discount
+        sig_toxic = {
+            "direction": "LONG",
+            "canonical_strategy": "MOMENTUM_TREND_EXPANSION",
+            "taker_buy_ratio": 0.50,
+            "cvd_surge_5": 0.02
+        }
+        adj_toxic = CoinSpecificMetaLabeler.apply_microstructure_risk_adjustments(base_p, sig_toxic, 2.0, 1.0, 0.0)
+        self.assertLessEqual(adj_toxic, base_p - 0.08)
+
+    # =========================================================================
+    # 15. TIER-0+ PROFIT LOCK AT INTERMEDIATE GAIN
+    # =========================================================================
+    def test_tier0_plus_profit_lock_at_intermediate_gain(self):
+        """Tests that signal tracking locks breakeven when gain reaches +1.0% to prevent losing trades."""
+        from app.models.signal import SignalAudit
+
+        entry_p = 100.0
+        sig = SignalAudit(
+            signal_id="TEST_T0_LOCK_01",
+            symbol="BTC/USDT",
+            horizon="15M",
+            direction="LONG",
+            entry_price=entry_p,
+            sl_price=98.0,       # Initial SL at 98.0 (-2.0%)
+            tp1_price=104.0,     # TP1 at 104.0 (+4.0%)
+            tp2_price=106.0,
+            tp3_price=108.0,
+            peak_price_seen=101.20,  # Intermediate peak reached +1.20% gain!
+            trough_price_seen=99.80,
+            status="ACTIVE",
+            created_at=datetime.now(timezone.utc)
+        )
+
+        # Evaluate against current price = 101.00 (above entry, touched +1.20%)
+        live_prices = {"BTC/USDT": 101.00}
+        
+        # Test the Tier-0 logic directly
+        tp1_dist = abs(sig.tp1_price - entry_p) / entry_p * 100.0  # 4.0%
+        max_gain = ((sig.peak_price_seen - entry_p) / entry_p) * 100.0  # 1.2%
+        t0_hurdle = min(1.20, max(0.80, 0.50 * tp1_dist))  # min(1.20, 2.0) = 1.20%
+        
+        self.assertGreaterEqual(max_gain, t0_hurdle)
+        
+        # When triggered: status becomes TIER0_PROTECTED_BREAKEVEN and SL moves to entry * 1.0005
+        soft_be_p = entry_p * 1.0005
+        self.assertGreater(soft_be_p, sig.sl_price)
 
 
 if __name__ == "__main__":

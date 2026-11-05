@@ -158,6 +158,24 @@ class EntryConfirmationEngine:
             except Exception:
                 volume_surge_ratio = 1.0
 
+        # Calculate Taker Buy Volume and CVD Surge Metrics
+        tb_ratio = 0.50
+        cvd_surge = 0.0
+        if "taker_buy_vol" in df.columns and c_vol > 0:
+            try:
+                tb_vol = float(trigger_candle.get("taker_buy_vol", c_vol * 0.5) or (c_vol * 0.5))
+                tb_ratio = round(float(np.clip(tb_vol / (c_vol + 1e-10), 0.0, 1.0)), 4)
+                if len(df) >= 5:
+                    v_slice = df["volume"].iloc[-5:].values
+                    tb_slice = df["taker_buy_vol"].iloc[-5:].values
+                    tot_v = float(np.sum(v_slice))
+                    tot_tb = float(np.sum(tb_slice))
+                    if tot_v > 0:
+                        cvd_surge = round(float(np.clip((2.0 * tot_tb - tot_v) / tot_v, -1.0, 1.0)), 4)
+            except Exception:
+                tb_ratio = 0.50
+                cvd_surge = 0.0
+
         # Intraday Flash Liquidity Drain Detection (Acute volume collapse or vacuum on active candle)
         is_flash_liquidity_drain = False
         flash_drain_reason = ""
@@ -308,7 +326,9 @@ class EntryConfirmationEngine:
             "is_range_resistance_rejection": bool((not is_long) and (upper_wick_ratio >= 0.30 and close_pos_in_range <= 0.60)),
             "is_range_support_rejection": bool(is_long and (lower_wick_ratio >= 0.30 and close_pos_in_range >= 0.40)),
             "is_flash_liquidity_drain": is_flash_liquidity_drain,
-            "flash_drain_reason": flash_drain_reason
+            "flash_drain_reason": flash_drain_reason,
+            "taker_buy_ratio": tb_ratio,
+            "cvd_surge_5": cvd_surge
         }
         if swept_price is not None:
             metrics["swept_price"] = swept_price

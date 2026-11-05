@@ -295,6 +295,23 @@ class SignalGenerationSystem:
         if direction == "LONG" and not alt_longs_allowed and is_liquidity_reclaim:
             is_vetoed = False
 
+        # Empirical Breakout Gate: Blind momentum breakouts into resistance/support without
+        # aggressive taker absorption or pullback confirmation have 0.0% empirical win rate (0W/56L).
+        is_breakout_strat = any(k in str(canonical_strategy).upper() for k in [
+            "MOMENTUM_TREND_EXPANSION", "COILING_VOLATILITY_BREAKOUT"
+        ]) and not is_liquidity_reclaim and not is_ob_setup
+
+        if is_strat_allowed and is_breakout_strat:
+            tb_ratio = float(candle_metrics.get("taker_buy_ratio", 0.5) if candle_metrics else 0.5)
+            cvd_val = float(candle_metrics.get("cvd_surge_5", 0.0) if candle_metrics else 0.0)
+            has_orderflow_support = (direction == "LONG" and (tb_ratio >= 0.54 or cvd_val >= 0.12)) or \
+                                    (direction == "SHORT" and (tb_ratio <= 0.46 or cvd_val <= -0.12))
+            is_pullback_confirmed = bool(candle_metrics and candle_metrics.get("is_pullback"))
+
+            if not has_orderflow_support and not is_pullback_confirmed:
+                is_strat_allowed = False
+                strat_veto_reason = f"Breakout strategy {canonical_strategy} requires aggressive taker flow confirmation (Taker Ratio={tb_ratio:.2f}) or pullback retest"
+
         # Section 35 Floor Headroom Guard for SHORT entries:
         # If shorting near macro range support with insufficient headroom (< 1.20 * active_atr),
         # veto the short to avoid entering directly into the demand floor.
@@ -404,16 +421,16 @@ class SignalGenerationSystem:
 
             # Guarantee strict price invariants against exec_entry_price
             sl_dist = max(1e-9, abs(exec_entry_price - cand_sl))
-            min_tp1_dist = max(2.0 * sl_dist, active_atr * 2.0)
-            min_tp2_dist = max(3.0 * sl_dist, active_atr * 3.0)
-            min_tp3_dist = max(4.5 * sl_dist, active_atr * 4.5)
+            min_tp1_dist = max(2.0 * sl_dist, active_atr * 1.25)
+            min_tp2_dist = max(3.0 * sl_dist, active_atr * 2.25)
+            min_tp3_dist = max(4.5 * sl_dist, active_atr * 3.50)
             if direction == "LONG":
                 if cand_sl >= exec_entry_price:
                     cand_sl = format_dynamic_precision(exec_entry_price - (active_atr * 1.2))
                     sl_dist = max(1e-9, abs(exec_entry_price - cand_sl))
-                    min_tp1_dist = max(2.0 * sl_dist, active_atr * 2.0)
-                    min_tp2_dist = max(3.0 * sl_dist, active_atr * 3.0)
-                    min_tp3_dist = max(4.5 * sl_dist, active_atr * 4.5)
+                    min_tp1_dist = max(2.0 * sl_dist, active_atr * 1.25)
+                    min_tp2_dist = max(3.0 * sl_dist, active_atr * 2.25)
+                    min_tp3_dist = max(4.5 * sl_dist, active_atr * 3.50)
                 if (cand_tp1 - exec_entry_price) < min_tp1_dist:
                     cand_tp1 = format_dynamic_precision(exec_entry_price + min_tp1_dist)
                 if cand_tp2 <= cand_tp1 or (cand_tp2 - exec_entry_price) < min_tp2_dist:
@@ -424,9 +441,9 @@ class SignalGenerationSystem:
                 if cand_sl <= exec_entry_price:
                     cand_sl = format_dynamic_precision(exec_entry_price + (active_atr * 1.2))
                     sl_dist = max(1e-9, abs(exec_entry_price - cand_sl))
-                    min_tp1_dist = max(2.0 * sl_dist, active_atr * 2.0)
-                    min_tp2_dist = max(3.0 * sl_dist, active_atr * 3.0)
-                    min_tp3_dist = max(4.5 * sl_dist, active_atr * 4.5)
+                    min_tp1_dist = max(2.0 * sl_dist, active_atr * 1.25)
+                    min_tp2_dist = max(3.0 * sl_dist, active_atr * 2.25)
+                    min_tp3_dist = max(4.5 * sl_dist, active_atr * 3.50)
                 if (exec_entry_price - cand_tp1) < min_tp1_dist:
                     cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - min_tp1_dist))
                 if cand_tp2 >= cand_tp1 or (exec_entry_price - cand_tp2) < min_tp2_dist:
@@ -469,13 +486,13 @@ class SignalGenerationSystem:
                 tp3_mult = 5.50
 
             # Phase 1 & 2: Dynamic Noise Floor & Symmetrical 1:2.0+ Primary Target Geometry
-            min_sl_dist = max(exec_entry_price * 0.010, active_atr * 1.25) if horizon_label == "15M" else (active_atr * 1.20)
+            min_sl_dist = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
             cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - min_sl_dist))
             
             # Anchor primary TP1 to at least 2.0x SL distance (True 1:2.0+ R:R)
-            target_tp1_dist = max(min_sl_dist * 2.0, active_atr * max(tp1_mult, 2.0))
-            target_tp2_dist = max(min_sl_dist * 3.0, active_atr * tp2_mult, target_tp1_dist + active_atr * 0.8)
-            target_tp3_dist = max(min_sl_dist * 4.5, active_atr * tp3_mult, target_tp2_dist + active_atr * 1.2)
+            target_tp1_dist = max(min_sl_dist * 2.0, active_atr * max(tp1_mult * 0.75, 1.60))
+            target_tp2_dist = max(min_sl_dist * 3.0, active_atr * tp2_mult * 0.85, target_tp1_dist + active_atr * 0.8)
+            target_tp3_dist = max(min_sl_dist * 4.5, active_atr * tp3_mult * 0.90, target_tp2_dist + active_atr * 1.2)
             
             cand_tp1 = format_dynamic_precision(exec_entry_price + target_tp1_dist)
             cand_tp2 = format_dynamic_precision(exec_entry_price + target_tp2_dist)
@@ -513,13 +530,13 @@ class SignalGenerationSystem:
                 tp3_mult = 5.50
 
             # Phase 1 & 2: Dynamic Noise Floor & Symmetrical 1:2.0+ Primary Target Geometry for SHORT
-            min_sl_dist = max(exec_entry_price * 0.010, active_atr * 1.25) if horizon_label == "15M" else (active_atr * 1.20)
+            min_sl_dist = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
             cand_sl = format_dynamic_precision(exec_entry_price + min_sl_dist)
             
             # Anchor primary TP1 to at least 2.0x SL distance (True 1:2.0+ R:R)
-            target_tp1_dist = max(min_sl_dist * 2.0, active_atr * max(tp1_mult, 2.0))
-            target_tp2_dist = max(min_sl_dist * 3.0, active_atr * tp2_mult, target_tp1_dist + active_atr * 0.8)
-            target_tp3_dist = max(min_sl_dist * 4.5, active_atr * tp3_mult, target_tp2_dist + active_atr * 1.2)
+            target_tp1_dist = max(min_sl_dist * 2.0, active_atr * max(tp1_mult * 0.75, 1.60))
+            target_tp2_dist = max(min_sl_dist * 3.0, active_atr * tp2_mult * 0.85, target_tp1_dist + active_atr * 0.8)
+            target_tp3_dist = max(min_sl_dist * 4.5, active_atr * tp3_mult * 0.90, target_tp2_dist + active_atr * 1.2)
             
             cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp1_dist))
             cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp2_dist))
@@ -655,7 +672,10 @@ class SignalGenerationSystem:
             "regime": active_market_regime,
             "market_regime": active_market_regime,
             "canonical_strategy": canonical_strategy,
-            "chop_index": float(candle_metrics.get("chop_index", 50.0) if candle_metrics else 50.0)
+            "chop_index": float(candle_metrics.get("chop_index", 50.0) if candle_metrics else 50.0),
+            "taker_buy_ratio": float(candle_metrics.get("taker_buy_ratio", 0.50) if candle_metrics else 0.50),
+            "cvd_surge_5": float(candle_metrics.get("cvd_surge_5", 0.0) if candle_metrics else 0.0),
+            "funding_rate": current_funding_rate
         }
         # Phase 4B: Dynamic Meta Hurdle mathematically scaled to actual R:R
         # Hurdle = max(0.44, min(0.65, ((1.0 + friction) / (1.0 + actual_rr)) * 1.15))

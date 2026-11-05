@@ -74,6 +74,17 @@ class FiveModelDirectionClassifier:
         self.is_fitted = (len(self.fitted_models) >= 2)
         return self.is_fitted
 
+    def check_feature_compatibility(self, n_features: int) -> bool:
+        """Verifies if fitted models match the expected input feature dimension."""
+        if not self.is_fitted or not self.fitted_models:
+            return True
+        for name in self.fitted_models:
+            m = self.models.get(name)
+            if m is not None and hasattr(m, "n_features_in_"):
+                if int(m.n_features_in_) != int(n_features):
+                    return False
+        return True
+
     def predict_live(self, X_live: np.ndarray) -> Dict[str, Any]:
         """Runs live majority consensus direction voting across the 5 classifiers.
         Seamlessly serves the Cold-Start Laplace Prior when the model is in initial warm-up (< 15 candles).
@@ -121,8 +132,16 @@ class FiveModelDirectionClassifier:
                 if name not in fitted_set and len(fitted_set) > 0:
                     raise RuntimeError(f"Model {name} failed during fit phase")
 
+                X_input = X_live
+                if hasattr(model, "n_features_in_"):
+                    n_exp = int(model.n_features_in_)
+                    if X_live.shape[1] > n_exp:
+                        X_input = X_live[:, :n_exp]
+                    elif X_live.shape[1] < n_exp:
+                        X_input = np.pad(X_live, ((0, 0), (0, n_exp - X_live.shape[1])), mode='constant')
+
                 if hasattr(model, "predict_proba"):
-                    proba_out = model.predict_proba(X_live)
+                    proba_out = model.predict_proba(X_input)
                     # Dynamically locate class 1 (bullish) index
                     if hasattr(model, "classes_") and len(model.classes_) > 0:
                         classes_list = list(model.classes_)
@@ -136,7 +155,7 @@ class FiveModelDirectionClassifier:
                     else:
                         prob_bull = float(proba_out[0, 1] if proba_out.shape[1] > 1 else proba_out[0, 0])
                 else:
-                    pred_val = float(model.predict(X_live)[0])
+                    pred_val = float(model.predict(X_input)[0])
                     prob_bull = float(np.clip(pred_val, 0.0, 1.0))
                 
                 prob_bull = float(np.clip(prob_bull, 0.01, 0.99))

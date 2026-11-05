@@ -91,6 +91,23 @@ class CandleDynamicsFeatureExtractor:
         obv = np.where(c > c.shift(1), v, np.where(c < c.shift(1), -v, 0.0)).cumsum()
         feats[f"{pfx}obv_slope_5"] = (pd.Series(obv, index=data.index).diff(5) / (v.rolling(5).sum() + 1e-10)).clip(-2.0, 2.0)
 
+        # Taker Buy Volume Ratio & Cumulative Volume Delta (CVD) Order Flow Dynamics
+        if "taker_buy_vol" in data.columns:
+            tb_vol = pd.Series(data["taker_buy_vol"], index=data.index, dtype=float).fillna(v * 0.5)
+        else:
+            # High-fidelity continuous neutral proxy based on candle wick and close dynamics
+            tb_vol = v * (0.5 + 0.5 * ((c - l) / bar_range - 0.5).clip(-0.5, 0.5))
+
+        tb_vol = tb_vol.clip(lower=0.0)
+        feats[f"{pfx}taker_buy_ratio"] = (tb_vol / (v + 1e-10)).clip(0.0, 1.0)
+        feats[f"{pfx}taker_buy_ratio_5"] = (tb_vol.rolling(5).sum() / sum_vol5).clip(0.0, 1.0)
+        feats[f"{pfx}taker_buy_ratio_14"] = (tb_vol.rolling(14).sum() / sum_vol14).clip(0.0, 1.0)
+
+        # Volume Delta & CVD Surge
+        delta_vol = (2.0 * tb_vol) - v
+        feats[f"{pfx}cvd_surge_5"] = (delta_vol.rolling(5).sum() / sum_vol5).clip(-1.0, 1.0)
+        feats[f"{pfx}cvd_surge_14"] = (delta_vol.rolling(14).sum() / sum_vol14).clip(-1.0, 1.0)
+
         # =====================================================================
         # 3. CANDLE VOLATILITY DYNAMICS
         # =====================================================================

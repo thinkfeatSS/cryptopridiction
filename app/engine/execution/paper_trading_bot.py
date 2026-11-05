@@ -515,8 +515,8 @@ class PaperTradingBot:
                 "remaining_position_size_usd": position_size_usd,
                 "volume_24h_usd": float(signal.get("volume_24h_usd") or 0.0),
                 # Dynamic Tier-0 BE threshold: scaled by desk and range-regime awareness
-                # Scalp: 0.80%, Day: 1.20%, Swing: 2.00%
-                "tier0_threshold_pct": 0.80 if desk_key == "scalp" else (1.20 if desk_key in ["day", "intraday"] else 2.00),
+                # Scalp: 0.70%, Day: 1.00%, Swing: 1.50%
+                "tier0_threshold_pct": 0.70 if desk_key == "scalp" else (1.00 if desk_key in ["day", "intraday"] else 1.50),
                 "is_breakeven_locked": False,
                 "peak_gain_pct": 0.0,
                 "unrealized_pnl_usd": 0.0,
@@ -1120,11 +1120,11 @@ class PaperTradingBot:
                 tp1_p_pos = float(pos.get("tp1_price", 0.0))
                 tp1_dist = abs(tp1_p_pos - entry_p) / max(1e-12, entry_p) * 100.0
                 if direction == "LONG":
-                    tp1_proximity_reached = (tp1_p_pos > entry_p and curr_p >= (entry_p + (tp1_p_pos - entry_p) * 0.65))
+                    tp1_proximity_reached = (tp1_p_pos > entry_p and curr_p >= (entry_p + (tp1_p_pos - entry_p) * 0.50))
                 else:
-                    tp1_proximity_reached = (tp1_p_pos < entry_p and curr_p <= (entry_p - (entry_p - tp1_p_pos) * 0.65))
+                    tp1_proximity_reached = (tp1_p_pos < entry_p and curr_p <= (entry_p - (entry_p - tp1_p_pos) * 0.50))
 
-                effective_t0_thresh = min(float(pos.get("tier0_threshold_pct", 1.20)), max(0.60, 0.50 * tp1_dist))
+                effective_t0_thresh = min(float(pos.get("tier0_threshold_pct", 1.00)), max(0.60, 0.45 * tp1_dist))
 
                 if not pos.get("is_breakeven_locked") and not pos.get("tp1_hit") and not pos.get("tp2_hit") and (tp1_proximity_reached or pos["peak_gain_pct"] >= effective_t0_thresh):
                     pos["is_breakeven_locked"] = True

@@ -210,14 +210,17 @@ class PerCoinModelRegistry:
         cache_key = f"{clean_sym}_{tf}"
         now_ts = time.time()
         n_samples = len(X_train) if X_train is not None else 0
+        n_feats = X_train.shape[1] if (X_train is not None and getattr(X_train, "ndim", 1) > 1) else 0
 
         # 1. Check in-memory cache
         with self._lock:
             if cache_key in self._cache:
                 c_clfs, c_regs, c_fit_ts, c_candle_ts = self._cache[cache_key]
                 is_cached_cold = getattr(c_clfs, "is_cold_start", False)
+                clfs_compat = getattr(c_clfs, "check_feature_compatibility", lambda d: True)(n_feats) if n_feats > 0 else True
+                regs_compat = getattr(c_regs, "check_feature_compatibility", lambda d: True)(n_feats) if n_feats > 0 else True
                 # If cached was cold-start but now we have >= 15 candles, promote to full fit!
-                if not (is_cached_cold and n_samples >= 15):
+                if not (is_cached_cold and n_samples >= 15) and clfs_compat and regs_compat:
                     if (now_ts - c_fit_ts < ttl_seconds) and (last_candle_ts == c_candle_ts):
                         return c_clfs, c_regs, False
 
@@ -233,9 +236,11 @@ class PerCoinModelRegistry:
                 c_clfs = bundle.get("classifiers")
                 c_regs = bundle.get("regressors")
                 is_disk_cold = bundle.get("is_cold_start", False) or getattr(c_clfs, "is_cold_start", False)
+                clfs_compat = getattr(c_clfs, "check_feature_compatibility", lambda d: True)(n_feats) if n_feats > 0 else True
+                regs_compat = getattr(c_regs, "check_feature_compatibility", lambda d: True)(n_feats) if n_feats > 0 else True
 
-                # Only reuse disk cache if not pending cold-start promotion
-                if not (is_disk_cold and n_samples >= 15):
+                # Only reuse disk cache if not pending cold-start promotion and feature compatible
+                if not (is_disk_cold and n_samples >= 15) and clfs_compat and regs_compat:
                     if c_clfs and c_regs and (last_candle_ts == b_candle_ts) and (now_ts - b_fit_ts < ttl_seconds):
                         with self._lock:
                             self._cache[cache_key] = (c_clfs, c_regs, b_fit_ts, b_candle_ts)
