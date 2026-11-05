@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from app.config import settings
 from app.database import get_db
 from app.engine.scanner.filters import UniverseFilter
+from app.quant_v16.validation import safe_float, safe_ratio
 
 v16_router = APIRouter(prefix="/api/v16", tags=["Quant Edge V16 Intelligence"])
 
@@ -117,21 +118,21 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
         sym_clean = sym.replace("/", "").replace(":USDT", "").upper()
         dirn = r.get("direction", "LONG").upper()
         hz = r.get("horizon", "1H")
-        entry = float(r.get("entry_price") or 0.0)
-        tp1 = float(r.get("tp1_price") or entry)
-        tp2 = float(r.get("tp2_price") or tp1)
-        tp3 = float(r.get("tp3_price") or tp2)
-        sl = float(r.get("sl_price") or entry)
-        ptp1 = float(r.get("p_tp1") or r.get("meta_win_prob_pct") or 65.0)
-        ptp2 = float(r.get("p_tp2") or (ptp1 * 0.65))
-        ptp3 = float(r.get("p_tp3") or (ptp2 * 0.55))
-        psl = float(r.get("p_sl") or max(5.0, 100.0 - ptp1))
-        exp_net = float(r.get("expected_return_pct") or 0.25)
+        entry = safe_float(r.get("entry_price"), 0.0)
+        tp1 = safe_float(r.get("tp1_price"), entry)
+        tp2 = safe_float(r.get("tp2_price"), tp1)
+        tp3 = safe_float(r.get("tp3_price"), tp2)
+        sl = safe_float(r.get("sl_price"), entry)
+        ptp1 = safe_float(r.get("p_tp1") or r.get("meta_win_prob_pct"), 65.0)
+        ptp2 = safe_float(r.get("p_tp2"), ptp1 * 0.65)
+        ptp3 = safe_float(r.get("p_tp3"), ptp2 * 0.55)
+        psl = safe_float(r.get("p_sl"), max(5.0, 100.0 - ptp1))
+        exp_net = safe_float(r.get("expected_return_pct"), 0.25)
         grade = r.get("quality_grade") or "Grade A"
         csv_st = (r.get("status") or "").strip().upper()
         csv_out = r.get("outcome_label") or ""
-        curr = float(r.get("current_price") or entry)
-        pnl = float(str(r.get("realized_return_pct") or r.get("live_pnl_pct") or "0").replace("%", "").strip() or 0.0)
+        curr = safe_float(r.get("current_price"), entry)
+        pnl = safe_float(r.get("realized_return_pct") or r.get("live_pnl_pct"), 0.0)
         th_id = f"THESIS-{sym_clean}-{dirn}"
 
         st = csv_st if csv_st else "ACTIVE"
@@ -157,11 +158,11 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 "p_tp2": ptp2,
                 "p_tp3": ptp3,
                 "p_sl": psl,
-                "expected_gross_return": float(r.get("ev_gross") or (exp_net + 0.15)),
-                "expected_net_return": float(r.get("ev_net") or exp_net),
-                "total_execution_costs": float(r.get("costs_total_pct") or 0.145),
-                "risk_reward": float(str(r.get("risk_reward_ratio", "2.0")).replace("1:", "")) if "1:" in str(r.get("risk_reward_ratio", "")) else float(r.get("risk_reward_ratio") or 2.0),
-                "signal_score": float(r.get("conviction_pct") or 85.0),
+                "expected_gross_return": safe_float(r.get("ev_gross"), exp_net + 0.15),
+                "expected_net_return": safe_float(r.get("ev_net"), exp_net),
+                "total_execution_costs": safe_float(r.get("costs_total_pct"), 0.145),
+                "risk_reward": safe_ratio(r.get("risk_reward_ratio"), 2.0),
+                "signal_score": safe_float(r.get("conviction_pct"), 85.0),
                 "grade": grade,
                 "status": st,
                 "liquidity_score": 92.0,
@@ -589,7 +590,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                                 if sig_rec.exit_price is None:
                                     sig_rec.exit_price = d_state.get("exit_price") or sig_rec.entry_price
                                 if sig_rec.realized_return_pct is None:
-                                    sig_rec.realized_return_pct = float(d_state.get("realized_return_pct", 0.0))
+                                    sig_rec.realized_return_pct = safe_float(d_state.get("realized_return_pct"), 0.0)
                                 db_changed = True
                     if db_changed:
                         db_session.commit()

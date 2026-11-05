@@ -23,6 +23,7 @@ import requests
 
 from app.services.cache_service import cache_service
 from app.services.fundamental_service import fundamental_service
+from app.quant_v16.validation import safe_float, safe_ratio
 
 logger = logging.getLogger("institutional_intelligence")
 
@@ -526,10 +527,10 @@ class InstitutionalIntelligenceService:
                         if not cname or idx >= len(contexts):
                             continue
                         c = contexts[idx]
-                        px = float(c.get("markPx", 0.0))
-                        funding = float(c.get("funding", 0.0001))
-                        oi = float(c.get("openInterest", 0.0))
-                        vol24 = float(c.get("dayNtlVlm", 0.0))
+                        px = safe_float(c.get("markPx"), 0.0)
+                        funding = safe_float(c.get("funding"), 0.0001)
+                        oi = safe_float(c.get("openInterest"), 0.0)
+                        vol24 = safe_float(c.get("dayNtlVlm"), 0.0)
                         res[cname] = {
                             "mark_price": px,
                             "funding_8h": funding,
@@ -880,7 +881,7 @@ class InstitutionalIntelligenceService:
         clean_coin = symbol.split("/")[0].split(":")[0].upper()
         effective_price = current_price
         if effective_price is None or effective_price <= 0 or (effective_price == 76500.0 and clean_coin != "BTC"):
-            hl_px = float(hyperliquid.get("mark_price", 0.0))
+            hl_px = safe_float(hyperliquid.get("mark_price"), 0.0)
             if hl_px > 0:
                 effective_price = hl_px
             elif effective_price is None or effective_price <= 0:

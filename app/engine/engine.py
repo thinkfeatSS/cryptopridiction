@@ -12,6 +12,7 @@ from app.engine.scanner.horizon_scanner import MultiHorizonScanner
 from app.engine.scanner.filters import UniverseFilter
 from app.engine.signals.signal_generator import SignalGenerationSystem
 from app.quant_v16.entry_confirmation import format_dynamic_precision
+from app.quant_v16.validation import safe_float, safe_ratio
 from app.engine.execution.paper_trading_bot import PaperTradingBot
 
 class UnifiedCryptoEngine:
@@ -1455,7 +1456,7 @@ class UnifiedCryptoEngine:
             else:
                 norm_hz = "15M"
 
-            sig_id = s.get("trade_id") or s.get("signal_id") or f"SIG_{now_utc.strftime('%Y%m%d_%H%M')}_{sym_clean}_{norm_hz}"
+            sig_id = s.get("trade_id") or s.get("signal_id") or f"SIG_{now_utc.strftime('%Y%m%d_%H%M%S')}_{sym_clean}_{norm_hz}"
 
             if sig_id in existing_ids:
                 continue
@@ -1485,11 +1486,12 @@ class UnifiedCryptoEngine:
                 close_dt = now_utc + timedelta(days=1)
                 win_str = f"{date_str} {now_utc.strftime('%H:%M')} UTC ➔ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC (24 Hours)"
 
-            entry_p = format_dynamic_precision(float(s.get("entry_price") or s.get("current_price") or 0.0))
-            tp1_p = format_dynamic_precision(float(s.get("tp1_price") or entry_p))
-            tp2_p = format_dynamic_precision(float(s.get("tp2_price") or tp1_p))
-            tp3_p = format_dynamic_precision(float(s.get("tp3_price") or tp2_p))
-            sl_p = format_dynamic_precision(float(s.get("sl_price") or entry_p))
+            raw_entry = safe_float(s.get("entry_price") or s.get("current_price"), 0.0)
+            entry_p = format_dynamic_precision(raw_entry)
+            tp1_p = format_dynamic_precision(safe_float(s.get("tp1_price"), raw_entry))
+            tp2_p = format_dynamic_precision(safe_float(s.get("tp2_price"), safe_float(s.get("tp1_price"), raw_entry)))
+            tp3_p = format_dynamic_precision(safe_float(s.get("tp3_price"), safe_float(s.get("tp2_price"), safe_float(s.get("tp1_price"), raw_entry))))
+            sl_p = format_dynamic_precision(safe_float(s.get("sl_price"), raw_entry))
 
             clean_grade = "Grade A+" if "A+" in str(s.get("quality_grade", "")) else ("Grade A" if "Grade A" in str(s.get("quality_grade", "")) else "Grade B")
             tier_num = 1 if "A+" in str(s.get("quality_grade", "")) else (2 if "Grade A" in str(s.get("quality_grade", "")) else 3)

@@ -15,6 +15,7 @@ from app.config import settings
 from app.models import SignalAudit, PaperPosition, ClosedTrade, MarketForecast
 from app.services.db_sync import sync_files_to_db_live, get_sync_state, get_cached_forecast, set_cached_forecast
 from app.engine.scanner.filters import UniverseFilter
+from app.quant_v16.validation import safe_float, safe_ratio
 
 _LIVE_PRICES_CACHE: Dict[str, float] = {}
 _LIVE_PRICES_TS: float = 0.0
@@ -618,12 +619,12 @@ class SignalService:
                     s.outcome_label = "RUNNING 🚀"
                     if hasattr(s, "paper_trading_status"):
                         s.paper_trading_status = "EXECUTED (PAPER WALLET)"
-                    cur_p = float(op_match.get("current_price") or s.entry_price or 0.0)
+                    cur_p = safe_float(op_match.get("current_price") or s.entry_price, 0.0)
                     if hasattr(s, "current_price"):
                         s.current_price = cur_p
                     if hasattr(s, "live_pnl_pct"):
-                        s.live_pnl_pct = float(op_match.get("unrealized_pnl_pct") or 0.0)
-                    s.sl_price = float(op_match.get("sl_price") or s.sl_price or 0.0)
+                        s.live_pnl_pct = safe_float(op_match.get("unrealized_pnl_pct"), 0.0)
+                    s.sl_price = safe_float(op_match.get("sl_price") or s.sl_price, 0.0)
                     s.exit_price = None
                     s.realized_return_pct = None
                     s.evaluated_at_utc = None
@@ -644,8 +645,8 @@ class SignalService:
 
                 if pt_match:
                     exit_reason = str(pt_match.get("exit_reason", ""))
-                    exit_p = float(pt_match.get("exit_price") or s.entry_price or 0.0)
-                    ret_pct = float(pt_match.get("return_pct") or 0.0)
+                    exit_p = safe_float(pt_match.get("exit_price") or s.entry_price, 0.0)
+                    ret_pct = safe_float(pt_match.get("return_pct"), 0.0)
                     closed_at = pt_match.get("closed_at_utc") or pt_match.get("closed_at") or now_str
 
                     if "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
@@ -698,7 +699,7 @@ class SignalService:
                 if canc_match:
                     canc_reason = str(canc_match.get("cancellation_reason", "CANCELLED"))
                     canc_at = canc_match.get("cancelled_at_utc") or canc_match.get("cancelled_at") or now_str
-                    limit_p = float(canc_match.get("optimal_entry_limit") or s.entry_price or 0.0)
+                    limit_p = safe_float(canc_match.get("optimal_entry_limit") or s.entry_price, 0.0)
                     s.status = "EXPIRED_HORIZON"
                     s.outcome_label = "⏱️ EXPIRED"
                     s.exit_price = round(limit_p, 6) if limit_p > 0 else s.entry_price
@@ -727,19 +728,19 @@ class SignalService:
 
                 curr_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
                 if not curr_p or curr_p <= 0:
-                    curr_p = float(s.entry_price or 0.0)
+                    curr_p = safe_float(s.entry_price, 0.0)
 
-                entry_p = float(s.entry_price or curr_p)
-                tp1_p = float(s.tp1_price or entry_p)
-                tp2_p = float(s.tp2_price or entry_p)
-                tp3_p = float(s.tp3_price or entry_p)
-                sl_p = float(s.sl_price or entry_p)
+                entry_p = safe_float(s.entry_price or curr_p, curr_p)
+                tp1_p = safe_float(s.tp1_price or entry_p, entry_p)
+                tp2_p = safe_float(s.tp2_price or entry_p, entry_p)
+                tp3_p = safe_float(s.tp3_price or entry_p, entry_p)
+                sl_p = safe_float(s.sl_price or entry_p, entry_p)
                 direction = str(s.direction or "LONG").upper()
 
                 # Fetch real intra-candle extremum wicks to prevent interval close vs tick discrepancies
                 intra_high, intra_low = fetch_intra_candle_extremes(sym, norm_hz)
-                high_seen = float(s.peak_price_seen or curr_p)
-                low_seen = float(s.trough_price_seen or curr_p)
+                high_seen = safe_float(s.peak_price_seen or curr_p, curr_p)
+                low_seen = safe_float(s.trough_price_seen or curr_p, curr_p)
                 if intra_high > 0:
                     high_seen = max(high_seen, intra_high)
                 if intra_low > 0:
@@ -1039,7 +1040,7 @@ class SignalService:
                             # Invariant: breakeven is NEVER counted as a win!
                             is_win = bool(st.startswith('WON_') and not any(b in st for b in ['BREAKEVEN', 'BE', 'TIER0']))
                             strat_id = getattr(s, 'canonical_strategy', None) or getattr(s, 'strategy', None)
-                            ret_val = float(getattr(s, 'realized_return_pct', 0.0) or 0.0)
+                            ret_val = safe_float(getattr(s, 'realized_return_pct', 0.0), 0.0)
                             regime_val = getattr(s, 'regime', None) or getattr(s, 'market_regime', None)
                             if strat_id:
                                 strat_reg.record_trade_outcome(
@@ -1082,7 +1083,7 @@ class SignalService:
                                     strat_reg = StrategyRegistry()
                                     is_win = bool(st.startswith("WON_") and not any(b in st for b in ["BREAKEVEN", "BE", "TIER0"]))
                                     strat_id = r.get("strategy_archetype") or getattr(obj, "canonical_strategy", None)
-                                    ret_val = float(obj.realized_return_pct or 0.0)
+                                    ret_val = safe_float(obj.realized_return_pct, 0.0)
                                     regime_val = r.get("market_shield") or getattr(obj, "market_regime", None)
                                     if strat_id:
                                         strat_reg.record_trade_outcome(

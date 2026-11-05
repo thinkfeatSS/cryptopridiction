@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional, List, Union, Set
 from datetime import datetime, timezone
 
 from app.config import settings
+from app.quant_v16.validation import safe_float, safe_ratio
 
 logger = logging.getLogger("whatsapp_service")
 logger.setLevel(logging.INFO)
@@ -214,8 +215,13 @@ class WhatsAppService:
             grade_tier = int(sig.get("grade_tier", 2))
         except (ValueError, TypeError):
             grade_tier = 2
-        win_prob = float(sig.get("meta_win_prob_pct") or (float(sig.get("meta_win_prob", 0.5)) * 100.0 if float(sig.get("meta_win_prob", 0.5)) <= 1.0 else sig.get("meta_win_prob", 50.0)))
-        conviction = float(sig.get("conviction_pct") or sig.get("conviction") or 50.0)
+        raw_meta = sig.get("meta_win_prob_pct")
+        if raw_meta is not None:
+            win_prob = safe_float(raw_meta, 70.0)
+        else:
+            p_val = safe_float(sig.get("meta_win_prob"), 0.7)
+            win_prob = p_val * 100.0 if p_val <= 1.0 else p_val
+        conviction = safe_float(sig.get("conviction_pct") or sig.get("conviction"), 50.0)
 
         min_grade_setting = str(self.min_grade).upper()
 
@@ -382,7 +388,7 @@ class WhatsAppService:
         else:
             decision_display = decision_str
 
-        conviction = float(sig.get("conviction_pct") or sig.get("signal_score") or sig.get("conviction") or 75.0)
+        conviction = safe_float(sig.get("conviction_pct") or sig.get("signal_score") or sig.get("conviction"), 75.0)
         raw_win = (
             sig.get("meta_win_prob_pct")
             or sig.get("win_probability_pct")
@@ -390,11 +396,8 @@ class WhatsAppService:
             or sig.get("meta_win_prob")
             or 70.0
         )
-        try:
-            f_win = float(raw_win)
-            win_prob = f_win * 100.0 if 0.0 < f_win <= 1.0 else f_win
-        except Exception:
-            win_prob = 70.0
+        f_win = safe_float(raw_win, 70.0)
+        win_prob = f_win * 100.0 if 0.0 < f_win <= 1.0 else f_win
         
         # Calibrated path probabilities for targets and invalidation
         probs = self._extract_path_probabilities(sig, win_prob)
@@ -409,17 +412,17 @@ class WhatsAppService:
         elif pred_window and pred_window != "N/A":
             candle_time_str = f"⏳ *Horizon Window:* `{pred_window}`"
 
-        entry_val = float(
+        entry_val = safe_float(
             sig.get("entry_price")
             or sig.get("entry_price_initial")
             or sig.get("optimal_entry_price")
-            or sig.get("current_price")
-            or 0.0
+            or sig.get("current_price"),
+            0.0
         )
-        tp1_val = float(sig.get("tp1_price") or sig.get("tp1_initial") or sig.get("tp1") or 0.0)
-        tp2_val = float(sig.get("tp2_price") or sig.get("tp2_initial") or sig.get("tp2") or 0.0)
-        tp3_val = float(sig.get("tp3_price") or sig.get("tp3_initial") or sig.get("tp3") or 0.0)
-        sl_val = float(sig.get("sl_price") or sig.get("sl_initial") or sig.get("current_sl") or sig.get("sl") or 0.0)
+        tp1_val = safe_float(sig.get("tp1_price") or sig.get("tp1_initial") or sig.get("tp1"), 0.0)
+        tp2_val = safe_float(sig.get("tp2_price") or sig.get("tp2_initial") or sig.get("tp2"), 0.0)
+        tp3_val = safe_float(sig.get("tp3_price") or sig.get("tp3_initial") or sig.get("tp3"), 0.0)
+        sl_val = safe_float(sig.get("sl_price") or sig.get("sl_initial") or sig.get("current_sl") or sig.get("sl"), 0.0)
 
         entry = self._format_price(entry_val)
         tp1 = self._format_price(tp1_val)
@@ -427,25 +430,17 @@ class WhatsAppService:
         tp3 = self._format_price(tp3_val)
         sl = self._format_price(sl_val)
         
-        raw_rr = sig.get("risk_reward_ratio") or sig.get("risk_reward") or 2.0
-        if isinstance(raw_rr, (int, float)):
-            rr = f"1:{float(raw_rr):.1f}"
-        elif "1:" in str(raw_rr):
-            rr = str(raw_rr)
-        else:
-            try:
-                rr = f"1:{float(raw_rr):.1f}"
-            except Exception:
-                rr = str(raw_rr)
+        raw_rr = safe_ratio(sig.get("risk_reward_ratio") or sig.get("risk_reward"), 2.0)
+        rr = f"1:{raw_rr:.1f}"
 
-        exp_ret = float(sig.get("expected_net_return") or sig.get("expected_return_pct") or sig.get("ev_net") or 3.5)
+        exp_ret = safe_float(sig.get("expected_net_return") or sig.get("expected_return_pct") or sig.get("ev_net"), 3.5)
         market_shield = sig.get("market_shield") or sig.get("regime") or "BALANCED VOLATILITY"
 
         candle_line = f"{candle_time_str}\n" if candle_time_str else ""
 
         is_limit_pending = bool(sig.get("is_limit_pending") or "AWAIT PULLBACK" in decision_display or "AWAIT BOUNCE" in decision_display)
-        optimal_entry_val = float(sig.get("optimal_entry_price") or entry_val)
-        curr_val = float(sig.get("current_price") or entry_val)
+        optimal_entry_val = safe_float(sig.get("optimal_entry_price"), entry_val)
+        curr_val = safe_float(sig.get("current_price"), entry_val)
         zone_min = sig.get("entry_zone_min")
         zone_max = sig.get("entry_zone_max")
 

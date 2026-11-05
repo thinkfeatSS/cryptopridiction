@@ -12,6 +12,43 @@ from typing import Dict, Any, Tuple, List, Optional
 from datetime import datetime, timezone
 from dataclasses import dataclass
 
+def safe_float(val: Any, default: float = 0.0) -> float:
+    """
+    Defensively parses any numeric or formatted string value into a clean float.
+    Handles '+0.00%', '-1.25%', '$45.2', 'None', 'N/A', NaNs, Infs without raising exceptions.
+    """
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        if math.isnan(val) or math.isinf(val):
+            return default
+        return float(val)
+    s = str(val).strip().replace("%", "").replace("$", "").replace(",", "")
+    if s.startswith("+"):
+        s = s[1:].strip()
+    if not s or s.lower() in ("none", "null", "nan", "n/a", "inf", "-inf"):
+        return default
+    try:
+        f = float(s)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (ValueError, TypeError):
+        return default
+
+def safe_ratio(val: Any, default: float = 2.0) -> float:
+    """
+    Defensively parses Risk:Reward ratios like '1:2.5', '2.5', 2.5 into a clean float.
+    """
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val) if val > 0 else default
+    s = str(val).strip()
+    if "1:" in s:
+        s = s.replace("1:", "").strip()
+    return safe_float(s, default=default)
+
 @dataclass
 class ValidationResult:
     is_valid: bool
@@ -25,6 +62,8 @@ class DataValidator:
     """
     Validates physical market pricing invariants and precision before any signal evaluation.
     """
+    safe_float = staticmethod(safe_float)
+    safe_ratio = staticmethod(safe_ratio)
 
     @staticmethod
     def validate_price_invariants(
