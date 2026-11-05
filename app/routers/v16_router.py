@@ -1078,8 +1078,8 @@ def clear_all_v16_caches() -> Dict[str, Any]:
 @v16_router.get("/market-intelligence")
 def get_v16_market_intelligence(
     symbol: str = Query("BTC/USDT", description="Target trading pair"),
-    current_price: float = Query(76500.0, description="Current price of the asset"),
-    atr: float = Query(1200.0, description="Active ATR volatility of the asset"),
+    current_price: Optional[float] = Query(None, description="Current price of the asset (auto-resolved if omitted)"),
+    atr: Optional[float] = Query(None, description="Active ATR volatility of the asset (auto-resolved if omitted)"),
     force: bool = Query(False, description="Force refresh from source feeds")
 ) -> Dict[str, Any]:
     """
@@ -1090,8 +1090,8 @@ def get_v16_market_intelligence(
     3. Dual Fear & Greed Index (Crypto + TradFi S&P/VIX)
     4. US Spot ETF Inflows & Outflows (BTC & ETH Spot ETFs)
     5. CEX Exchange Net Flows & Reserve Shifts
-    6. Hyperliquid Perp DEX Whale Radar & Order Book Whale Walls
-    7. High-Density Derivatives Liquidation Heatmap & TP Alignment
+    6. Hyperliquid Perp DEX Whale Radar & Order Book Whale Walls (Active for ALL coins)
+    7. High-Density Derivatives Liquidation Heatmap & TP Alignment (Active for ALL coins)
     """
     from app.services.institutional_intelligence_service import institutional_intelligence_service
     intel = institutional_intelligence_service.get_full_institutional_intelligence(
@@ -1147,16 +1147,27 @@ def get_v16_etf_flows(force: bool = Query(False)) -> Dict[str, Any]:
 @v16_router.get("/liquidation-heatmap")
 def get_v16_liquidation_heatmap(
     symbol: str = Query("BTC/USDT"),
-    current_price: float = Query(76500.0),
-    atr: float = Query(1200.0)
+    current_price: Optional[float] = Query(None, description="Current price (auto-resolved from Hyperliquid if omitted)"),
+    atr: Optional[float] = Query(None, description="Active ATR (auto-resolved if omitted)")
 ) -> Dict[str, Any]:
-    """Returns high-density liquidation clusters across 10x-100x leverage tiers."""
+    """Returns high-density liquidation clusters across 10x-100x leverage tiers for any asset."""
     from app.services.institutional_intelligence_service import institutional_intelligence_service
+    p = current_price
+    if p is None or p <= 0:
+        whale_data = institutional_intelligence_service.get_hyperliquid_whale_radar(symbol=symbol)
+        p = float(whale_data.get("mark_price", 0.0))
+        if p <= 0:
+            clean_coin = symbol.split("/")[0].split(":")[0].upper()
+            p = 76500.0 if clean_coin == "BTC" else 1.0
+    a = atr
+    if a is None or a <= 0:
+        a = max(p * 0.035, 1e-6)
+
     return {
         "status": "success",
         "liquidation_heatmap": institutional_intelligence_service.get_liquidation_heatmap(
             symbol=symbol,
-            current_price=current_price,
-            atr=atr
+            current_price=p,
+            atr=a
         )
     }

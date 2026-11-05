@@ -24,13 +24,14 @@ import { AlertCircle, RefreshCw, Sparkles, Activity, LayoutGrid, Table } from "l
 export default function V16Dashboard() {
   const [selectedSignal, setSelectedSignal] = useState<V16SignalEnvelope | null>(null);
   const [displayMode, setDisplayMode] = useState<"CARDS" | "TABLE">("CARDS");
+  const [hudSymbol, setHudSymbol] = useState<string>("BTC/USDT");
 
   // Live queries to V16 APIs
   const signalsQuery = useV16Signals();
   const thesesQuery = useV16Theses();
   const eventsQuery = useV16Events(50);
   const regimeQuery = useV16Regime();
-  const intelligenceQuery = useV16MarketIntelligence();
+  const intelligenceQuery = useV16MarketIntelligence(hudSymbol);
 
   const signals = signalsQuery.data?.signals || [];
   const theses = thesesQuery.data?.theses || [];
@@ -187,13 +188,19 @@ export default function V16Dashboard() {
         {displayMode === "CARDS" ? (
           <V16SignalCardsGrid
             signals={signals}
-            onSelectSignal={(sig) => setSelectedSignal(sig)}
+            onSelectSignal={(sig) => {
+              setSelectedSignal(sig);
+              if (sig?.immutable?.symbol) setHudSymbol(sig.immutable.symbol);
+            }}
             selectedSignalId={selectedSignal?.immutable?.signal_id}
           />
         ) : (
           <V16SignalTable
             signals={signals}
-            onSelectSignal={(sig) => setSelectedSignal(sig)}
+            onSelectSignal={(sig) => {
+              setSelectedSignal(sig);
+              if (sig?.immutable?.symbol) setHudSymbol(sig.immutable.symbol);
+            }}
             selectedSignalId={selectedSignal?.immutable?.signal_id}
           />
         )}
@@ -216,6 +223,9 @@ export default function V16Dashboard() {
         <V16InstitutionalIntelligenceHUD
           intelligence={intelligenceData}
           isLoading={intelligenceQuery.isLoading}
+          selectedSymbol={hudSymbol}
+          onSymbolChange={(sym) => setHudSymbol(sym)}
+          availableSymbols={Array.from(new Set(["BTC/USDT", "ETH/USDT", "SOL/USDT", "SUI/USDT", "DOGE/USDT", "AVAX/USDT", ...signals.map(s => s.immutable.symbol)])).slice(0, 10)}
           onRefresh={() => intelligenceQuery.refetch()}
         />
       </div>

@@ -658,9 +658,15 @@ class InstitutionalIntelligenceService:
     # =========================================================================
     # UNIFIED SYNTHESIS HUB
     # =========================================================================
-    def get_full_institutional_intelligence(self, symbol: str = "BTC/USDT", current_price: float = 76500.0, atr: float = 1200.0) -> Dict[str, Any]:
+    def get_full_institutional_intelligence(
+        self,
+        symbol: str = "BTC/USDT",
+        current_price: Optional[float] = None,
+        atr: Optional[float] = None
+    ) -> Dict[str, Any]:
         """
         Returns unified institutional payload consolidating all 7 intelligence domains.
+        Dynamically auto-resolves live mark price and ATR for any coin if not explicitly provided.
         """
         macro = self.get_macro_economic_calendar()
         dominance = self.get_dominance_matrix()
@@ -668,7 +674,22 @@ class InstitutionalIntelligenceService:
         etf = self.get_crypto_etf_flows()
         flows = self.get_exchange_flows()
         hyperliquid = self.get_hyperliquid_whale_radar(symbol=symbol)
-        liquidations = self.get_liquidation_heatmap(symbol=symbol, current_price=current_price, atr=atr)
+
+        # Dynamic price and ATR resolution per asset
+        clean_coin = symbol.split("/")[0].split(":")[0].upper()
+        effective_price = current_price
+        if effective_price is None or effective_price <= 0 or (effective_price == 76500.0 and clean_coin != "BTC"):
+            hl_px = float(hyperliquid.get("mark_price", 0.0))
+            if hl_px > 0:
+                effective_price = hl_px
+            elif effective_price is None or effective_price <= 0:
+                effective_price = 76500.0 if clean_coin == "BTC" else 1.0
+
+        effective_atr = atr
+        if effective_atr is None or effective_atr <= 0 or (effective_atr == 1200.0 and clean_coin != "BTC"):
+            effective_atr = max(effective_price * 0.035, 1e-6)
+
+        liquidations = self.get_liquidation_heatmap(symbol=symbol, current_price=effective_price, atr=effective_atr)
 
         return {
             "macro_calendar": macro,

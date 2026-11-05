@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import {
   Landmark,
   Calendar,
@@ -30,6 +30,8 @@ interface Props {
   intelligence: MarketIntelligencePayload | null | undefined;
   isLoading: boolean;
   selectedSymbol?: string;
+  onSymbolChange?: (symbol: string) => void;
+  availableSymbols?: string[];
   onRefresh?: () => void;
 }
 
@@ -37,10 +39,27 @@ export default function V16InstitutionalIntelligenceHUD({
   intelligence,
   isLoading,
   selectedSymbol = "BTC/USDT",
+  onSymbolChange,
+  availableSymbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "SUI/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT", "NEAR/USDT"],
   onRefresh,
 }: Props) {
   const [isExpanded, setIsExpanded] = useState<boolean>(true);
   const [activeTab, setActiveTab] = useState<"macro" | "dominance" | "sentiment" | "etf" | "whales" | "liquidations">("macro");
+
+  // Dynamic coin universe for quick selection
+  const coinList = useMemo(() => {
+    const list = Array.from(new Set([
+      "BTC/USDT",
+      "ETH/USDT",
+      "SOL/USDT",
+      "SUI/USDT",
+      "DOGE/USDT",
+      "AVAX/USDT",
+      selectedSymbol,
+      ...(availableSymbols || [])
+    ])).filter(Boolean);
+    return list.slice(0, 10);
+  }, [selectedSymbol, availableSymbols]);
 
   if (isLoading && !intelligence) {
     return (
@@ -368,105 +387,139 @@ export default function V16InstitutionalIntelligenceHUD({
 
           {/* TAB 2: HYPERLIQUID WHALE RADAR */}
           {activeTab === "whales" && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-              <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-mono text-slate-400 uppercase tracking-wide">
-                    {whales?.symbol || "BTC"} Whale Bias
+            <div className="space-y-4">
+              {/* Asset Selector Row */}
+              <div className="flex items-center justify-between flex-wrap gap-2 p-2.5 rounded-xl bg-slate-950/80 border border-slate-800/80">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[11px] font-mono text-slate-400 font-bold uppercase tracking-wide mr-1">
+                    Select Coin:
                   </span>
-                  <span className={`text-[10px] px-2 py-0.5 rounded font-mono font-bold ${
-                    whales?.whale_bias === "BULLISH_WHALE_BID_ABSORPTION"
-                      ? "bg-emerald-950 border border-emerald-600 text-emerald-300"
-                      : whales?.whale_bias === "BEARISH_WHALE_ASK_RESISTANCE"
-                      ? "bg-rose-950 border border-rose-600 text-rose-300"
-                      : "bg-slate-800 text-slate-300"
-                  }`}>
-                    {whales?.whale_bias || "BALANCED"}
+                  {coinList.map((coin: string) => {
+                    const clean = coin.split("/")[0].split(":")[0].toUpperCase();
+                    const isSelected = (whales?.symbol || selectedSymbol || "BTC").toUpperCase().includes(clean);
+                    return (
+                      <button
+                        key={coin}
+                        onClick={() => onSymbolChange?.(coin.includes("/") ? coin : `${coin}/USDT`)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-all ${
+                          isSelected
+                            ? "bg-indigo-600 text-white shadow-md shadow-indigo-900/30 border border-indigo-400"
+                            : "bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-800"
+                        }`}
+                      >
+                        {clean}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2">
+                  <span>Active Book:</span>
+                  <span className="text-cyan-300 font-bold bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
+                    {whales?.symbol || selectedSymbol}
                   </span>
-                </div>
-
-                <div className="space-y-2 pt-1 font-mono text-xs">
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Mark Price:</span>
-                    <span className="text-white font-bold">${whales?.mark_price ? whales.mark_price.toLocaleString() : "---"}</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">8h Funding Rate:</span>
-                    <span className={`font-bold ${(whales?.funding_rate_8h_pct ?? 0) >= 0 ? "text-cyan-300" : "text-amber-400"}`}>
-                      {whales?.funding_rate_8h_pct !== undefined ? `${whales.funding_rate_8h_pct > 0 ? "+" : ""}${whales.funding_rate_8h_pct.toFixed(4)}%` : "0.0100%"}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Open Interest:</span>
-                    <span className="text-slate-200 font-bold">
-                      {whales?.open_interest_usd ? `$${(whales.open_interest_usd / 1e6).toFixed(1)}M` : "---"}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-slate-400">Confluence Boost:</span>
-                    <span className={`font-bold ${(whales?.confluence_boost_pct ?? 0) > 0 ? "text-emerald-400" : (whales?.confluence_boost_pct ?? 0) < 0 ? "text-rose-400" : "text-slate-400"}`}>
-                      {(whales?.confluence_boost_pct ?? 0) > 0 ? `+${whales?.confluence_boost_pct}%` : `${whales?.confluence_boost_pct ?? 0}%`}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800 text-[11px] font-mono text-slate-300 space-y-1">
-                  <div className="font-bold text-indigo-400">Hyperliquid L2 Book Scan:</div>
-                  <p className="text-slate-400">
-                    Filtered for resting limit orders &ge; $250K. Bid/ask depth skews directly influence signal conviction scoring.
-                  </p>
                 </div>
               </div>
 
-              {/* Whale Bid Walls vs Whale Ask Walls */}
-              <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-3">
-                {/* Whale Bids */}
-                <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-3.5 space-y-2">
-                  <div className="flex items-center justify-between text-xs font-mono">
-                    <span className="text-emerald-400 font-bold flex items-center gap-1.5">
-                      <TrendingUp className="w-3.5 h-3.5" /> Whale Bids (&ge;$250K)
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-mono text-slate-400 uppercase tracking-wide">
+                      {whales?.symbol || "BTC"} Whale Bias
                     </span>
-                    <span className="text-slate-400">
-                      Total: ${((whales?.total_whale_bid_notional_usd ?? 0) / 1e6).toFixed(2)}M
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-mono font-bold ${
+                      whales?.whale_bias === "BULLISH_WHALE_BID_ABSORPTION"
+                        ? "bg-emerald-950 border border-emerald-600 text-emerald-300"
+                        : whales?.whale_bias === "BEARISH_WHALE_ASK_RESISTANCE"
+                        ? "bg-rose-950 border border-rose-600 text-rose-300"
+                        : "bg-slate-800 text-slate-300"
+                    }`}>
+                      {whales?.whale_bias || "BALANCED"}
                     </span>
                   </div>
-                  <div className="space-y-1.5 font-mono text-xs max-h-[160px] overflow-y-auto">
-                    {(whales?.whale_bid_walls || []).length > 0 ? (
-                      whales?.whale_bid_walls.map((b, i) => (
-                        <div key={i} className="flex justify-between items-center p-1.5 rounded bg-emerald-950/20 border border-emerald-900/30">
-                          <span className="text-emerald-300 font-bold">${b.price.toLocaleString()}</span>
-                          <span className="text-slate-300">{b.size.toFixed(2)} coins</span>
-                          <span className="text-emerald-400 font-bold">${(b.notional_usd / 1e3).toFixed(0)}K</span>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="text-slate-500 text-center py-4 text-[11px]">No &ge;$250K bid walls currently resting</div>
-                    )}
+
+                  <div className="space-y-2 pt-1 font-mono text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Mark Price:</span>
+                      <span className="text-white font-bold">${whales?.mark_price ? whales.mark_price.toLocaleString() : "---"}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">8h Funding Rate:</span>
+                      <span className={`font-bold ${(whales?.funding_rate_8h_pct ?? 0) >= 0 ? "text-cyan-300" : "text-amber-400"}`}>
+                        {whales?.funding_rate_8h_pct !== undefined ? `${whales.funding_rate_8h_pct > 0 ? "+" : ""}${whales.funding_rate_8h_pct.toFixed(4)}%` : "0.0100%"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Open Interest:</span>
+                      <span className="text-slate-200 font-bold">
+                        {whales?.open_interest_usd ? `$${(whales.open_interest_usd / 1e6).toFixed(1)}M` : "---"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-slate-400">Confluence Boost:</span>
+                      <span className={`font-bold ${(whales?.confluence_boost_pct ?? 0) > 0 ? "text-emerald-400" : (whales?.confluence_boost_pct ?? 0) < 0 ? "text-rose-400" : "text-slate-400"}`}>
+                        {(whales?.confluence_boost_pct ?? 0) > 0 ? `+${whales?.confluence_boost_pct}%` : `${whales?.confluence_boost_pct ?? 0}%`}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800 text-[11px] font-mono text-slate-300 space-y-1">
+                    <div className="font-bold text-indigo-400">Hyperliquid L2 Book Scan:</div>
+                    <p className="text-slate-400">
+                      Tiered limit order wall filters (Tier 1: &ge;$200K, Tier 2: &ge;$60K, Altcoins: &ge;$15K). Smart money skew dynamically impacts signal conviction.
+                    </p>
                   </div>
                 </div>
 
-                {/* Whale Asks */}
-                <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-3.5 space-y-2">
-                  <div className="flex items-center justify-between text-xs font-mono">
-                    <span className="text-rose-400 font-bold flex items-center gap-1.5">
-                      <TrendingDown className="w-3.5 h-3.5" /> Whale Asks (&ge;$250K)
-                    </span>
-                    <span className="text-slate-400">
-                      Total: ${((whales?.total_whale_ask_notional_usd ?? 0) / 1e6).toFixed(2)}M
-                    </span>
+                {/* Whale Bid Walls vs Whale Ask Walls */}
+                <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {/* Whale Bids */}
+                  <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-3.5 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-emerald-400 font-bold flex items-center gap-1.5">
+                        <TrendingUp className="w-3.5 h-3.5" /> Whale Bids (Resting Walls)
+                      </span>
+                      <span className="text-slate-400">
+                        Total: ${((whales?.total_whale_bid_notional_usd ?? 0) / 1e6).toFixed(2)}M
+                      </span>
+                    </div>
+                    <div className="space-y-1.5 font-mono text-xs max-h-[160px] overflow-y-auto">
+                      {(whales?.whale_bid_walls || []).length > 0 ? (
+                        whales?.whale_bid_walls.map((b, i) => (
+                          <div key={i} className="flex justify-between items-center p-1.5 rounded bg-emerald-950/20 border border-emerald-900/30">
+                            <span className="text-emerald-300 font-bold">${b.price.toLocaleString()}</span>
+                            <span className="text-slate-300">{b.size.toFixed(2)} coins</span>
+                            <span className="text-emerald-400 font-bold">${(b.notional_usd / 1e3).toFixed(0)}K</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-slate-500 text-center py-4 text-[11px]">No qualifying resting whale bids</div>
+                      )}
+                    </div>
                   </div>
-                  <div className="space-y-1.5 font-mono text-xs max-h-[160px] overflow-y-auto">
-                    {(whales?.whale_ask_walls || []).length > 0 ? (
-                      whales?.whale_ask_walls.map((a, i) => (
-                        <div key={i} className="flex justify-between items-center p-1.5 rounded bg-rose-950/20 border border-rose-900/30">
-                          <span className="text-rose-300 font-bold">${a.price.toLocaleString()}</span>
-                          <span className="text-slate-300">{a.size.toFixed(2)} coins</span>
-                          <span className="text-rose-400 font-bold">${(a.notional_usd / 1e3).toFixed(0)}K</span>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="text-slate-500 text-center py-4 text-[11px]">No &ge;$250K ask walls currently resting</div>
-                    )}
+
+                  {/* Whale Asks */}
+                  <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-3.5 space-y-2">
+                    <div className="flex items-center justify-between text-xs font-mono">
+                      <span className="text-rose-400 font-bold flex items-center gap-1.5">
+                        <TrendingDown className="w-3.5 h-3.5" /> Whale Asks (Resting Walls)
+                      </span>
+                      <span className="text-slate-400">
+                        Total: ${((whales?.total_whale_ask_notional_usd ?? 0) / 1e6).toFixed(2)}M
+                      </span>
+                    </div>
+                    <div className="space-y-1.5 font-mono text-xs max-h-[160px] overflow-y-auto">
+                      {(whales?.whale_ask_walls || []).length > 0 ? (
+                        whales?.whale_ask_walls.map((a, i) => (
+                          <div key={i} className="flex justify-between items-center p-1.5 rounded bg-rose-950/20 border border-rose-900/30">
+                            <span className="text-rose-300 font-bold">${a.price.toLocaleString()}</span>
+                            <span className="text-slate-300">{a.size.toFixed(2)} coins</span>
+                            <span className="text-rose-400 font-bold">${(a.notional_usd / 1e3).toFixed(0)}K</span>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-slate-500 text-center py-4 text-[11px]">No qualifying resting whale asks</div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -730,68 +783,102 @@ export default function V16InstitutionalIntelligenceHUD({
 
           {/* TAB 6: LIQUIDATION HEATMAP */}
           {activeTab === "liquidations" && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 font-mono text-xs">
-              {/* Short Liquidation Pools (Upside Magnets) */}
-              <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-emerald-400 font-bold flex items-center gap-1.5">
-                    <TrendingUp className="w-3.5 h-3.5" /> Short Liquidation Magnets (Upside TP Targets)
+            <div className="space-y-4">
+              {/* Asset Selector Row */}
+              <div className="flex items-center justify-between flex-wrap gap-2 p-2.5 rounded-xl bg-slate-950/80 border border-slate-800/80">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[11px] font-mono text-slate-400 font-bold uppercase tracking-wide mr-1">
+                    Select Coin:
                   </span>
-                  <span className="text-[10px] text-slate-400">Hunting Stop Cascades</span>
+                  {coinList.map((coin: string) => {
+                    const clean = coin.split("/")[0].split(":")[0].toUpperCase();
+                    const isSelected = (liqs?.symbol || selectedSymbol || "BTC").toUpperCase().includes(clean);
+                    return (
+                      <button
+                        key={coin}
+                        onClick={() => onSymbolChange?.(coin.includes("/") ? coin : `${coin}/USDT`)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-all ${
+                          isSelected
+                            ? "bg-rose-600 text-white shadow-md shadow-rose-900/30 border border-rose-400"
+                            : "bg-slate-900 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-800"
+                        }`}
+                      >
+                        {clean}
+                      </button>
+                    );
+                  })}
                 </div>
-
-                <div className="space-y-2">
-                  {(liqs?.short_liquidation_pools || []).map((pool, i) => (
-                    <div key={i} className="flex justify-between items-center p-2 rounded bg-emerald-950/20 border border-emerald-900/30">
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-950 border border-emerald-700 text-emerald-300">
-                        {pool.leverage}
-                      </span>
-                      <span className="text-emerald-300 font-bold">${pool.price.toLocaleString()}</span>
-                      <span className="text-slate-400">+{pool.distance_pct}% away</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                        pool.density === "CRITICAL_MAGNET" ? "bg-rose-950 text-rose-300 border border-rose-800 font-bold" : "text-slate-400"
-                      }`}>
-                        {pool.density}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="p-2 rounded bg-slate-900/80 border border-slate-800 text-[11px] text-slate-300">
-                  <span className="text-cyan-400 font-bold">Optimal Long TP Anchor: </span>
-                  <span>${liqs?.target_magnet_long ? liqs.target_magnet_long.toLocaleString() : "---"}</span>
+                <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2">
+                  <span>Current Asset &amp; Price:</span>
+                  <span className="text-emerald-400 font-bold bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
+                    {liqs?.symbol || selectedSymbol}: ${liqs?.current_price ? liqs.current_price.toLocaleString() : "---"}
+                  </span>
                 </div>
               </div>
 
-              {/* Long Liquidation Pools (Downside Magnets) */}
-              <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-rose-400 font-bold flex items-center gap-1.5">
-                    <TrendingDown className="w-3.5 h-3.5" /> Long Liquidation Magnets (Downside TP Targets)
-                  </span>
-                  <span className="text-[10px] text-slate-400">Hunting Stop Cascades</span>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 font-mono text-xs">
+                {/* Short Liquidation Pools (Upside Magnets) */}
+                <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-emerald-400 font-bold flex items-center gap-1.5">
+                      <TrendingUp className="w-3.5 h-3.5" /> Short Liquidation Magnets (Upside TP Targets)
+                    </span>
+                    <span className="text-[10px] text-slate-400">Hunting Stop Cascades</span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {(liqs?.short_liquidation_pools || []).map((pool, i) => (
+                      <div key={i} className="flex justify-between items-center p-2 rounded bg-emerald-950/20 border border-emerald-900/30">
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-950 border border-emerald-700 text-emerald-300">
+                          {pool.leverage}
+                        </span>
+                        <span className="text-emerald-300 font-bold">${pool.price.toLocaleString()}</span>
+                        <span className="text-slate-400">+{pool.distance_pct}% away</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                          pool.density === "CRITICAL_MAGNET" ? "bg-rose-950 text-rose-300 border border-rose-800 font-bold" : "text-slate-400"
+                        }`}>
+                          {pool.density}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="p-2 rounded bg-slate-900/80 border border-slate-800 text-[11px] text-slate-300">
+                    <span className="text-cyan-400 font-bold">Optimal Long TP Anchor: </span>
+                    <span>${liqs?.target_magnet_long ? liqs.target_magnet_long.toLocaleString() : "---"}</span>
+                  </div>
                 </div>
 
-                <div className="space-y-2">
-                  {(liqs?.long_liquidation_pools || []).map((pool, i) => (
-                    <div key={i} className="flex justify-between items-center p-2 rounded bg-rose-950/20 border border-rose-900/30">
-                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-950 border border-rose-700 text-rose-300">
-                        {pool.leverage}
-                      </span>
-                      <span className="text-rose-300 font-bold">${pool.price.toLocaleString()}</span>
-                      <span className="text-slate-400">{pool.distance_pct}% away</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                        pool.density === "CRITICAL_MAGNET" ? "bg-rose-950 text-rose-300 border border-rose-800 font-bold" : "text-slate-400"
-                      }`}>
-                        {pool.density}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                {/* Long Liquidation Pools (Downside Magnets) */}
+                <div className="rounded-xl bg-slate-950/60 border border-slate-800/80 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-rose-400 font-bold flex items-center gap-1.5">
+                      <TrendingDown className="w-3.5 h-3.5" /> Long Liquidation Magnets (Downside TP Targets)
+                    </span>
+                    <span className="text-[10px] text-slate-400">Hunting Stop Cascades</span>
+                  </div>
 
-                <div className="p-2 rounded bg-slate-900/80 border border-slate-800 text-[11px] text-slate-300">
-                  <span className="text-cyan-400 font-bold">Optimal Short TP Anchor: </span>
-                  <span>${liqs?.target_magnet_short ? liqs.target_magnet_short.toLocaleString() : "---"}</span>
+                  <div className="space-y-2">
+                    {(liqs?.long_liquidation_pools || []).map((pool, i) => (
+                      <div key={i} className="flex justify-between items-center p-2 rounded bg-rose-950/20 border border-rose-900/30">
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-950 border border-rose-700 text-rose-300">
+                          {pool.leverage}
+                        </span>
+                        <span className="text-rose-300 font-bold">${pool.price.toLocaleString()}</span>
+                        <span className="text-slate-400">{pool.distance_pct}% away</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                          pool.density === "CRITICAL_MAGNET" ? "bg-rose-950 text-rose-300 border border-rose-800 font-bold" : "text-slate-400"
+                        }`}>
+                          {pool.density}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="p-2 rounded bg-slate-900/80 border border-slate-800 text-[11px] text-slate-300">
+                    <span className="text-cyan-400 font-bold">Optimal Short TP Anchor: </span>
+                    <span>${liqs?.target_magnet_short ? liqs.target_magnet_short.toLocaleString() : "---"}</span>
+                  </div>
                 </div>
               </div>
             </div>
