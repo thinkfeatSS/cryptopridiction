@@ -80,6 +80,10 @@ export default function V16SignalCardsGrid({
   const isV16RuleQualified = (item: V16SignalEnvelope): boolean => {
     const imm = item.immutable;
     if (!imm) return false;
+
+    // Reject synthetic unit test signals
+    const sid = (imm.signal_id || "").toUpperCase();
+    if (sid.startsWith("TEST_") || sid.includes("TEST")) return false;
     
     // Rule 1: EVnet > 0
     if (imm.expected_net_return <= 0) return false;
@@ -92,12 +96,24 @@ export default function V16SignalCardsGrid({
     // Rule 3: Valid price structure
     const entry = imm.entry_price_initial || 0;
     const sl = imm.sl_initial || 0;
+    const currentSl = item.dynamic?.current_sl || sl;
     const tp1 = imm.tp1_initial || 0;
     const isLong = (imm.direction || "").toUpperCase() === "LONG";
 
     if (entry <= 0 || sl <= 0 || tp1 <= 0) return false;
-    if (isLong && !(sl < entry && entry < tp1)) return false;
-    if (!isLong && !(sl > entry && entry > tp1)) return false;
+
+    const isProtected = Boolean(
+      item.dynamic?.is_tp1_locked ||
+      item.dynamic?.status?.includes("BE") ||
+      item.dynamic?.status?.includes("TIER0") ||
+      (isLong ? currentSl >= entry : currentSl <= entry)
+    );
+
+    if (isLong) {
+      if (!((sl < entry || isProtected) && entry < tp1)) return false;
+    } else {
+      if (!((sl > entry || isProtected) && entry > tp1)) return false;
+    }
 
     return true;
   };

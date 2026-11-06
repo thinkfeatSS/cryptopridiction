@@ -396,6 +396,10 @@ class V16ShadowValidationEngine:
         filtered_signals = []
         for item in signals_data:
             immut = item.get("immutable", {})
+            sig_id = str(immut.get("signal_id", ""))
+            # Exclude synthetic unit test signals from validation metrics
+            if sig_id.startswith("TEST_") or "TEST" in sig_id:
+                continue
             sig_exp = immut.get("experiment_id")
             sig_gen_at = str(immut.get("signal_generated_at", "") or "")
 
@@ -493,12 +497,17 @@ class V16ShadowValidationEngine:
                 regime_map[reg_key] = {"signals": 0, "resolved": 0, "wins": 0, "losses": 0, "returns": []}
             regime_map[reg_key]["signals"] += 1
 
-            is_terminal = any(w in status for w in ["WON", "LOST", "EXPIRED", "SL_HIT", "BE_HIT", "STAGNATION_CUT"])
+            st_upper = status.upper()
+            out_upper = str(dyn.get("outcome_label", "")).upper()
+            is_terminal = (
+                any(w in st_upper for w in ["WON", "LOST", "EXPIRED", "SL_HIT", "BE_HIT", "STAGNATION_CUT", "BREAKEVEN", "BE_", "TIER0"])
+                or any(w in out_upper for w in ["WON", "LOST", "STOPPED", "EXPIRED", "BREAKEVEN", "TIER-0", "GUARD"])
+            )
             if not is_terminal:
                 active += 1
             else:
                 resolved += 1
-                tp1_hit = 1 if "WON" in status or "TP" in status else 0
+                tp1_hit = 1 if ("WON" in st_upper or "TP" in st_upper or "WON" in out_upper or "TP" in out_upper) and not ("BE" in st_upper or "BREAKEVEN" in st_upper or "GUARD" in st_upper or "BREAKEVEN" in out_upper) else 0
                 actual_tp1_hit.append(tp1_hit)
                 p_tp1_for_resolved.append(p_tp1)
 

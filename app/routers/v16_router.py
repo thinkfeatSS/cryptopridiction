@@ -392,6 +392,10 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
 
     for pos in open_positions:
         sym = pos.get("symbol", "")
+        trade_id = str(pos.get("trade_id", ""))
+        # Never ingest mock test signals into production terminal stores
+        if trade_id.startswith("TEST_") or "TEST" in trade_id:
+            continue
         if not sym or not UniverseFilter.is_valid_crypto_pair(sym, price=float(pos.get("entry_price", 0.0))):
             continue
 
@@ -404,7 +408,8 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
         tp1 = float(pos.get("tp1_price") or entry)
         tp2 = float(pos.get("tp2_price") or tp1)
         tp3 = float(pos.get("tp3_price") or tp2)
-        sl = float(pos.get("sl_price") or entry)
+        initial_sl = float(pos.get("initial_sl_price") or pos.get("sl_price") or entry)
+        current_sl = float(pos.get("sl_price") or initial_sl)
         win_prob = float(pos.get("meta_win_probability", 0.75))
         win_pct = round(win_prob * (100.0 if win_prob <= 1.0 else 1.0), 1)
         exp_net = float(pos.get("expected_return_pct", 0.35))
@@ -425,7 +430,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
             "tp1_initial": tp1,
             "tp2_initial": tp2,
             "tp3_initial": tp3,
-            "sl_initial": sl,
+            "sl_initial": initial_sl,
             "regime": "RANGE",
             "p_tp1": win_pct,
             "p_tp2": round(win_pct * 0.65, 1),
@@ -446,7 +451,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
         dyn_data[sid] = {
             "signal_id": sid,
             "current_price": curr,
-            "current_sl": sl,
+            "current_sl": current_sl,
             "trailing_sl": None,
             "locked_sl": None,
             "unrealized_net_pnl_pct": unrealized_pnl,
@@ -464,8 +469,8 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
     now_utc = datetime.now(timezone.utc)
     for sid, imm in list(immut_data.items()):
         sym = imm.get("symbol", "")
-        # Remove delisted, invalid, or obsolete synthetic tokens immediately
-        if not UniverseFilter.is_valid_crypto_pair(sym) or sid.startswith("SIG_ACTIVE_"):
+        # Remove delisted, invalid, test artifacts, or obsolete synthetic tokens immediately
+        if not UniverseFilter.is_valid_crypto_pair(sym) or sid.startswith("SIG_ACTIVE_") or sid.startswith("TEST_") or "TEST" in sid:
             immut_data.pop(sid, None)
             dyn_data.pop(sid, None)
             modified = True

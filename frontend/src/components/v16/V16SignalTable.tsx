@@ -61,8 +61,12 @@ export default function V16SignalTable({
     let won = 0;
     let lost = 0;
     let breakevenOrExpired = 0;
+    let total = 0;
 
     signals.forEach((s) => {
+      const sid = (s.immutable?.signal_id || "").toUpperCase();
+      if (sid.startsWith("TEST_") || sid.includes("TEST")) return;
+      total++;
       const cat = getSignalCategory(s);
       if (cat === "WON") won++;
       else if (cat === "LOST") lost++;
@@ -70,16 +74,17 @@ export default function V16SignalTable({
       else active++;
     });
 
-    return { active, won, lost, breakevenOrExpired, total: signals.length };
+    return { active, won, lost, breakevenOrExpired, total };
   }, [signals]);
 
   // Filtering & Sorting
   const filteredSignals = useMemo(() => {
     return signals
       .filter((item) => {
+        const sid = (item.immutable.signal_id || "").toUpperCase();
+        if (sid.startsWith("TEST_") || sid.includes("TEST")) return false;
         const sym = item.immutable.symbol.toUpperCase();
         const tid = item.immutable.trade_thesis_id.toUpperCase();
-        const sid = item.immutable.signal_id.toUpperCase();
         const sQuery = search.toUpperCase();
 
         if (sQuery && !sym.includes(sQuery) && !tid.includes(sQuery) && !sid.includes(sQuery)) {

@@ -1,6 +1,7 @@
 import math
 import random
 import os
+import sys
 import json
 import time
 import threading
@@ -25,7 +26,14 @@ class PaperTradingBot:
     """
 
     def __init__(self, ledger_file: str = None):
-        self.ledger_file = ledger_file or os.path.join(EXPORT_DIR, "paper_trading_ledger.json")
+        if ledger_file:
+            self.ledger_file = ledger_file
+        elif os.environ.get("TESTING") == "1" or "pytest" in sys.modules or "unittest" in sys.modules:
+            import tempfile
+            self._temp_ledger = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+            self.ledger_file = self._temp_ledger.name
+        else:
+            self.ledger_file = os.path.join(EXPORT_DIR, "paper_trading_ledger.json")
         self.taker_fee_rate = 0.000405 # 0.045% with 10% BNB discount
         self.MAX_SAFEGUARD_VOID_HOLD_SECONDS: float = 1800.0  # 30m maximum safeguard hold before auto-liquidation
         self.ABANDONED_MICRO_CAP_VOID_TIMEOUT: float = 60.0  # 60s fast auto-liquidation on abandoned/depleted micro-caps
@@ -43,6 +51,8 @@ class PaperTradingBot:
                     valid_positions = []
                     purged_symbols = []
                     for pos in loaded.get("open_positions", []):
+                        if str(pos.get("trade_id", "")).startswith("TEST_") or "TEST" in str(pos.get("trade_id", "")):
+                            continue
                         sym = pos.get("symbol", "")
                         entry_p = float(pos.get("entry_price", 0.0))
                         if UniverseFilter.is_valid_crypto_pair(sym, price=entry_p) and entry_p > 0.0001:
@@ -187,6 +197,12 @@ class PaperTradingBot:
         with self._lock:
             temp = f"{self.ledger_file}.{threading.get_ident()}.{time.time_ns()}.tmp"
             try:
+                # Protect production ledger against synthetic test records leaking from tests
+                if os.path.basename(self.ledger_file) == "paper_trading_ledger.json":
+                    self.data["open_positions"] = [
+                        p for p in self.data.get("open_positions", [])
+                        if not str(p.get("trade_id", "")).startswith("TEST_") and "TEST" not in str(p.get("trade_id", ""))
+                    ]
                 self.data["last_updated_utc"] = datetime.now(timezone.utc).isoformat()
                 with open(temp, "w", encoding="utf-8") as f:
                     json.dump(self.data, f, indent=2)

@@ -817,67 +817,78 @@ class TestDeepSignalQA(unittest.TestCase):
     def test_emergency_news_shock_capital_protection_on_open_positions(self):
         """Tests that PaperTradingBot ratchets stops to BE when in profit and cuts half-loss when adverse during news shocks."""
         from app.engine.execution.paper_trading_bot import PaperTradingBot
+        import tempfile
 
-        bot = PaperTradingBot()
+        tmp_ledger = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+        tmp_ledger.close()
 
-        # Position A: Was in profit (+0.45%), acute shock hits -> Stop ratchets to Breakeven
-        now_iso = datetime.now(timezone.utc).isoformat()
-        pos_profit = {
-            "trade_id": "TEST_SHOCK_01",
-            "symbol": "BTC/USDT",
-            "direction": "LONG",
-            "entry_price": 50000.0,
-            "current_price": 50150.0,
-            "initial_sl_price": 49000.0,
-            "sl_price": 49000.0,
-            "tp1_price": 52000.0,
-            "leverage": 1.0,
-            "position_size_usd": 1000.0,
-            "remaining_position_size_usd": 1000.0,
-            "peak_gain_pct": 0.45,  # Touched +0.45%
-            "is_breakeven_locked": False,
-            "is_news_shock_active": True,
-            "desk": "scalp",
-            "opened_at_utc": now_iso
-        }
-        bot.data["open_positions"] = [pos_profit]
+        try:
+            bot = PaperTradingBot(ledger_file=tmp_ledger.name)
 
-        # Feed tick at current price
-        bot.on_tick(live_prices={"BTC/USDT": 50100.0})
+            # Position A: Was in profit (+0.45%), acute shock hits -> Stop ratchets to Breakeven
+            now_iso = datetime.now(timezone.utc).isoformat()
+            pos_profit = {
+                "trade_id": "TEST_SHOCK_01",
+                "symbol": "BTC/USDT",
+                "direction": "LONG",
+                "entry_price": 50000.0,
+                "current_price": 50150.0,
+                "initial_sl_price": 49000.0,
+                "sl_price": 49000.0,
+                "tp1_price": 52000.0,
+                "leverage": 1.0,
+                "position_size_usd": 1000.0,
+                "remaining_position_size_usd": 1000.0,
+                "peak_gain_pct": 0.45,  # Touched +0.45%
+                "is_breakeven_locked": False,
+                "is_news_shock_active": True,
+                "desk": "scalp",
+                "opened_at_utc": now_iso
+            }
+            bot.data["open_positions"] = [pos_profit]
 
-        self.assertTrue(pos_profit["is_breakeven_locked"], "Stop loss must be ratcheted to Breakeven during news shock")
-        self.assertGreaterEqual(pos_profit["sl_price"], 50000.0)
+            # Feed tick at current price
+            bot.on_tick(live_prices={"BTC/USDT": 50100.0})
 
-        # Position B: Adverse position (-1.2% drop, 50% of 2% initial SL), acute shock strikes -> Cut loss at half-risk
-        pos_adverse = {
-            "trade_id": "TEST_SHOCK_02",
-            "symbol": "ETH/USDT",
-            "direction": "LONG",
-            "entry_price": 3000.0,
-            "current_price": 2960.0,  # Dropped -1.33%
-            "initial_sl_price": 2940.0,  # 2.0% initial SL
-            "sl_price": 2940.0,
-            "tp1_price": 3120.0,
-            "leverage": 1.0,
-            "position_size_usd": 1000.0,
-            "remaining_position_size_usd": 1000.0,
-            "peak_gain_pct": 0.05,
-            "is_breakeven_locked": False,
-            "is_news_shock_active": True,
-            "desk": "scalp",
-            "opened_at_utc": now_iso
-        }
-        bot.data["open_positions"] = [pos_adverse]
-        bot.data["closed_trades"] = []
+            self.assertTrue(pos_profit["is_breakeven_locked"], "Stop loss must be ratcheted to Breakeven during news shock")
+            self.assertGreaterEqual(pos_profit["sl_price"], 50000.0)
 
-        bot.on_tick(live_prices={"ETH/USDT": 2960.0})
+            # Position B: Adverse position (-1.2% drop, 50% of 2% initial SL), acute shock strikes -> Cut loss at half-risk
+            pos_adverse = {
+                "trade_id": "TEST_SHOCK_02",
+                "symbol": "ETH/USDT",
+                "direction": "LONG",
+                "entry_price": 3000.0,
+                "current_price": 2960.0,  # Dropped -1.33%
+                "initial_sl_price": 2940.0,  # 2.0% initial SL
+                "sl_price": 2940.0,
+                "tp1_price": 3120.0,
+                "leverage": 1.0,
+                "position_size_usd": 1000.0,
+                "remaining_position_size_usd": 1000.0,
+                "peak_gain_pct": 0.05,
+                "is_breakeven_locked": False,
+                "is_news_shock_active": True,
+                "desk": "scalp",
+                "opened_at_utc": now_iso
+            }
+            bot.data["open_positions"] = [pos_adverse]
+            bot.data["closed_trades"] = []
 
-        # Confirm position was exited via EMERGENCY_NEWS_SHOCK_EXIT
-        self.assertEqual(len(bot.data["open_positions"]), 0, "Adverse position must be liquidated under acute news shock")
-        self.assertEqual(len(bot.data["closed_trades"]), 1)
-        closed = bot.data["closed_trades"][0]
-        self.assertEqual(closed.get("exit_reason"), "EMERGENCY_NEWS_SHOCK_EXIT")
-        self.assertLess(closed.get("return_pct", 0.0), 0.0)
+            bot.on_tick(live_prices={"ETH/USDT": 2960.0})
+
+            # Confirm position was exited via EMERGENCY_NEWS_SHOCK_EXIT
+            self.assertEqual(len(bot.data["open_positions"]), 0, "Adverse position must be liquidated under acute news shock")
+            self.assertEqual(len(bot.data["closed_trades"]), 1)
+            closed = bot.data["closed_trades"][0]
+            self.assertEqual(closed.get("exit_reason"), "EMERGENCY_NEWS_SHOCK_EXIT")
+            self.assertLess(closed.get("return_pct", 0.0), 0.0)
+        finally:
+            if os.path.exists(tmp_ledger.name):
+                try:
+                    os.remove(tmp_ledger.name)
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":
