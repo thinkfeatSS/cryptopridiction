@@ -712,7 +712,7 @@ class V16ShadowValidationEngine:
                 )
             },
             "gate_3_calibration_hurdle": {
-                "status": "AWAITING_OUTCOMES" if resolved < 30 else ("PASS" if ece and ece <= 0.12 else "WARNING"),
+                "status": "AWAITING_OUTCOMES" if resolved < 30 else ("PASS" if (ece is not None and ece <= 0.12) else "WARNING"),
                 "ece": ece,
                 "max_allowed_ece": 0.12
             },
