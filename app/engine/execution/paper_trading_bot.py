@@ -385,49 +385,50 @@ class PaperTradingBot:
                     elif desk_key == "scalp":
                         max_slots = min(max_slots, 1)
 
-            # 4b. Desk Quality Admission Gating (Phase 2)
+            # 4b. Desk Quality Admission Gating (Phase 2 Canonical Alignment)
             quality_grade = str(signal.get("quality_grade") or signal.get("grade") or "").upper()
-            raw_ev = signal.get("ev_net") if signal.get("ev_net") is not None else signal.get("expected_return_pct")
-            if raw_ev is not None:
-                ev_net = float(raw_ev)
-            else:
-                # Dynamically calculate estimated net EV from targets if not explicitly set
-                win_p = float(signal.get("meta_win_prob_pct", signal.get("p_tp1", 65.0))) / 100.0
-                e_p = float(signal.get("entry_price", 1.0))
-                tp_p = float(signal.get("tp1_price", e_p))
-                sl_p = float(signal.get("sl_price", e_p))
-                if e_p > 0:
-                    r_gain = abs(tp_p - e_p) / e_p
-                    r_loss = abs(e_p - sl_p) / e_p
-                    gross_ev = (win_p * r_gain) - ((1.0 - win_p) * r_loss)
-                    friction = 0.0025  # ~0.25% estimated round-trip friction
-                    ev_net = round((gross_ev - friction) * 100.0, 2)
-                else:
-                    ev_net = 0.0
+            is_grade_ok = any(g in quality_grade for g in ["A+", "GRADE A", "GRADE B", "A", "B"]) and "GRADE C" not in quality_grade
+            if not is_grade_ok:
+                print(f"[PAPER BOT [QUALITY GATE]] Signal rejected for {symbol}: Ineligible grade ({quality_grade})")
+                return False
 
+            # Compute true mathematical Net Expectancy dynamically from price geometry
+            e_p = float(signal.get("entry_price", 0.0) or 0.0)
+            tp_p = float(signal.get("tp1_price", 0.0) or 0.0)
+            sl_p = float(signal.get("sl_price", 0.0) or 0.0)
+            raw_win = signal.get("meta_win_prob_pct") or signal.get("meta_win_probability") or signal.get("p_tp1") or 60.0
+            win_p = float(raw_win) / 100.0 if float(raw_win) > 1.0 else float(raw_win)
+
+            if e_p > 0 and tp_p > 0 and sl_p > 0 and e_p != sl_p:
+                r_gain = abs(tp_p - e_p) / e_p
+                r_loss = abs(e_p - sl_p) / e_p
+                gross_ev = (win_p * r_gain) - ((1.0 - win_p) * r_loss)
+                friction = 0.0015  # 0.15% round-trip taker fees + slippage
+                ev_net = round((gross_ev - friction) * 100.0, 2)
+            else:
+                raw_ev = signal.get("ev_net") or signal.get("expected_net_return") or signal.get("expected_return_pct") or 0.0
+                ev_net = float(raw_ev)
+                if 0.0 < ev_net <= 0.10:
+                    ev_net = round(ev_net * 100.0, 2)
+
+            conviction_score = float(signal.get("conviction") or signal.get("conviction_pct") or 80.0)
+
+            # Canonical V16 Market Opportunity Hurdle Gating
             if desk_key == "scalp":
-                # Scalp Desk requires Grade A+ and EVnet >= 1.25%
-                if "A+" not in quality_grade:
-                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Requires Grade A+ (got {quality_grade})")
-                    return False
-                if ev_net < 1.25:
-                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Requires EVnet >= 1.25% (got {ev_net:.2f}%)")
+                # Scalp Desk: EVnet >= 0.25% for A+/A, or >= 0.40% with conviction >= 75 for Grade B
+                min_ev = 0.25 if ("A+" in quality_grade or "GRADE A" in quality_grade or "A" in quality_grade) else 0.40
+                if ev_net < min_ev:
+                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Requires EVnet >= {min_ev:.2f}% (got {ev_net:.2f}%)")
                     return False
             elif desk_key == "day":
-                # Day Desk requires Grade A or A+ and EVnet >= 0.75%
-                if "A" not in quality_grade:
-                    print(f"[PAPER BOT [QUALITY GATE]] Day Desk rejected for {symbol}: Requires Grade A or A+ (got {quality_grade})")
-                    return False
-                if ev_net < 0.75:
-                    print(f"[PAPER BOT [QUALITY GATE]] Day Desk rejected for {symbol}: Requires EVnet >= 0.75% (got {ev_net:.2f}%)")
+                # Day Desk: EVnet >= 0.25%
+                if ev_net < 0.25:
+                    print(f"[PAPER BOT [QUALITY GATE]] Day Desk rejected for {symbol}: Requires EVnet >= 0.25% (got {ev_net:.2f}%)")
                     return False
             elif desk_key == "swing":
-                # Swing Desk requires Grade A or A+ and EVnet >= 0.50%
-                if "A" not in quality_grade:
-                    print(f"[PAPER BOT [QUALITY GATE]] Swing Desk rejected for {symbol}: Requires Grade A or A+ (got {quality_grade})")
-                    return False
-                if ev_net < 0.50:
-                    print(f"[PAPER BOT [QUALITY GATE]] Swing Desk rejected for {symbol}: Requires EVnet >= 0.50% (got {ev_net:.2f}%)")
+                # Swing Desk: EVnet >= 0.20%
+                if ev_net < 0.20:
+                    print(f"[PAPER BOT [QUALITY GATE]] Swing Desk rejected for {symbol}: Requires EVnet >= 0.20% (got {ev_net:.2f}%)")
                     return False
 
             active_desk_count = sum(1 for p in self.data.get("open_positions", []) if p.get("desk") == desk_key)

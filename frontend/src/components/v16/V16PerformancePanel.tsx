@@ -109,13 +109,20 @@ export default function V16PerformancePanel({ signals }: Props) {
   const gate4 = report?.promotion_gates?.gate_4_economic_edge;
   const gate5 = report?.promotion_gates?.gate_5_risk_drawdown;
 
+  const isGraduated = Boolean(
+    report?.conclusion?.includes("GRADUATED") ||
+    (resolved >= 100 && report?.conclusion?.includes("VALIDATION PASSED"))
+  );
+
   const milestoneLabel =
-    gate2?.milestone?.toUpperCase() ||
-    (resolved >= 100
-      ? "100+: VALIDATED SAMPLE"
-      : resolved >= 30
-      ? "30-99: PRELIMINARY EVIDENCE"
-      : "0-29: TECHNICAL VALIDATION ONLY");
+    isGraduated
+      ? "100+: VALIDATED SAMPLE (GRADUATED 🎓)"
+      : gate2?.milestone?.toUpperCase() ||
+        (resolved >= 100
+          ? "100+: VALIDATED SAMPLE"
+          : resolved >= 30
+          ? "30-99: PRELIMINARY EVIDENCE"
+          : "0-29: TECHNICAL VALIDATION ONLY");
 
   const activeBins = useMemo(() => {
     return (report?.calibration_curve || []).filter((b) => b.sample_count > 0);
@@ -173,10 +180,17 @@ export default function V16PerformancePanel({ signals }: Props) {
             EXP: {report?.experiment_id || (cohort === "current" ? "V16.1.0-SHADOW-002" : "V16.0.0-SHADOW-001")}
           </span>
           {cohort === "current" ? (
-            <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2.5 py-1 rounded-md bg-emerald-950/60 border border-emerald-500/30 text-emerald-300 font-bold">
-              <Activity className="w-2.5 h-2.5 animate-pulse" />
-              LIVE SHADOW 🟢
-            </span>
+            isGraduated ? (
+              <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2.5 py-1 rounded-md bg-emerald-900/80 border border-emerald-400 text-emerald-200 font-bold shadow-[0_0_12px_rgba(16,185,129,0.3)]">
+                <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
+                GRADUATED / LIMITED LIVE ELIGIBLE 🎓
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2.5 py-1 rounded-md bg-emerald-950/60 border border-emerald-500/30 text-emerald-300 font-bold">
+                <Activity className="w-2.5 h-2.5 animate-pulse" />
+                LIVE SHADOW 🟢
+              </span>
+            )
           ) : (
             <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2.5 py-1 rounded-md bg-indigo-950/60 border border-indigo-500/30 text-indigo-300 font-bold">
               <Lock className="w-2.5 h-2.5" />
@@ -374,7 +388,7 @@ export default function V16PerformancePanel({ signals }: Props) {
             <span>Gate 2: Sample Accumulation</span>
             {resolved >= 100 ? (
               <span className="text-emerald-400 font-bold flex items-center gap-1 text-[10px]">
-                <CheckCircle2 className="w-3 h-3 text-emerald-400" /> PASS (100/100 Target Met)
+                <CheckCircle2 className="w-3 h-3 text-emerald-400" /> PASS ({resolved}/100 Target Met — GRADUATED 🎓)
               </span>
             ) : (
               <span className="text-amber-400 font-bold flex items-center gap-1 text-[10px]">

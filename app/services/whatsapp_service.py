@@ -545,24 +545,27 @@ class WhatsAppService:
 
         # Fundamental & News Catalyst Intelligence
         fund_line = ""
-        news_sent = sig.get("news_sentiment") or {}
-        cat_ev = sig.get("catalyst_event") or {}
+        raw_news = sig.get("news_sentiment")
+        news_sent = raw_news if isinstance(raw_news, dict) else ({"label": str(raw_news)} if raw_news else {})
+        raw_cat = sig.get("catalyst_event")
+        cat_ev = raw_cat if isinstance(raw_cat, dict) else ({"title": str(raw_cat)} if raw_cat else {})
 
         # If passed as JSON string (from CSV)
         if isinstance(sig.get("fundamental_matrix"), str) and sig["fundamental_matrix"]:
             try:
                 fm = json.loads(sig["fundamental_matrix"])
-                news_sent = fm.get("news_sentiment") or news_sent
-                cat_ev = fm.get("catalyst_event") or cat_ev
+                if isinstance(fm, dict):
+                    news_sent = fm.get("news_sentiment") or news_sent
+                    cat_ev = fm.get("catalyst_event") or cat_ev
             except Exception:
                 pass
 
-        news_lbl = news_sent.get("label") or sig.get("news_sentiment")
-        news_sc = float(news_sent.get("score") or sig.get("news_score") or 0.0)
-        top_hl = news_sent.get("top_headline") or (news_sent.get("recent_headlines", [""])[0] if news_sent.get("recent_headlines") else "")
+        news_lbl = (news_sent.get("label") if isinstance(news_sent, dict) else str(news_sent)) or sig.get("news_sentiment")
+        news_sc = float((news_sent.get("score") if isinstance(news_sent, dict) else 0.0) or sig.get("news_score") or 0.0)
+        top_hl = (news_sent.get("top_headline") if isinstance(news_sent, dict) else "") or (news_sent.get("recent_headlines", [""])[0] if isinstance(news_sent, dict) and news_sent.get("recent_headlines") else "")
 
-        cat_title = cat_ev.get("title") or sig.get("catalyst_title")
-        days_ev = cat_ev.get("days_until")
+        cat_title = (cat_ev.get("title") if isinstance(cat_ev, dict) else str(cat_ev)) or sig.get("catalyst_title")
+        days_ev = cat_ev.get("days_until") if isinstance(cat_ev, dict) else None
 
         fund_parts = []
         if cat_title and cat_title != "None":

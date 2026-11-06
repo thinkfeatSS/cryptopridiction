@@ -347,14 +347,20 @@ class UnifiedCryptoEngine:
                 norm_hz_key = "15M" if "15" in hz_key else ("24H" if "24" in hz_key or "1D" in hz_key else "1H")
                 direction_key = str(s.get("dominant_direction", s.get("direction", "LONG"))).upper()
 
-                # Phase 3: Strict 2-Hour Symbol-Level Cooldown (Prevent cluster positions on same coin)
+                # Prevent duplicate concurrent positions on the same coin
+                is_sym_active = any(p.get("symbol") == sym_key for p in self.paper_bot.data.get("open_positions", []))
+                if is_sym_active:
+                    print(f"[PORTFOLIO 🛡️] Symbol {sym_key} already has an active open position. Suppressing duplicate entry.")
+                    continue
+
+                # Inter-trade cooldown: require at least 15m (900s) between completed trades on the same coin
                 sym_last_emitted = self._symbol_cooldown_registry.get(sym_key, 0.0)
-                if (now_ts - sym_last_emitted) < 7200 and norm_hz_key in ["15M", "1H"]:
-                    print(f"[COOLDOWN 🕐] Suppressing duplicate symbol {sym_key} within 2-hour window")
+                if (now_ts - sym_last_emitted) < 900 and norm_hz_key in ["15M", "1H"]:
+                    print(f"[COOLDOWN 🕐] Suppressing duplicate symbol {sym_key} within 15-minute inter-trade window")
                     continue
 
                 cooldown_key = f"{sym_key}_{norm_hz_key}_{direction_key}"
-                cooldown_secs = self._signal_cooldown_secs.get(norm_hz_key, 7200)
+                cooldown_secs = 1800 if norm_hz_key == "15M" else self._signal_cooldown_secs.get(norm_hz_key, 7200)
                 last_emitted = self._signal_cooldown_registry.get(cooldown_key, 0.0)
                 if (now_ts - last_emitted) < cooldown_secs:
                     print(f"[COOLDOWN 🕐] Suppressing duplicate {sym_key} {norm_hz_key} {direction_key} signal (cooldown {int(cooldown_secs/60)}min)")
