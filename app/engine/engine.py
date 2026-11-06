@@ -1663,7 +1663,7 @@ class UnifiedCryptoEngine:
     def update_toxic_asset_quarantine(self):
         """
         Phase 3: Analyzes recent resolved trades in trader_signals_tracker.csv.
-        If any symbol incurs >= 2 consecutive stop-outs within 24 hours,
+        If any symbol incurs >= 2 stop-outs within 24 hours,
         it is dynamically quarantined for 24 hours to prevent cluster bleeding.
         """
         csv_path = os.path.join(self.export_dir, "trader_signals_tracker.csv")
@@ -1675,12 +1675,43 @@ class UnifiedCryptoEngine:
             if df.empty or "status" not in df.columns or "symbol" not in df.columns:
                 return
             now_ts = time.time()
-            res_df = df[df["status"].isin(["LOST_SL", "WON_TP1", "WON_TP2", "WON_TP3", "WON_TIER0_BE", "STOP_LOSS_BREAKEVEN"])].tail(150)
-            for sym, g in res_df.groupby("symbol"):
-                recent_statuses = g["status"].tolist()
-                if len(recent_statuses) >= 2 and recent_statuses[-1] == "LOST_SL" and recent_statuses[-2] == "LOST_SL":
-                    if sym not in self._toxic_coin_quarantine or self._toxic_coin_quarantine[sym] <= now_ts:
-                        self._toxic_coin_quarantine[sym] = now_ts + 86400.0
-                        print(f"[QUARANTINE 🛡️] Symbol {sym} placed on 24h quarantine after 2 consecutive stop-outs.", flush=True)
+
+            def is_loss(st, out):
+                s = str(st).upper()
+                o = str(out).upper()
+                return "LOST" in s or "SL_HIT" in s or "STOP_LOSS" in s or "LOST" in o
+
+            recent_df = df.tail(300)
+            for sym, g in recent_df.groupby("symbol"):
+                sym_clean = str(sym).strip().upper()
+                loss_count = 0
+                has_win = False
+                for _, row in g.iterrows():
+                    st = row.get("status", "")
+                    out = row.get("outcome_label", "")
+                    if is_loss(st, out):
+                        loss_count += 1
+                    elif "WON" in str(st).upper() or "WON" in str(out).upper():
+                        has_win = True
+
+                if loss_count >= 2 and (not has_win or loss_count > 1):
+                    if sym_clean not in self._toxic_coin_quarantine or self._toxic_coin_quarantine[sym_clean] <= now_ts:
+                        self._toxic_coin_quarantine[sym_clean] = now_ts + 86400.0
+                        self._toxic_coin_quarantine[sym_clean.replace("/", "")] = now_ts + 86400.0
+                        print(f"[QUARANTINE 🛡️] Symbol {sym_clean} placed on 24h quarantine after {loss_count} recent losses.", flush=True)
+
+            state_path = os.path.join(self.export_dir, "scanner_daemon_state.json")
+            try:
+                state_data = {}
+                if os.path.exists(state_path):
+                    with open(state_path, "r", encoding="utf-8") as sf:
+                        state_data = json.load(sf)
+                state_data["quarantined_coins"] = {k: float(v) for k, v in self._toxic_coin_quarantine.items() if float(v) > now_ts}
+                tmp_state = f"{state_path}.tmp.{time.time_ns()}"
+                with open(tmp_state, "w", encoding="utf-8") as sf:
+                    json.dump(state_data, sf, indent=2)
+                os.replace(tmp_state, state_path)
+            except Exception:
+                pass
         except Exception as q_err:
             pass

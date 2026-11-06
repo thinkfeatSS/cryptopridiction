@@ -113,42 +113,63 @@ def fetch_live_binance_prices(max_age_seconds: float = 15.0) -> Dict[str, float]
         _async_refresh_tickers()
     return _LIVE_PRICES_CACHE
 
-_INTRA_CANDLE_CACHE = {}
-_INTRA_CANDLE_TS = {}
+_INTRA_KLINES_CACHE: Dict[str, list] = {}
+_INTRA_KLINES_TS: Dict[str, float] = {}
 
-def fetch_intra_candle_extremes(symbol: str, horizon: str = "15M") -> tuple[float, float]:
+def fetch_intra_candle_extremes(symbol: str, horizon: str = "15M", since_ts: Optional[float] = None) -> tuple[float, float]:
     """
     Fetches real intra-candle OHLC high and low wicks from Binance Vision API.
     Guarantees that intra-candle adverse spikes touching Stop-Loss or target touches
     are captured even if the candle eventually closes at an opposite level.
+    Strictly filters out pre-entry historical wicks occurring before since_ts.
     """
-    global _INTRA_CANDLE_CACHE, _INTRA_CANDLE_TS
+    global _INTRA_KLINES_CACHE, _INTRA_KLINES_TS
     raw_sym = symbol.replace("/", "").replace(":USDT", "").upper()
     now_t = time.time()
     
-    # Cache per symbol for 10 seconds to keep evaluation blisteringly fast
-    if raw_sym in _INTRA_CANDLE_CACHE and (now_t - _INTRA_CANDLE_TS.get(raw_sym, 0.0)) < 10.0:
-        return _INTRA_CANDLE_CACHE[raw_sym]
+    # Pre-entry protection: If signal is in its first 60s of life, do not evaluate past closed candles
+    if since_ts and (now_t - since_ts) < 60.0:
+        return (0.0, 0.0)
         
     norm_hz = "15M" if "15" in horizon else ("24H" if ("24" in horizon or "1D" in horizon) else "1H")
     interval = "1m" if norm_hz == "15M" else ("5m" if norm_hz == "1H" else "1h")
     limit = 15 if norm_hz == "15M" else 12
 
+    cache_key = f"{raw_sym}:{interval}"
+    klines = None
+    if cache_key in _INTRA_KLINES_CACHE and (now_t - _INTRA_KLINES_TS.get(cache_key, 0.0)) < 10.0:
+        klines = _INTRA_KLINES_CACHE[cache_key]
+    else:
+        try:
+            url = f"https://data-api.binance.vision/api/v3/klines?symbol={raw_sym}&interval={interval}&limit={limit}"
+            resp = requests.get(url, timeout=2.5)
+            if resp.status_code == 200:
+                k_data = resp.json()
+                if isinstance(k_data, list) and len(k_data) > 0:
+                    klines = k_data
+                    _INTRA_KLINES_CACHE[cache_key] = klines
+                    _INTRA_KLINES_TS[cache_key] = now_t
+        except Exception:
+            pass
+
+    if not klines:
+        return (0.0, 0.0)
+
+    # Filter klines strictly to candles that opened at or after signal creation (with a tiny 5s buffer)
+    if since_ts:
+        valid_klines = [k for k in klines if (float(k[0]) / 1000.0) >= (since_ts - 5.0)]
+    else:
+        valid_klines = klines
+
+    if not valid_klines:
+        return (0.0, 0.0)
+
     try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={raw_sym}&interval={interval}&limit={limit}"
-        resp = requests.get(url, timeout=2.5)
-        if resp.status_code == 200:
-            klines = resp.json()
-            if isinstance(klines, list) and len(klines) > 0:
-                highs = [float(k[2]) for k in klines]
-                lows = [float(k[3]) for k in klines]
-                res = (max(highs), min(lows))
-                _INTRA_CANDLE_CACHE[raw_sym] = res
-                _INTRA_CANDLE_TS[raw_sym] = now_t
-                return res
+        highs = [float(k[2]) for k in valid_klines]
+        lows = [float(k[3]) for k in valid_klines]
+        return (max(highs), min(lows))
     except Exception:
-        pass
-    return (0.0, 0.0)
+        return (0.0, 0.0)
 
 def resolve_asset_price(symbol: str, signal: Optional[Any] = None, live_prices: Optional[Dict[str, float]] = None) -> float:
     """
@@ -738,8 +759,23 @@ class SignalService:
                 sl_p = safe_float(s.sl_price or entry_p, entry_p)
                 direction = str(s.direction or "LONG").upper()
 
-                # Fetch real intra-candle extremum wicks to prevent interval close vs tick discrepancies
-                intra_high, intra_low = fetch_intra_candle_extremes(sym, norm_hz)
+                # Extract authoritative creation timestamp for post-entry time gating
+                sig_created_ts = None
+                try:
+                    if getattr(s, "created_at", None):
+                        c_dt = s.created_at
+                        if c_dt.tzinfo is None:
+                            c_dt = c_dt.replace(tzinfo=timezone.utc)
+                        sig_created_ts = c_dt.timestamp()
+                    elif s.date_utc and s.time_utc:
+                        t_clean = str(s.time_utc).replace(" UTC", "").strip()
+                        c_dt = datetime.strptime(f"{s.date_utc} {t_clean}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        sig_created_ts = c_dt.timestamp()
+                except Exception:
+                    pass
+
+                # Fetch real intra-candle extremum wicks strictly post-entry
+                intra_high, intra_low = fetch_intra_candle_extremes(sym, norm_hz, since_ts=sig_created_ts)
                 high_seen = safe_float(s.peak_price_seen or curr_p, curr_p)
                 low_seen = safe_float(s.trough_price_seen or curr_p, curr_p)
                 if intra_high > 0:
@@ -823,11 +859,26 @@ class SignalService:
                     pass
 
                 tp1_dist = abs(tp1_p - entry_p) / max(1e-12, entry_p) * 100.0
-                is_range_regime = any(k in str(getattr(s, "market_shield", "")).upper() for k in ["RANGE", "CONSOLIDATION", "CHOP"])
-                t0_hurdle = min(1.00, max(0.60, 0.45 * tp1_dist)) if is_range_regime else min(1.20, max(0.80, 0.50 * tp1_dist))
 
-                # If news shock is active, trigger protection earlier once +0.30% gain is reached
-                effective_t0_gate = 0.30 if is_news_shock_active else t0_hurdle
+                # Phase 4: Dynamic 2-Stage Profit Ratchet (+0.50% Micro-Guard & +0.75% Tier-0 Breakeven)
+                # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by 50% once trade shows favorable expansion)
+                if max_gain >= 0.50 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
+                    orig_sl = safe_float(getattr(s, "initial_sl_price", None) or s.sl_price or entry_p, entry_p)
+                    if direction == "LONG" and orig_sl < entry_p:
+                        half_risk_sl = round(entry_p - (abs(entry_p - orig_sl) * 0.50), 6)
+                        if half_risk_sl > sl_p:
+                            s.sl_price = half_risk_sl
+                            sl_p = half_risk_sl
+                            updated = True
+                    elif direction == "SHORT" and orig_sl > entry_p:
+                        half_risk_sl = round(entry_p + (abs(orig_sl - entry_p) * 0.50), 6)
+                        if half_risk_sl < sl_p:
+                            s.sl_price = half_risk_sl
+                            sl_p = half_risk_sl
+                            updated = True
+
+                # Stage 2: Tier-0 Breakeven Ratchet (Lock in fees + small profit at +0.75% or 35% of TP1 distance)
+                effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
                 if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
                     s.status = "TIER0_PROTECTED_BREAKEVEN"
                     soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)

@@ -1168,11 +1168,24 @@ class PaperTradingBot:
                 else:
                     tp1_proximity_reached = (tp1_p_pos < entry_p and curr_p <= (entry_p - (entry_p - tp1_p_pos) * 0.50))
 
-                effective_t0_thresh = min(float(pos.get("tier0_threshold_pct", 1.00)), max(0.60, 0.45 * tp1_dist))
+                # Phase 4: Dynamic 2-Stage Profit Ratchet (+0.50% Micro-Guard & +0.75% Tier-0 Breakeven)
+                # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by 50% once favorable expansion begins)
+                if pos["peak_gain_pct"] >= 0.50 and not pos.get("is_breakeven_locked") and not pos.get("tp1_hit"):
+                    orig_sl = float(pos.get("initial_sl_price") or pos.get("sl_price") or entry_p)
+                    if direction == "LONG" and orig_sl < entry_p:
+                        half_risk_sl = entry_p - (abs(entry_p - orig_sl) * 0.50)
+                        if half_risk_sl > float(pos.get("sl_price", 0.0)):
+                            pos["sl_price"] = format_dynamic_precision(half_risk_sl)
+                    elif direction == "SHORT" and orig_sl > entry_p:
+                        half_risk_sl = entry_p + (abs(orig_sl - entry_p) * 0.50)
+                        if half_risk_sl < float(pos.get("sl_price", 1e9)):
+                            pos["sl_price"] = format_dynamic_precision(half_risk_sl)
+
+                effective_t0_thresh = min(float(pos.get("tier0_threshold_pct", 0.75)), max(0.50, 0.35 * tp1_dist))
 
                 if not pos.get("is_breakeven_locked") and not pos.get("tp1_hit") and not pos.get("tp2_hit") and (tp1_proximity_reached or pos["peak_gain_pct"] >= effective_t0_thresh):
                     pos["is_breakeven_locked"] = True
-                    pos["sl_price"] = entry_p * (1.0005 if direction == "LONG" else 0.9995)
+                    pos["sl_price"] = format_dynamic_precision(entry_p * (1.0005 if direction == "LONG" else 0.9995))
                     try:
                         print(f"[PAPER BOT 🛡️] Tier-0 Breakeven Ratchet Activated for {sym}! Stop-loss locked at Entry.")
                     except Exception:

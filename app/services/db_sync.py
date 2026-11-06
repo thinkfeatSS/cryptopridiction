@@ -256,6 +256,23 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                     for r in records_to_process
                                     if str(r.get("status", "")).strip().upper() in ["PENDING", "PENDING_EVALUATION", "ACTIVE", "TIER0_PROTECTED_BREAKEVEN"]
                                 }
+                                # Pillar 6: Track recent signal timestamps for 45-minute cooldown deduplication
+                                latest_pair_timestamps = {}
+                                for r in records_to_process:
+                                    r_sym = str(r.get("symbol", "")).strip().upper()
+                                    r_hz = str(r.get("horizon", "")).strip().upper()
+                                    r_norm_hz = "15M" if "15" in r_hz else ("24H" if ("24" in r_hz or "1D" in r_hz) else "1H")
+                                    d_r = str(r.get("date_utc", ""))
+                                    t_r = str(r.get("time_utc", "")).replace(" UTC", "").strip()
+                                    if d_r and t_r:
+                                        try:
+                                            ts_val = datetime.strptime(f"{d_r} {t_r}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+                                            p_key = (r_sym, r_norm_hz)
+                                            if p_key not in latest_pair_timestamps or ts_val > latest_pair_timestamps[p_key]:
+                                                latest_pair_timestamps[p_key] = ts_val
+                                        except Exception:
+                                            pass
+
                                 extra_rows_for_csv = []
                                 for fs in raw_active_sigs:
                                     if not fs or not isinstance(fs, dict):
@@ -270,6 +287,11 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                     
                                     # Anti-Duplication: Do not re-log if an active/pending signal already exists for this pair & horizon
                                     if (fs_sym, norm_hz) in existing_active_pairs:
+                                        continue
+
+                                    # 45-Minute Cooldown Gate: Do not emit/insert duplicate signals within 45 mins (2700s) of last signal
+                                    last_pair_ts = latest_pair_timestamps.get((fs_sym, norm_hz), 0.0)
+                                    if (now_utc.timestamp() - last_pair_ts) < 2700.0:
                                         continue
 
                                     sym_clean = fs_sym.replace("/", "").replace("-", "")

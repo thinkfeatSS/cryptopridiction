@@ -1,7 +1,10 @@
 import os
 import requests
 from typing import List, Dict, Any, Optional
+import json
+import time
 from app.engine.config import (
+    EXPORT_DIR,
     TOP_N_UNIVERSE,
     MIN_24H_VOLUME_USD,
     MEME_AND_SHITCOIN_BASES,
@@ -51,6 +54,19 @@ class UniverseFilter:
         # 2. Strictly Reject Known Meme Coins & Non-Utility Shitcoins
         if is_meme_coin(clean_sym) or is_meme_coin(base) or base in MEME_AND_SHITCOIN_BASES:
             return False
+
+        # 2b. Reject Toxic Quarantined Symbols (>= 2 recent stop-outs)
+        try:
+            state_path = os.path.join(EXPORT_DIR, "scanner_daemon_state.json")
+            if os.path.exists(state_path):
+                with open(state_path, "r", encoding="utf-8") as sf:
+                    q_data = json.load(sf).get("quarantined_coins", {})
+                now_t = time.time()
+                for q_k in [clean_sym, base, f"{base}USDT", f"{base}/USDT"]:
+                    if q_k in q_data and float(q_data[q_k]) > now_t:
+                        return False
+        except Exception:
+            pass
 
         # 3. Reject Synthetic Test Tokens & Non-Alphanumeric Tokens
         if base.startswith("COIN") and base[4:].isdigit():

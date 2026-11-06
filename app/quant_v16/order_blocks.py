@@ -652,7 +652,8 @@ class InstitutionalOrderBlockEngine:
 
                     if is_valid_sweep_long and (vol_ratio >= 1.25 or is_wick_rejection):
                         entry_p = live_p
-                        sl_p = format_dynamic_precision(sweep_low - (0.05 * atr))
+                        min_sl_dist = max(0.85 * atr, entry_p * 0.010)
+                        sl_p = format_dynamic_precision(min(sweep_low - (0.35 * atr), entry_p - min_sl_dist))
                         risk_amt = max(1e-6, entry_p - sl_p)
                         tp1_p = format_dynamic_precision(entry_p + (ob_tp1_mult * risk_amt))
                         tp2_p = format_dynamic_precision(entry_p + (ob_tp2_mult * risk_amt))
@@ -795,7 +796,8 @@ class InstitutionalOrderBlockEngine:
 
                     if is_valid_sweep_short and (vol_ratio >= 1.25 or is_wick_rejection):
                         entry_p = live_p
-                        sl_p = format_dynamic_precision(sweep_high + (0.05 * atr))
+                        min_sl_dist = max(0.85 * atr, entry_p * 0.010)
+                        sl_p = format_dynamic_precision(max(sweep_high + (0.35 * atr), entry_p + min_sl_dist))
                         risk_amt = max(1e-6, sl_p - entry_p)
                         tp1_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (ob_tp1_mult * risk_amt)))
                         tp2_p = format_dynamic_precision(max(entry_p * 0.001, entry_p - (ob_tp2_mult * risk_amt)))

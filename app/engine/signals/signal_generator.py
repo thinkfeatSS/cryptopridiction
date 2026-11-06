@@ -1562,7 +1562,7 @@ class SignalGenerationSystem:
                 )) or has_valid_institutional_trigger_15m
             )
         )
-        q_15m_direction = (
+        cand_15m_dir = (
             ob_setup_15m.get("direction") if (has_ob_15m and ob_setup_15m.get("zeiierman_rank", 99) <= 3) else (
                 smc_dir_15m if (has_smc_15m and smc_dir_15m) else (
                     "LONG" if is_15m_bull else (
@@ -1572,7 +1572,22 @@ class SignalGenerationSystem:
                     )
                 )
             )
-        ) if q_15m_qualified else None
+        )
+
+        # Pillar 2: Strict Higher-Timeframe Trend Confluence (No Counter-Trend Knife Catches)
+        htf_4h_str = str(trend_matrix.get("4h", "CONSOLIDATION")).upper()
+        htf_1d_str = str(trend_matrix.get("1d", "CONSOLIDATION")).upper()
+        is_htf_conflict_15m = bool(
+            cand_15m_dir and (
+                (cand_15m_dir == "SHORT" and (htf_4h_str == "BULLISH" or htf_1d_str == "BULLISH")) or
+                (cand_15m_dir == "LONG" and (htf_4h_str == "BEARISH" or htf_1d_str == "BEARISH"))
+            )
+        )
+        if is_htf_conflict_15m:
+            q_15m_qualified = False
+            q_15m_direction = None
+        else:
+            q_15m_direction = cand_15m_dir if q_15m_qualified else None
 
         q_15m = {
             "qualified": q_15m_qualified,
@@ -1650,7 +1665,7 @@ class SignalGenerationSystem:
                 )) or has_valid_institutional_trigger_1h
             )
         )
-        q_1h_direction = (
+        cand_1h_dir = (
             ob_setup_1h.get("direction") if (has_ob_1h and ob_setup_1h.get("zeiierman_rank", 99) <= 3) else (
                 smc_dir_1h if (has_smc_1h and smc_dir_1h) else (
                     "LONG" if is_1h_bull else (
@@ -1660,7 +1675,20 @@ class SignalGenerationSystem:
                     )
                 )
             )
-        ) if q_1h_qualified else None
+        )
+
+        # Pillar 2: Strict Higher-Timeframe Trend Confluence (No Counter-Trend 1H Setups)
+        is_htf_conflict_1h = bool(
+            cand_1h_dir and (
+                (cand_1h_dir == "SHORT" and (htf_4h_str == "BULLISH" or htf_1d_str == "BULLISH")) or
+                (cand_1h_dir == "LONG" and (htf_4h_str == "BEARISH" or htf_1d_str == "BEARISH"))
+            )
+        )
+        if is_htf_conflict_1h:
+            q_1h_qualified = False
+            q_1h_direction = None
+        else:
+            q_1h_direction = cand_1h_dir if q_1h_qualified else None
 
         q_1h = {
             "qualified": q_1h_qualified,
