@@ -1375,18 +1375,18 @@ class UnifiedCryptoEngine:
             if op.get("trade_id"):
                 existing_ids.add(op.get("trade_id"))
 
-        # Horizon validity duration (seconds) with generous grace buffer
+        # Canonical horizon validity duration (seconds) with anti-expiry consolidation grace
         HORIZON_MAX_ACTIVE_SECS = {
-            "15M": 15 * 60 + 300,      # 20 minutes max active window
-            "30M": 30 * 60 + 300,      # 35 minutes
-            "1H":  60 * 60 + 900,      # 75 minutes max active window
-            "4H":  4 * 3600 + 1800,    # 4.5 hours
-            "12H": 12 * 3600 + 3600,   # 13 hours
-            "24H": 48 * 3600 + 7200,   # 50 hours max active window (aligned with 48H swing hold)
-            "1D":  48 * 3600 + 7200,
-            "7D":  7 * 86400 + 14400,
-            "15D": 15 * 86400 + 28800,
-            "30D": 30 * 86400 + 86400,
+            "15M": 7200,                # 2 hours (8 candles)
+            "30M": 10800,               # 3 hours (6 candles)
+            "1H":  21600,               # 6 hours (6 candles)
+            "4H":  43200,               # 12 hours (3 candles)
+            "12H": 86400,               # 24 hours (2 candles)
+            "24H": 172800,              # 48 hours (2 candles)
+            "1D":  172800,
+            "7D":  7 * 86400,
+            "15D": 15 * 86400,
+            "30D": 30 * 86400,
         }
 
         now_utc = datetime.now(timezone.utc)
@@ -1408,6 +1408,7 @@ class UnifiedCryptoEngine:
                         st = str(row.get("status", "")).upper()
                         sym_r = str(row.get("symbol", "")).strip().upper()
                         hz_r = str(row.get("horizon", "")).strip().upper()
+                        norm_hz_r = "15M" if "15" in hz_r else ("24H" if any(x in hz_r for x in ["24", "1D", "SWING", "MACRO"]) else "1H")
                         outc = str(row.get("outcome_label", "")).upper()
 
                         is_pending = (
@@ -1423,8 +1424,17 @@ class UnifiedCryptoEngine:
                                 if date_u and time_u:
                                     sig_dt = datetime.strptime(f"{date_u} {time_u}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                                     age_s = (now_utc - sig_dt).total_seconds()
-                                    max_s = HORIZON_MAX_ACTIVE_SECS.get(hz_r, 3600)
-                                    if age_s <= max_s:
+                                    max_s = HORIZON_MAX_ACTIVE_SECS.get(norm_hz_r, 21600)
+                                    # Active in paper trading bot or within TTL or in consolidation grace
+                                    is_in_paper = (
+                                        sid in existing_ids or
+                                        (sym_r, norm_hz_r) in active_pairs or
+                                        (sym_r.replace("/", ""), norm_hz_r) in active_pairs
+                                    )
+                                    if age_s <= max_s or is_in_paper:
+                                        is_still_active = True
+                                    elif age_s <= (max_s * 1.50):
+                                        # Dynamic Consolidation Grace Extension (+50% TTL for flat coiling setups)
                                         is_still_active = True
                             except Exception:
                                 pass
@@ -1432,7 +1442,7 @@ class UnifiedCryptoEngine:
                             if is_still_active:
                                 active_pairs.add((sym_r, hz_r))
                             else:
-                                # Mark stale historical pending trade as expired
+                                # Mark stale historical pending trade as expired breakeven (clean close)
                                 row["status"] = "EXPIRED_HORIZON"
                                 row["outcome_label"] = "⏱️ EXPIRED"
                                 row["evaluated_at_utc"] = time_str

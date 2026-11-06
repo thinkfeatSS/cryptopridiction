@@ -821,31 +821,37 @@ class SignalService:
                     except Exception:
                         pass
 
-                # Dynamic Horizon TTL Fallback: If pred_close is missing, compute from signal creation age
-                if not is_expired:
-                    horizon_max_secs = {
-                        "15M": 1800,      # 30 mins
-                        "30M": 2700,      # 45 mins
-                        "1H": 5400,       # 90 mins
-                        "4H": 18000,      # 5 hours
-                        "12H": 54000,     # 15 hours
-                        "24H": 172800,    # 48 hours
-                    }
-                    max_sec = horizon_max_secs.get(norm_hz, 5400)
-                    sig_age_sec = None
-                    try:
-                        if s.created_at:
-                            c_dt = s.created_at
-                            if c_dt.tzinfo is None:
-                                c_dt = c_dt.replace(tzinfo=timezone.utc)
-                            sig_age_sec = (now_utc - c_dt).total_seconds()
-                        elif s.date_utc and s.time_utc:
-                            t_clean = str(s.time_utc).replace(" UTC", "").strip()
-                            c_dt = datetime.strptime(f"{s.date_utc} {t_clean}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                            sig_age_sec = (now_utc - c_dt).total_seconds()
-                    except Exception:
-                        pass
-                    if sig_age_sec is not None and sig_age_sec >= max_sec:
+                # Dynamic Horizon TTL with Anti-Expiry Consolidation Grace
+                horizon_max_secs = {
+                    "15M": 7200,      # 2 hours (8 candles)
+                    "30M": 10800,     # 3 hours (6 candles)
+                    "1H": 21600,      # 6 hours (6 candles)
+                    "4H": 43200,      # 12 hours (3 candles)
+                    "12H": 86400,     # 24 hours (2 candles)
+                    "24H": 172800,    # 48 hours (2 candles)
+                }
+                max_sec = horizon_max_secs.get(norm_hz, 21600)
+                sig_age_sec = None
+                try:
+                    if getattr(s, "created_at", None):
+                        c_dt = s.created_at
+                        if c_dt.tzinfo is None:
+                            c_dt = c_dt.replace(tzinfo=timezone.utc)
+                        sig_age_sec = (now_utc - c_dt).total_seconds()
+                    elif s.date_utc and s.time_utc:
+                        t_clean = str(s.time_utc).replace(" UTC", "").strip()
+                        c_dt = datetime.strptime(f"{s.date_utc} {t_clean}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        sig_age_sec = (now_utc - c_dt).total_seconds()
+                except Exception:
+                    pass
+
+                # Check if signal has reached canonical expiry age
+                if sig_age_sec is not None and sig_age_sec >= max_sec:
+                    # Dynamic Consolidation Grace Extension (+50% TTL if coiling within flat consolidation)
+                    ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
+                    if ret_now <= 0.60 and sig_age_sec < (max_sec * 1.50) and not is_hit_sl:
+                        is_expired = False
+                    else:
                         is_expired = True
 
                 # 0. Acute Volatile News Shock & Tier-0 Early Breakeven Guard
@@ -891,8 +897,11 @@ class SignalService:
                 # If an unlocked active trade hits SL intra-candle, SL strictly takes precedence over simultaneous TP touches
                 if is_hit_sl and not is_be_locked:
                     s.status = "LOST_SL"
-                    s.exit_price = round(sl_p, 6)
-                    ret_pct = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                    actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
+                    if actual_exit_p <= 0:
+                        actual_exit_p = sl_p
+                    s.exit_price = round(actual_exit_p, 6)
+                    ret_pct = ((actual_exit_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - actual_exit_p) / entry_p) * 100.0
                     s.realized_return_pct = round(ret_pct, 2)
                     s.outcome_label = "🔴 LOST (SL HIT)"
                     s.evaluated_at_utc = now_str
@@ -997,8 +1006,11 @@ class SignalService:
                         evt = "BE_HIT"
                     else:
                         s.status = "LOST_SL"
-                        s.exit_price = round(sl_p, 6)
-                        ret_pct = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                        actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
+                        if actual_exit_p <= 0:
+                            actual_exit_p = sl_p
+                        s.exit_price = round(actual_exit_p, 6)
+                        ret_pct = ((actual_exit_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - actual_exit_p) / entry_p) * 100.0
                         s.realized_return_pct = round(ret_pct, 2)
                         s.outcome_label = "🔴 LOST (SL HIT)"
                         evt = "SL_HIT"
@@ -1016,8 +1028,11 @@ class SignalService:
                     hit_sl_during_interval = (direction == "LONG" and low_p <= sl_p) or (direction == "SHORT" and high_p >= sl_p)
                     if hit_sl_during_interval and not is_be_locked:
                         s.status = "LOST_SL"
-                        s.exit_price = round(sl_p, 6)
-                        ret_pct = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                        actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
+                        if actual_exit_p <= 0:
+                            actual_exit_p = sl_p
+                        s.exit_price = round(actual_exit_p, 6)
+                        ret_pct = ((actual_exit_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - actual_exit_p) / entry_p) * 100.0
                         s.realized_return_pct = round(ret_pct, 2)
                         s.outcome_label = "🔴 LOST (SL HIT)"
                     elif hit_sl_during_interval and is_be_locked:
@@ -1036,8 +1051,11 @@ class SignalService:
                             s.outcome_label = "🟢 WON (TP1 + BE RUNNER)"
                         else:
                             s.status = "LOST_SL"
-                            s.exit_price = round(sl_p, 6)
-                            ret_pct = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                            actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
+                            if actual_exit_p <= 0:
+                                actual_exit_p = sl_p
+                            s.exit_price = round(actual_exit_p, 6)
+                            ret_pct = ((actual_exit_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - actual_exit_p) / entry_p) * 100.0
                             s.realized_return_pct = round(ret_pct, 2)
                             s.outcome_label = "🔴 LOST (SL HIT)"
                     else:
@@ -1055,12 +1073,12 @@ class SignalService:
                             s.realized_return_pct = round(ret_current, 2)
                             s.outcome_label = f"🟢 WON (TIER-0 BE {ret_current:+.2f}%)" if ret_current >= 0.20 else f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_current:+.2f}%)"
                         else:
-                            if ret_current >= 0.25:
-                                s.status = "WON_PROFIT_EXPIRED"
+                            if ret_current >= 0.30:
+                                s.status = "WON_EXP_PROFIT"
                                 s.exit_price = round(curr_p, 6)
                                 s.realized_return_pct = round(ret_current, 2)
-                                s.outcome_label = f"🟢 WON (PROFIT EXPIRE +{ret_current:.2f}%)"
-                            elif ret_current <= -0.25:
+                                s.outcome_label = f"🟢 WON (EXP PROFIT +{ret_current:.2f}%)"
+                            elif ret_current <= -0.65 and abs(curr_p - entry_p) >= (0.50 * abs(entry_p - sl_p)):
                                 s.status = "LOST_EXPIRED"
                                 s.exit_price = round(curr_p, 6)
                                 s.realized_return_pct = round(ret_current, 2)
@@ -1069,7 +1087,7 @@ class SignalService:
                                 s.status = "EXPIRED_BREAKEVEN"
                                 s.exit_price = round(curr_p, 6)
                                 s.realized_return_pct = round(ret_current, 2)
-                                s.outcome_label = f"⏱️ EXPIRED (BE {ret_current:+.2f}%)"
+                                s.outcome_label = f"⏱️ EXPIRED (CONSOLIDATION BE {ret_current:+.2f}%)"
                     s.evaluated_at_utc = now_str
                     updated = True
                     try:
@@ -1117,6 +1135,380 @@ class SignalService:
                     pass
         except Exception:
             db.rollback()
+
+    def evaluate_active_signals(
+        self,
+        signals_list: List[Any],
+        live_prices: Optional[Dict[str, float]] = None,
+        now_utc: Optional[datetime] = None
+    ) -> bool:
+        """
+        Authoritative market evaluation for active signals against live Binance prices, intra-candle wicks, and time horizons:
+        - Evaluates TP1 / TP2 / TP3 / SL hits with strict precedence.
+        - Accounts for physical black-swan gap penetration on SL hits (exit price = min(SL, curr_p) for Longs).
+        - Implements Stage 1 Micro-Guard (+0.50% MFE) and Stage 2 Tier-0 Breakeven (+0.75% MFE).
+        - Enforces canonical horizon TTL with Dynamic Consolidation Grace Extension (+50% TTL).
+        - Classifies flat consolidation timeouts strictly as EXPIRED_BREAKEVEN (never penalized as losses).
+        Returns True if any signal record was updated.
+        """
+        if not signals_list:
+            return False
+
+        if live_prices is None:
+            live_prices = fetch_live_binance_prices()
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+        updated = False
+
+        for s in signals_list:
+            st_raw = str(getattr(s, "status", "")).strip().upper()
+            if st_raw in ["WON", "LOST", "CLOSED", "BREAKEVEN_GUARD", "EXPIRED_HORIZON"]:
+                continue
+            if getattr(s, "outcome_label", None) and any(term in str(s.outcome_label).upper() for term in ["WON", "LOST", "CLOSED", "CANCEL"]):
+                continue
+
+            sym = str(s.symbol or "").strip()
+            norm_hz = "15M" if "15" in str(s.horizon or "") else ("24H" if ("24" in str(s.horizon or "") or "1D" in str(s.horizon or "")) else "1H")
+
+            curr_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
+            if not curr_p or curr_p <= 0:
+                curr_p = safe_float(s.entry_price, 0.0)
+
+            entry_p = safe_float(s.entry_price or curr_p, curr_p)
+            tp1_p = safe_float(s.tp1_price or entry_p, entry_p)
+            tp2_p = safe_float(s.tp2_price or entry_p, entry_p)
+            tp3_p = safe_float(s.tp3_price or entry_p, entry_p)
+            sl_p = safe_float(s.sl_price or entry_p, entry_p)
+            direction = str(s.direction or "LONG").upper()
+
+            # Extract authoritative creation timestamp for post-entry time gating
+            sig_created_ts = None
+            try:
+                if getattr(s, "created_at", None):
+                    c_dt = s.created_at
+                    if c_dt.tzinfo is None:
+                        c_dt = c_dt.replace(tzinfo=timezone.utc)
+                    sig_created_ts = c_dt.timestamp()
+                elif s.date_utc and s.time_utc:
+                    t_clean = str(s.time_utc).replace(" UTC", "").strip()
+                    c_dt = datetime.strptime(f"{s.date_utc} {t_clean}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    sig_created_ts = c_dt.timestamp()
+            except Exception:
+                pass
+
+            # Fetch real intra-candle extremum wicks strictly post-entry
+            intra_high, intra_low = fetch_intra_candle_extremes(sym, norm_hz, since_ts=sig_created_ts)
+            high_seen = safe_float(getattr(s, "peak_price_seen", None) or curr_p, curr_p)
+            low_seen = safe_float(getattr(s, "trough_price_seen", None) or curr_p, curr_p)
+            if intra_high > 0:
+                high_seen = max(high_seen, intra_high)
+            if intra_low > 0:
+                low_seen = min(low_seen, intra_low)
+            s.peak_price_seen = max(high_seen, curr_p)
+            s.trough_price_seen = min(low_seen, curr_p)
+            high_p = s.peak_price_seen
+            low_p = s.trough_price_seen
+
+            max_gain = ((high_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - low_p) / entry_p) * 100.0
+            s.max_potential_gain_pct = round(max_gain, 2)
+
+            is_hit_tp3 = (direction == "LONG" and high_p >= tp3_p) or (direction == "SHORT" and low_p <= tp3_p)
+            is_hit_tp2 = (direction == "LONG" and high_p >= tp2_p) or (direction == "SHORT" and low_p <= tp2_p)
+            is_hit_tp1 = (direction == "LONG" and high_p >= tp1_p) or (direction == "SHORT" and low_p <= tp1_p)
+
+            # Stop loss check: evaluate against intra-candle extremes and current spot price
+            is_be_locked = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]
+            if is_be_locked:
+                is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
+            else:
+                is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
+
+            is_expired = False
+            # Dynamic Horizon TTL with Anti-Expiry Consolidation Grace
+            horizon_max_secs = {
+                "15M": 7200,      # 2 hours (8 candles)
+                "30M": 10800,     # 3 hours (6 candles)
+                "1H": 21600,      # 6 hours (6 candles)
+                "4H": 43200,      # 12 hours (3 candles)
+                "12H": 86400,     # 24 hours (2 candles)
+                "24H": 172800,    # 48 hours (2 candles)
+            }
+            max_sec = horizon_max_secs.get(norm_hz, 21600)
+            sig_age_sec = None
+            try:
+                if getattr(s, "created_at", None):
+                    c_dt = s.created_at
+                    if c_dt.tzinfo is None:
+                        c_dt = c_dt.replace(tzinfo=timezone.utc)
+                    sig_age_sec = (now_utc - c_dt).total_seconds()
+                elif s.date_utc and s.time_utc:
+                    t_clean = str(s.time_utc).replace(" UTC", "").strip()
+                    c_dt = datetime.strptime(f"{s.date_utc} {t_clean}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    sig_age_sec = (now_utc - c_dt).total_seconds()
+            except Exception:
+                pass
+
+            # Check if signal has reached canonical expiry age
+            if sig_age_sec is not None and sig_age_sec >= max_sec:
+                # Dynamic Consolidation Grace Extension (+50% TTL if coiling within flat consolidation)
+                ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
+                if ret_now <= 0.60 and sig_age_sec < (max_sec * 1.50) and not is_hit_sl:
+                    is_expired = False
+                else:
+                    is_expired = True
+
+            # 0. Acute Volatile News Shock & Tier-0 Early Breakeven Guard
+            is_news_shock_active = False
+            try:
+                from app.services.institutional_intelligence_service import institutional_intelligence_service
+                inst_cal = institutional_intelligence_service.get_macro_economic_calendar()
+                if inst_cal.get("is_volatility_pause_active"):
+                    is_news_shock_active = True
+            except Exception:
+                pass
+
+            tp1_dist = abs(tp1_p - entry_p) / max(1e-12, entry_p) * 100.0
+
+            # Phase 4: Dynamic 2-Stage Profit Ratchet (+0.50% Micro-Guard & +0.75% Tier-0 Breakeven)
+            if max_gain >= 0.50 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
+                orig_sl = safe_float(getattr(s, "initial_sl_price", None) or s.sl_price or entry_p, entry_p)
+                if direction == "LONG" and orig_sl < entry_p:
+                    half_risk_sl = round(entry_p - (abs(entry_p - orig_sl) * 0.50), 6)
+                    if half_risk_sl > sl_p:
+                        s.sl_price = half_risk_sl
+                        sl_p = half_risk_sl
+                        updated = True
+                elif direction == "SHORT" and orig_sl > entry_p:
+                    half_risk_sl = round(entry_p + (abs(orig_sl - entry_p) * 0.50), 6)
+                    if half_risk_sl < sl_p:
+                        s.sl_price = half_risk_sl
+                        sl_p = half_risk_sl
+                        updated = True
+
+            effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
+            if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
+                s.status = "TIER0_PROTECTED_BREAKEVEN"
+                soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)
+                s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
+                sl_p = s.sl_price
+                s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
+                updated = True
+
+            def _build_sig_dict(sig_obj):
+                return {
+                    "signal_id": sig_obj.signal_id,
+                    "symbol": sig_obj.symbol,
+                    "horizon": sig_obj.horizon,
+                    "direction": sig_obj.direction,
+                    "entry_price": sig_obj.entry_price,
+                    "entry_price_initial": sig_obj.entry_price,
+                    "tp1_price": sig_obj.tp1_price,
+                    "tp2_price": sig_obj.tp2_price,
+                    "tp3_price": sig_obj.tp3_price,
+                    "sl_price": sig_obj.sl_price,
+                    "quality_grade": sig_obj.quality_grade,
+                    "meta_win_prob_pct": sig_obj.meta_win_prob_pct,
+                    "risk_reward_ratio": getattr(sig_obj, "risk_reward_ratio", "1:2.0"),
+                    "ev_net": getattr(sig_obj, "ev_net", None),
+                    "decision": getattr(sig_obj, "decision", None) or sig_obj.outcome_label,
+                    "is_trade_active": True,
+                }
+
+            # 1. Conservative Adverse SL Precedence with Physical Gap Penetration:
+            if is_hit_sl and not is_be_locked:
+                s.status = "LOST_SL"
+                actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
+                if actual_exit_p <= 0:
+                    actual_exit_p = sl_p
+                s.exit_price = round(actual_exit_p, 6)
+                ret_pct = ((actual_exit_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - actual_exit_p) / entry_p) * 100.0
+                s.realized_return_pct = round(ret_pct, 2)
+                s.outcome_label = "🔴 LOST (SL HIT)"
+                s.evaluated_at_utc = now_str
+                updated = True
+                try:
+                    from app.services.whatsapp_service import whatsapp_service
+                    sig_dict = _build_sig_dict(s)
+                    whatsapp_service.emit_signal_outcome(sig_dict, "SL_HIT", s.exit_price, float(s.realized_return_pct))
+                except Exception:
+                    pass
+            elif is_hit_tp3:
+                s.status = "WON_TP3"
+                s.exit_price = round(tp3_p, 6)
+                ret_pct = ((tp3_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp3_p) / entry_p) * 100.0
+                s.realized_return_pct = round(ret_pct, 2)
+                s.outcome_label = "🟢 WON (TP3 HIT)"
+                s.evaluated_at_utc = now_str
+                updated = True
+                try:
+                    from app.services.whatsapp_service import whatsapp_service
+                    sig_dict = _build_sig_dict(s)
+                    whatsapp_service.emit_signal_outcome(sig_dict, "TP3_HIT", tp3_p, ret_pct)
+                except Exception:
+                    pass
+            elif is_hit_tp2 and s.status != "TP2_LOCKED_TRAIL":
+                s.status = "TP2_LOCKED_TRAIL"
+                s.sl_price = round(tp1_p, 6)
+                s.outcome_label = "🟢 TP2 HIT (TRAILING SL @ TP1)"
+                updated = True
+                try:
+                    from app.services.whatsapp_service import whatsapp_service
+                    ret_tp2 = ((tp2_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp2_p) / entry_p) * 100.0
+                    sig_dict = _build_sig_dict(s)
+                    whatsapp_service.emit_signal_outcome(sig_dict, "TP2_HIT", tp2_p, ret_tp2)
+                except Exception:
+                    pass
+            elif is_hit_tp1 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
+                s.status = "TP1_LOCKED_BREAKEVEN"
+                from app.engine.config import TRADE_MANAGEMENT_POLICY
+                if TRADE_MANAGEMENT_POLICY == "TIER0_ATR_TRAILING_BUFFER":
+                    raw_atr = max(1e-6, abs(entry_p - sl_p) * 0.5)
+                    buffer_p = 0.8 * raw_atr
+                    trailed_p = (curr_p - buffer_p) if direction == "LONG" else (curr_p + buffer_p)
+                    s.sl_price = round(max(entry_p, trailed_p) if direction == "LONG" else min(entry_p, trailed_p), 6)
+                    s.outcome_label = "🟢 TP1 HIT (SL @ ATR TRAILING BUFFER)"
+                else:
+                    s.sl_price = round(entry_p, 6)
+                    s.outcome_label = "🟢 TP1 HIT (SL @ BREAKEVEN)"
+                updated = True
+                try:
+                    from app.services.whatsapp_service import whatsapp_service
+                    ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                    sig_dict = _build_sig_dict(s)
+                    whatsapp_service.emit_signal_outcome(sig_dict, "TP1_HIT", tp1_p, ret_tp1)
+                except Exception:
+                    pass
+            elif is_hit_sl and is_be_locked:
+                if s.status == "TP2_LOCKED_TRAIL":
+                    ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                    ret_tp2 = ((tp2_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp2_p) / entry_p) * 100.0
+                    blended_ret = (0.50 * ret_tp1) + (0.30 * ret_tp2) + (0.20 * ret_tp1)
+                    s.status = "WON_TP2_TRAIL"
+                    s.exit_price = round(tp1_p, 6)
+                    s.realized_return_pct = round(blended_ret, 2)
+                    s.outcome_label = "🟢 WON (TP2 + TRAILING RUNNER)"
+                    evt = "TRAIL_SL_HIT"
+                elif s.status == "TP1_LOCKED_BREAKEVEN":
+                    ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                    ret_runner = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                    blended_ret = (0.70 * ret_tp1) + (0.30 * max(0.0, ret_runner))
+                    s.status = "WON_TP1_BE"
+                    s.exit_price = round(entry_p, 6)
+                    s.realized_return_pct = round(blended_ret, 2)
+                    s.outcome_label = "🟢 WON (TP1 + BE RUNNER)"
+                    evt = "BE_HIT"
+                elif s.status == "TIER0_PROTECTED_BREAKEVEN":
+                    ret_be = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                    s.status = "BREAKEVEN_GUARD"
+                    s.exit_price = round(sl_p, 6)
+                    s.realized_return_pct = round(ret_be, 2)
+                    s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
+                    evt = "BE_HIT"
+                else:
+                    s.status = "LOST_SL"
+                    actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
+                    if actual_exit_p <= 0:
+                        actual_exit_p = sl_p
+                    s.exit_price = round(actual_exit_p, 6)
+                    ret_pct = ((actual_exit_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - actual_exit_p) / entry_p) * 100.0
+                    s.realized_return_pct = round(ret_pct, 2)
+                    s.outcome_label = "🔴 LOST (SL HIT)"
+                    evt = "SL_HIT"
+                s.evaluated_at_utc = now_str
+                updated = True
+                try:
+                    from app.services.whatsapp_service import whatsapp_service
+                    ret_exit = s.realized_return_pct or 0.0
+                    sig_dict = _build_sig_dict(s)
+                    whatsapp_service.emit_signal_outcome(sig_dict, evt, s.exit_price, float(ret_exit))
+                except Exception:
+                    pass
+            elif is_expired:
+                # Invariant (Quant Edge Rule 6 & 8): Check if intra-candle adverse wick breached SL during the interval!
+                hit_sl_during_interval = (direction == "LONG" and low_p <= sl_p) or (direction == "SHORT" and high_p >= sl_p)
+                if hit_sl_during_interval and not is_be_locked:
+                    s.status = "LOST_SL"
+                    actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
+                    if actual_exit_p <= 0:
+                        actual_exit_p = sl_p
+                    s.exit_price = round(actual_exit_p, 6)
+                    ret_pct = ((actual_exit_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - actual_exit_p) / entry_p) * 100.0
+                    s.realized_return_pct = round(ret_pct, 2)
+                    s.outcome_label = "🔴 LOST (SL HIT)"
+                elif hit_sl_during_interval and is_be_locked:
+                    if s.status == "TIER0_PROTECTED_BREAKEVEN":
+                        ret_be = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                        s.status = "BREAKEVEN_GUARD"
+                        s.exit_price = round(sl_p, 6)
+                        s.realized_return_pct = round(ret_be, 2)
+                        s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
+                    elif s.status == "TP1_LOCKED_BREAKEVEN":
+                        ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                        s.status = "WON_TP1_BE"
+                        s.exit_price = round(entry_p, 6)
+                        ret_runner = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                        s.realized_return_pct = round((0.70 * ret_tp1) + (0.30 * max(0.0, ret_runner)), 2)
+                        s.outcome_label = "🟢 WON (TP1 + BE RUNNER)"
+                    else:
+                        s.status = "LOST_SL"
+                        actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
+                        if actual_exit_p <= 0:
+                            actual_exit_p = sl_p
+                        s.exit_price = round(actual_exit_p, 6)
+                        ret_pct = ((actual_exit_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - actual_exit_p) / entry_p) * 100.0
+                        s.realized_return_pct = round(ret_pct, 2)
+                        s.outcome_label = "🔴 LOST (SL HIT)"
+                else:
+                    ret_current = ((curr_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - curr_p) / entry_p) * 100.0
+                    if s.status == "TP1_LOCKED_BREAKEVEN":
+                        ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                        blended_ret = (0.50 * ret_tp1) + (0.50 * max(0.0, ret_current))
+                        s.status = "WON_TP1_EXP"
+                        s.exit_price = round(curr_p, 6)
+                        s.realized_return_pct = round(blended_ret, 2)
+                        s.outcome_label = f"🟢 WON (TP1 + EXP +{blended_ret:.2f}%)"
+                    elif s.status == "TIER0_PROTECTED_BREAKEVEN":
+                        s.status = "WON_EXP_PROFIT" if ret_current >= 0.20 else "BREAKEVEN_GUARD"
+                        s.exit_price = round(curr_p, 6)
+                        s.realized_return_pct = round(ret_current, 2)
+                        s.outcome_label = f"🟢 WON (TIER-0 BE {ret_current:+.2f}%)" if ret_current >= 0.20 else f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_current:+.2f}%)"
+                    else:
+                        if ret_current >= 0.30:
+                            s.status = "WON_EXP_PROFIT"
+                            s.exit_price = round(curr_p, 6)
+                            s.realized_return_pct = round(ret_current, 2)
+                            s.outcome_label = f"🟢 WON (EXP PROFIT +{ret_current:.2f}%)"
+                        elif ret_current <= -0.65 and abs(curr_p - entry_p) >= (0.50 * abs(entry_p - sl_p)):
+                            s.status = "LOST_EXPIRED"
+                            s.exit_price = round(curr_p, 6)
+                            s.realized_return_pct = round(ret_current, 2)
+                            s.outcome_label = f"🔴 LOST (EXPIRED {ret_current:.2f}%)"
+                        else:
+                            s.status = "EXPIRED_BREAKEVEN"
+                            s.exit_price = round(curr_p, 6)
+                            s.realized_return_pct = round(ret_current, 2)
+                            s.outcome_label = f"⏱️ EXPIRED (CONSOLIDATION BE {ret_current:+.2f}%)"
+                s.evaluated_at_utc = now_str
+                updated = True
+                try:
+                    from app.services.whatsapp_service import whatsapp_service
+                    sig_dict = {
+                        "signal_id": s.signal_id,
+                        "symbol": s.symbol,
+                        "horizon": s.horizon,
+                        "direction": s.direction,
+                        "entry_price": s.entry_price,
+                        "quality_grade": s.quality_grade,
+                        "meta_win_prob_pct": s.meta_win_prob_pct,
+                        "decision": getattr(s, "decision", None) or s.outcome_label,
+                        "outcome_label": s.outcome_label
+                    }
+                    whatsapp_service.emit_signal_outcome(sig_dict, "EXPIRED", float(s.exit_price or 0.0), float(s.realized_return_pct or 0.0))
+                except Exception:
+                    pass
+
+        return updated
 
     def _sync_updates_to_tracker_csv(self, signals_list: List[SignalAudit]):
         """Syncs updated status, outcome_label, sl_price, exit_price, realized_return_pct to trader_signals_tracker.csv."""

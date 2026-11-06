@@ -505,7 +505,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
             # Case B: Symbol has no active open trade in paper trading
             else:
                 hz = str(imm.get("horizon", "1H")).upper()
-                max_hold = 1800 if "15M" in hz else (172800 if any(x in hz for x in ["24H", "1D", "SWING", "MACRO"]) else 5400)
+                max_hold = 7200 if "15M" in hz else (172800 if any(x in hz for x in ["24H", "1D", "SWING", "MACRO"]) else (43200 if "4H" in hz else 21600))
 
                 gen_at_str = imm.get("signal_generated_at", "")
                 is_stale = False

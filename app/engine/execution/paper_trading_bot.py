@@ -1062,8 +1062,10 @@ class PaperTradingBot:
                 # Emergency News Volatility Shock & Macro Impulse Sentinel for Open Positions:
                 is_macro_severe = bool(btc_shield_state and (
                     btc_shield_state.get("regime") in ["FLASH_DUMP"] or
-                    btc_shield_state.get("status_code") == "FLASH_DUMP" or
-                    "FLASH_DUMP" in str(btc_shield_state.get("altcoin_posture", ""))
+                    btc_shield_state.get("status_code") in ["FLASH_DUMP", "BEAR_CASCADE_BLACKOUT", "ALERT_DUMP"] or
+                    "FLASH_DUMP" in str(btc_shield_state.get("altcoin_posture", "")) or
+                    "DEFENSIVE_CASH_ONLY" in str(btc_shield_state.get("altcoin_posture", "")) or
+                    "BLACKOUT" in str(btc_shield_state.get("status_code", ""))
                 ))
                 is_news_shock_active = bool(pos.get("is_news_shock_active", False))
                 if not is_news_shock_active:
@@ -1088,7 +1090,9 @@ class PaperTradingBot:
                 init_sl_p = float(pos.get("initial_sl_price") or (entry_p * (0.98 if direction == "LONG" else 1.02)))
                 init_sl_dist_pct = abs(entry_p - init_sl_p) / max(1e-8, entry_p) * 100.0
                 hit_news_shock_cut = is_news_shock_active and (gain_pct <= -max(0.50, 0.50 * init_sl_dist_pct))
-                hit_emergency_exit = ((gain_pct <= -2.50) and is_macro_severe) or hit_news_shock_cut
+                # Acute black-swan asset dump/shock exit (drop >= 2.5% against position or macro severe)
+                hit_acute_gap_shock = (gain_pct <= -2.50) and (is_macro_severe or gain_pct <= -(1.5 * init_sl_dist_pct))
+                hit_emergency_exit = hit_acute_gap_shock or hit_news_shock_cut
 
                 # Calculate elapsed time and duration
                 opened_dt = None
@@ -1113,9 +1117,18 @@ class PaperTradingBot:
                     dur_str = f"{dur_s}s"
 
                 norm_h = pos.get("signal_horizon") or pos.get("horizon", "1H")
-                # Hold time extended (Fix RC-2): 15M → 2h, 1H → 6h, 24H stays 48h
-                max_hold_secs = 7200 if "15M" in norm_h else (172800 if any(x in norm_h for x in ["24H", "1D", "SWING", "MACRO"]) else 21600)
-                hit_expiry = elapsed_secs >= max_hold_secs
+                # Canonical hold time: 15M → 2h, 1H → 6h, 4H → 12h, 24H stays 48h
+                max_hold_secs = 7200 if "15M" in norm_h else (172800 if any(x in norm_h for x in ["24H", "1D", "SWING", "MACRO"]) else (43200 if "4H" in norm_h else 21600))
+                
+                # Dynamic Consolidation Grace Extension (+50% TTL if coiled in flat consolidation)
+                if elapsed_secs >= max_hold_secs:
+                    if abs(gain_pct) <= 0.60 and elapsed_secs < (max_hold_secs * 1.50) and not pos.get("tp1_hit"):
+                        hit_expiry = False
+                        pos["is_consolidation_grace_active"] = True
+                    else:
+                        hit_expiry = True
+                else:
+                    hit_expiry = False
 
                 # -------------------------------------------------------------
                 # Feature 5.2: Dynamic Time-Decay TP Compaction (Section 20 & Phase 5)

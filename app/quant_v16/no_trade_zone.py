@@ -268,6 +268,15 @@ class NoTradeZoneEngine:
         decision_str = str(decision).upper() if decision else ""
         is_exempt_strategy = has_fresh_ob or any(k in decision_str for k in exempt_strategies)
 
+        # Severe Flatline Stagnation: Extreme dead market (ADX < 12 and BBW < 1.20% or CHOP >= 65 and ADX < 14)
+        is_dead_flatline = (adx < 12.0 and bbw < 1.20) or (chop >= 65.0 and adx < 14.0)
+        if is_dead_flatline and rvol < 1.25:
+            reasons.append(f"Dead Flatline Stagnation on {tf_label} (ADX: {adx:.1f} < 12, BBW: {bbw:.2f}%, RVOL: {rvol:.2f}). No volatility to reach target.")
+            if primary_code == NoTradeZoneReason.CLEAR:
+                primary_code = NoTradeZoneReason.CHOP_CONSOLIDATION
+                primary_label = f"🛑 NO TRADE ZONE (DEAD FLATLINE STAGNATION - {tf_label})"
+                badge = f"FLATLINE-{tf_label}"
+
         # Condition A: Severe Chop combined with non-trending ADX on this timeframe (exempting institutional setups)
         is_severe_chop = ((not is_exempt_strategy) and chop >= chop_severe_thresh and adx < adx_severe_thresh)
         # Condition B: High Chop + weak ADX + tight BBW squeeze without institutional setup/expansion
@@ -417,6 +426,27 @@ class NoTradeZoneEngine:
                 primary_code = NoTradeZoneReason.MID_RANGE_CHOP
                 primary_label = "🛑 NO TRADE ZONE (Mid-Range 50/50 No Man's Land)"
                 badge = f"MID-RANGE ({range_pos:.0f}%)"
+
+        # Acute Black-Swan Asset Dump/Gap: Single-candle adverse collapse >= 3.5%
+        if df is not None and len(df) >= 3 and "close" in df.columns:
+            try:
+                c_last = float(df["close"].iloc[-1])
+                c_prev = float(df["close"].iloc[-2])
+                c_ret = (c_last - c_prev) / (c_prev + 1e-10)
+                if direction.upper() in ["LONG", "BULLISH"] and c_ret <= -0.035:
+                    reasons.append(f"Acute Flash Dump on {tf_label} ({c_ret*100:+.2f}% adverse drop). Long signals strictly vetoed.")
+                    if primary_code == NoTradeZoneReason.CLEAR:
+                        primary_code = NoTradeZoneReason.MACRO_BTC_CASCADE
+                        primary_label = f"🛑 NO TRADE ZONE (ACUTE FLASH DUMP - {tf_label})"
+                        badge = "FLASH DUMP"
+                elif direction.upper() in ["SHORT", "BEARISH"] and c_ret >= 0.035:
+                    reasons.append(f"Acute Upward Spike on {tf_label} ({c_ret*100:+.2f}% adverse pump). Short signals strictly vetoed.")
+                    if primary_code == NoTradeZoneReason.CLEAR:
+                        primary_code = NoTradeZoneReason.MACRO_BTC_CASCADE
+                        primary_label = f"🛑 NO TRADE ZONE (ACUTE PUMP SPIKE - {tf_label})"
+                        badge = "PUMP SPIKE"
+            except Exception:
+                pass
 
         # ----------------------------------------------------------------------
         # PILLAR 4: LACK OF INSTITUTIONAL CONFIRMATION (Fakeouts & Mid-air setups)
