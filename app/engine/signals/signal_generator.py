@@ -413,6 +413,15 @@ class SignalGenerationSystem:
         # ---------------------------------------------------------------------
         # 4. Anchor Profit Targets and Stop Loss to authoritative execution price
         # ---------------------------------------------------------------------
+        # Derive recent structural swing high and low (up to 48 completed candles)
+        lookback_bars = min(48, max(5, len(df_active) - 1)) if (df_active is not None and not df_active.empty) else 0
+        if lookback_bars >= 5:
+            recent_high = float(df_active["high"].iloc[-lookback_bars:].max())
+            recent_low = float(df_active["low"].iloc[-lookback_bars:].min())
+        else:
+            recent_high = exec_entry_price + (active_atr * 2.0)
+            recent_low = exec_entry_price - (active_atr * 2.0)
+
         if is_ob_setup:
             cand_tp1 = format_dynamic_precision(order_block_setup["tp1_price"])
             cand_tp2 = format_dynamic_precision(order_block_setup["tp2_price"])
@@ -485,15 +494,24 @@ class SignalGenerationSystem:
                 tp2_mult = 3.50
                 tp3_mult = 5.50
 
-            # Phase 1 & 2: Dynamic Noise Floor & Symmetrical 1:2.0+ Primary Target Geometry
+            # Phase 1 & 2: Dynamic Noise Floor & Structural Stop Loss Placement
             min_sl_dist = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
-            cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - min_sl_dist))
-            
+            structural_low = recent_low
+            if candle_metrics and candle_metrics.get("swept_price"):
+                structural_low = min(structural_low, float(candle_metrics["swept_price"]))
+
+            # Anchor Stop Loss structurally beyond the swing low / swept low with a 0.20 * ATR buffer
+            structural_sl = structural_low - (0.20 * active_atr)
+            max_sl_dist = max(min_sl_dist * 2.2, active_atr * 2.2)
+            cand_sl_dist = float(np.clip(max(min_sl_dist, exec_entry_price - structural_sl), min_sl_dist, max_sl_dist))
+            cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - cand_sl_dist))
+            actual_sl_dist = exec_entry_price - cand_sl
+
             # Anchor primary TP1 to at least 2.0x SL distance (True 1:2.0+ R:R)
-            target_tp1_dist = max(min_sl_dist * 2.0, active_atr * max(tp1_mult * 0.75, 1.60))
-            target_tp2_dist = max(min_sl_dist * 3.0, active_atr * tp2_mult * 0.85, target_tp1_dist + active_atr * 0.8)
-            target_tp3_dist = max(min_sl_dist * 4.5, active_atr * tp3_mult * 0.90, target_tp2_dist + active_atr * 1.2)
-            
+            target_tp1_dist = max(actual_sl_dist * 2.0, active_atr * max(tp1_mult * 0.75, 1.60))
+            target_tp2_dist = max(actual_sl_dist * 3.0, active_atr * tp2_mult * 0.85, target_tp1_dist + active_atr * 0.8)
+            target_tp3_dist = max(actual_sl_dist * 4.5, active_atr * tp3_mult * 0.90, target_tp2_dist + active_atr * 1.2)
+
             cand_tp1 = format_dynamic_precision(exec_entry_price + target_tp1_dist)
             cand_tp2 = format_dynamic_precision(exec_entry_price + target_tp2_dist)
             cand_tp3 = format_dynamic_precision(exec_entry_price + target_tp3_dist)
@@ -529,15 +547,24 @@ class SignalGenerationSystem:
                 tp2_mult = 3.50
                 tp3_mult = 5.50
 
-            # Phase 1 & 2: Dynamic Noise Floor & Symmetrical 1:2.0+ Primary Target Geometry for SHORT
+            # Phase 1 & 2: Dynamic Noise Floor & Structural Stop Loss Placement for SHORT
             min_sl_dist = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
-            cand_sl = format_dynamic_precision(exec_entry_price + min_sl_dist)
-            
+            structural_high = recent_high
+            if candle_metrics and candle_metrics.get("swept_price"):
+                structural_high = max(structural_high, float(candle_metrics["swept_price"]))
+
+            # Anchor Stop Loss structurally beyond the swing high / swept high with a 0.20 * ATR buffer
+            structural_sl = structural_high + (0.20 * active_atr)
+            max_sl_dist = max(min_sl_dist * 2.2, active_atr * 2.2)
+            cand_sl_dist = float(np.clip(max(min_sl_dist, structural_sl - exec_entry_price), min_sl_dist, max_sl_dist))
+            cand_sl = format_dynamic_precision(exec_entry_price + cand_sl_dist)
+            actual_sl_dist = cand_sl - exec_entry_price
+
             # Anchor primary TP1 to at least 2.0x SL distance (True 1:2.0+ R:R)
-            target_tp1_dist = max(min_sl_dist * 2.0, active_atr * max(tp1_mult * 0.75, 1.60))
-            target_tp2_dist = max(min_sl_dist * 3.0, active_atr * tp2_mult * 0.85, target_tp1_dist + active_atr * 0.8)
-            target_tp3_dist = max(min_sl_dist * 4.5, active_atr * tp3_mult * 0.90, target_tp2_dist + active_atr * 1.2)
-            
+            target_tp1_dist = max(actual_sl_dist * 2.0, active_atr * max(tp1_mult * 0.75, 1.60))
+            target_tp2_dist = max(actual_sl_dist * 3.0, active_atr * tp2_mult * 0.85, target_tp1_dist + active_atr * 0.8)
+            target_tp3_dist = max(actual_sl_dist * 4.5, active_atr * tp3_mult * 0.90, target_tp2_dist + active_atr * 1.2)
+
             cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp1_dist))
             cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp2_dist))
             cand_tp3 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp3_dist))
@@ -585,16 +612,27 @@ class SignalGenerationSystem:
                     actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
                     cand_rr = f"1:{actual_rr:.1f}"
 
-        # Liquidation Heatmap Magnet Snapping (Align Take-Profits into High-Density 50x/100x Stop Cascades)
+        # Liquidation Heatmap Magnet Snapping & Stop Loss Protection
         try:
             from app.services.institutional_intelligence_service import institutional_intelligence_service
             liq_heatmap = institutional_intelligence_service.get_liquidation_heatmap(
                 symbol=symbol,
                 current_price=exec_entry_price,
-                atr=active_atr
+                atr=active_atr,
+                recent_high=recent_high,
+                recent_low=recent_low
             )
             sl_dist = abs(exec_entry_price - cand_sl)
             if direction == "LONG" and sl_dist > 0:
+                # 1. Protect Stop Loss: Avoid resting inside High-Density 100x/50x Long Liquidation Pools
+                long_pools = liq_heatmap.get("long_liquidation_pools", [])
+                for pool in long_pools:
+                    p_px = float(pool.get("price", 0.0))
+                    if pool.get("density") in ["CRITICAL_MAGNET", "VERY_HIGH"] and abs(cand_sl - p_px) <= (0.25 * active_atr):
+                        cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, min(cand_sl, p_px - (0.20 * active_atr))))
+                        sl_dist = abs(exec_entry_price - cand_sl)
+
+                # 2. Magnet Snapping for TP1 / TP2 into Short Liquidation Cascades
                 short_pools = liq_heatmap.get("short_liquidation_pools", [])
                 for pool in short_pools:
                     p_px = float(pool.get("price", 0.0))
@@ -607,6 +645,15 @@ class SignalGenerationSystem:
                             elif p_px > cand_tp1 and abs(p_px - cand_tp2) / cand_tp2 <= 0.040:
                                 cand_tp2 = format_dynamic_precision(p_px)
             elif direction == "SHORT" and sl_dist > 0:
+                # 1. Protect Stop Loss: Avoid resting inside High-Density 100x/50x Short Liquidation Pools
+                short_pools = liq_heatmap.get("short_liquidation_pools", [])
+                for pool in short_pools:
+                    p_px = float(pool.get("price", 0.0))
+                    if pool.get("density") in ["CRITICAL_MAGNET", "VERY_HIGH"] and abs(cand_sl - p_px) <= (0.25 * active_atr):
+                        cand_sl = format_dynamic_precision(max(cand_sl, p_px + (0.20 * active_atr)))
+                        sl_dist = abs(exec_entry_price - cand_sl)
+
+                # 2. Magnet Snapping for TP1 / TP2 into Long Liquidation Cascades
                 long_pools = liq_heatmap.get("long_liquidation_pools", [])
                 for pool in long_pools:
                     p_px = float(pool.get("price", 0.0))
@@ -617,6 +664,13 @@ class SignalGenerationSystem:
                                 break
                             elif p_px < cand_tp1 and abs(cand_tp2 - p_px) / cand_tp2 <= 0.040:
                                 cand_tp2 = format_dynamic_precision(p_px)
+
+            # Preserve True 1:2.0+ R:R invariant
+            if direction == "LONG" and (cand_tp1 - exec_entry_price) < (2.0 * sl_dist):
+                cand_tp1 = format_dynamic_precision(exec_entry_price + (2.0 * sl_dist))
+            elif direction == "SHORT" and (exec_entry_price - cand_tp1) < (2.0 * sl_dist):
+                cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - (2.0 * sl_dist)))
+
             actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, abs(exec_entry_price - cand_sl)), 2)
             cand_rr = f"1:{actual_rr:.1f}"
         except Exception:
@@ -1472,9 +1526,9 @@ class SignalGenerationSystem:
         )
         q_15m_direction = (
             ob_setup_15m.get("direction") if (has_ob_15m and ob_setup_15m.get("zeiierman_rank", 99) <= 3) else (
-                "LONG" if is_15m_bull else (
-                    "SHORT" if is_15m_bear else (
-                        smc_dir_15m if has_smc_15m else (
+                smc_dir_15m if (has_smc_15m and smc_dir_15m) else (
+                    "LONG" if is_15m_bull else (
+                        "SHORT" if is_15m_bear else (
                             matrix_eval.get("dominant_direction") if (is_coiling_breakout or is_range_rotation or is_breakout_expansion) else None
                         )
                     )
@@ -1560,9 +1614,9 @@ class SignalGenerationSystem:
         )
         q_1h_direction = (
             ob_setup_1h.get("direction") if (has_ob_1h and ob_setup_1h.get("zeiierman_rank", 99) <= 3) else (
-                "LONG" if is_1h_bull else (
-                    "SHORT" if is_1h_bear else (
-                        smc_dir_1h if has_smc_1h else (
+                smc_dir_1h if (has_smc_1h and smc_dir_1h) else (
+                    "LONG" if is_1h_bull else (
+                        "SHORT" if is_1h_bear else (
                             matrix_eval.get("dominant_direction") if (is_coiling_breakout or is_range_rotation or is_breakout_expansion) else None
                         )
                     )
@@ -1632,9 +1686,9 @@ class SignalGenerationSystem:
         )
         q_24h_direction = (
             ob_setup_24h.get("direction") if (has_ob_24h and ob_setup_24h.get("zeiierman_rank", 99) <= 3) else (
-                "LONG" if is_24h_bull else (
-                    "SHORT" if is_24h_bear else (
-                        smc_dir_24h if has_smc_24h else (
+                smc_dir_24h if (has_smc_24h and smc_dir_24h) else (
+                    "LONG" if is_24h_bull else (
+                        "SHORT" if is_24h_bear else (
                             matrix_eval.get("dominant_direction") if is_breakout_expansion else None
                         )
                     )

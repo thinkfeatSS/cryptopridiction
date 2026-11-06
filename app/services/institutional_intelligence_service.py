@@ -815,22 +815,23 @@ class InstitutionalIntelligenceService:
         if p <= 0:
             return {"symbol": symbol, "has_liquidation_data": False}
 
-        r_high = float(recent_high or (p + atr * 2.5))
-        r_low = float(recent_low or (p - atr * 2.5))
+        effective_atr = max(atr, p * 0.005) if (atr and atr > 0) else (p * 0.015)
+        r_high = float(recent_high or (p + effective_atr * 2.0))
+        r_low = float(recent_low or (p - effective_atr * 2.0))
 
-        # Model Short Liquidations (Buy-stops from shorts entered near recent low / range midpoint)
-        # Shorts get liquidated at: Entry * (1 + 1/leverage)
-        short_liq_100x = round(p * 1.0085, 4)
-        short_liq_50x = round(p * 1.0185, 4)
-        short_liq_25x = round(p * 1.0375, 4)
-        short_liq_10x = round(p * 1.0920, 4)
+        # Dynamic Short Liquidation Pools (Buy-stops resting above current price & structural swing high)
+        # Scaled by actual ATR market volatility and recent range extremes
+        short_liq_100x = round(max(p + (effective_atr * 0.85), r_high + (effective_atr * 0.15)), 4)
+        short_liq_50x = round(max(p + (effective_atr * 1.65), r_high + (effective_atr * 0.50)), 4)
+        short_liq_25x = round(max(p + (effective_atr * 3.20), r_high + (effective_atr * 1.20)), 4)
+        short_liq_10x = round(max(p + (effective_atr * 7.50), r_high + (effective_atr * 3.00)), 4)
 
-        # Model Long Liquidations (Sell-stops from longs entered near recent high)
-        # Longs get liquidated at: Entry * (1 - 1/leverage)
-        long_liq_100x = round(p * 0.9915, 4)
-        long_liq_50x = round(p * 0.9815, 4)
-        long_liq_25x = round(p * 0.9625, 4)
-        long_liq_10x = round(p * 0.9080, 4)
+        # Dynamic Long Liquidation Pools (Sell-stops resting below current price & structural swing low)
+        # Scaled by actual ATR market volatility and recent range extremes
+        long_liq_100x = round(min(p - (effective_atr * 0.85), r_low - (effective_atr * 0.15)), 4)
+        long_liq_50x = round(min(p - (effective_atr * 1.65), r_low - (effective_atr * 0.50)), 4)
+        long_liq_25x = round(min(p - (effective_atr * 3.20), r_low - (effective_atr * 1.20)), 4)
+        long_liq_10x = round(min(p - (effective_atr * 7.50), r_low - (effective_atr * 3.00)), 4)
 
         # Nearest High-Density Target Pools (Primary magnets for Take Profit alignment)
         primary_upside_magnet = short_liq_50x
@@ -839,6 +840,7 @@ class InstitutionalIntelligenceService:
         res = {
             "symbol": symbol,
             "current_price": p,
+            "has_liquidation_data": True,
             "short_liquidation_pools": [
                 {"leverage": "100x", "price": short_liq_100x, "distance_pct": round(((short_liq_100x - p) / p) * 100.0, 2), "density": "VERY_HIGH"},
                 {"leverage": "50x", "price": short_liq_50x, "distance_pct": round(((short_liq_50x - p) / p) * 100.0, 2), "density": "CRITICAL_MAGNET"},

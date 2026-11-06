@@ -229,6 +229,17 @@ class EntryConfirmationEngine:
         is_news_volatility_shock = False
         news_shock_reason = ""
         expansion_ratio = 1.0
+        active_atr = rng
+        if len(df) >= 5 and "high" in df.columns and "low" in df.columns:
+            try:
+                h_tr = (df["high"].iloc[-15:].astype(float) - df["low"].iloc[-15:].astype(float)).values
+                if len(h_tr) > 0:
+                    active_atr = float(np.mean(h_tr))
+            except Exception:
+                active_atr = rng
+        if active_atr <= 0:
+            active_atr = rng
+
         if len(df) >= 15:
             try:
                 t_bar_idx = -2 if (len(df) >= 2) else -1
@@ -263,20 +274,24 @@ class EntryConfirmationEngine:
                 is_engulfing = True
 
         # Multi-candle Institutional Patterns: Liquidity Sweep & Reclaim (Turtle Soup / Judas Swing)
+        # Scan up to 48 historical completed candles to capture major structural swing points and session extremes
         is_sweep_reclaim = False
         swept_price = None
         if len(df) >= 5:
-            start_idx = max(0, len(df) - 12)
+            lookback_n = min(48, max(4, len(df) - 2))
+            start_idx = max(0, len(df) - 2 - lookback_n)
             end_idx = max(start_idx + 1, len(df) - 2)
             prior_window = df.iloc[start_idx:end_idx]
             if is_long:
                 prior_swing_low = float(prior_window["low"].min())
-                if c_low < prior_swing_low and c_close >= prior_swing_low and lower_wick_ratio >= 0.25:
+                reclaim_floor = prior_swing_low - (0.10 * active_atr)
+                if c_low < prior_swing_low and (c_close >= prior_swing_low or (c_close >= reclaim_floor and lower_wick_ratio >= 0.30)):
                     is_sweep_reclaim = True
                     swept_price = prior_swing_low
             else:
                 prior_swing_high = float(prior_window["high"].max())
-                if c_high > prior_swing_high and c_close <= prior_swing_high and upper_wick_ratio >= 0.25:
+                rejection_ceiling = prior_swing_high + (0.10 * active_atr)
+                if c_high > prior_swing_high and (c_close <= prior_swing_high or (c_close <= rejection_ceiling and upper_wick_ratio >= 0.30)):
                     is_sweep_reclaim = True
                     swept_price = prior_swing_high
 
@@ -417,10 +432,14 @@ class EntryConfirmationEngine:
 
             # Rejection of Long: Bull Trap Liquidity Sweep / Fakeout Rejection at High
             if len(df) >= 5:
-                prior_high_window = df.iloc[max(0, len(df) - 12):max(1, len(df) - 2)]
+                lookback_n = min(48, max(4, len(df) - 2))
+                start_idx = max(0, len(df) - 2 - lookback_n)
+                end_idx = max(start_idx + 1, len(df) - 2)
+                prior_high_window = df.iloc[start_idx:end_idx]
                 prior_swing_high = float(prior_high_window["high"].max())
-                if c_high > prior_swing_high and c_close <= prior_swing_high and upper_wick_ratio >= 0.25:
-                    return False, f"Bull Trap Liquidity Sweep Fakeout: Price swept prior high ({prior_swing_high:.4f}) but closed below with {upper_wick_ratio*100:.0f}% rejection wick", metrics
+                rejection_ceiling = prior_swing_high + (0.10 * active_atr)
+                if c_high > prior_swing_high and (c_close <= prior_swing_high or (c_close <= rejection_ceiling and upper_wick_ratio >= 0.25)):
+                    return False, f"Bull Trap Liquidity Sweep Fakeout: Price swept prior high ({prior_swing_high:.4f}) but rejected with {upper_wick_ratio*100:.0f}% upper wick", metrics
 
             # Rejection of Long: Extreme upper wick rejection fakeout on green candle
             if is_green and upper_wick_ratio >= 0.40 and close_pos_in_range < 0.50:
@@ -492,10 +511,14 @@ class EntryConfirmationEngine:
 
             # Rejection of Short: Bear Trap Liquidity Sweep / Fakeout Rebound at Low
             if len(df) >= 5:
-                prior_low_window = df.iloc[max(0, len(df) - 12):max(1, len(df) - 2)]
+                lookback_n = min(48, max(4, len(df) - 2))
+                start_idx = max(0, len(df) - 2 - lookback_n)
+                end_idx = max(start_idx + 1, len(df) - 2)
+                prior_low_window = df.iloc[start_idx:end_idx]
                 prior_swing_low = float(prior_low_window["low"].min())
-                if c_low < prior_swing_low and c_close >= prior_swing_low and lower_wick_ratio >= 0.25:
-                    return False, f"Bear Trap Liquidity Sweep Absorption: Price swept prior low ({prior_swing_low:.4f}) but closed above with {lower_wick_ratio*100:.0f}% absorption wick", metrics
+                reclaim_floor = prior_swing_low - (0.10 * active_atr)
+                if c_low < prior_swing_low and (c_close >= prior_swing_low or (c_close >= reclaim_floor and lower_wick_ratio >= 0.25)):
+                    return False, f"Bear Trap Liquidity Sweep Absorption: Price swept prior low ({prior_swing_low:.4f}) but absorbed with {lower_wick_ratio*100:.0f}% absorption wick", metrics
 
             # Rejection of Short: Extreme lower wick absorption fakeout on red candle
             if is_red and lower_wick_ratio >= 0.40 and close_pos_in_range > 0.50:
@@ -594,7 +617,7 @@ class EntryConfirmationEngine:
             optimal_limit = float(candle_metrics["fvg_gap_ce"])
         elif candle_metrics and candle_metrics.get("rolling_vwap") and "VWAP" in strat_str:
             optimal_limit = float(candle_metrics["rolling_vwap"])
-        elif candle_metrics and candle_metrics.get("swept_price") and "LIQUIDITY" in strat_str:
+        elif candle_metrics and candle_metrics.get("swept_price") and (candle_metrics.get("is_sweep_reclaim") or "LIQUIDITY" in strat_str):
             optimal_limit = float(candle_metrics["swept_price"])
         elif candle_metrics and (candle_metrics.get("is_range_resistance_rejection") or candle_metrics.get("is_range_support_rejection")):
             optimal_limit = current_price
