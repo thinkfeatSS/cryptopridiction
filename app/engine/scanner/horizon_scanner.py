@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.engine.scanner.filters import UniverseFilter
 from app.engine.scanner.data_loader import MultiHorizonDataLoader
 from app.engine.scanner.btc_shield import BtcPredictiveMarketShield
-from app.engine.config import TOP_N_UNIVERSE, TIMEFRAMES_9
+from app.engine.config import TOP_N_UNIVERSE, TIMEFRAMES_9, is_meme_coin
 
 logger = logging.getLogger("horizon_scanner")
 
@@ -78,6 +78,11 @@ class MultiHorizonScanner:
         def _scan_single_coin(coin_meta):
             sym = coin_meta["symbol"]
             try:
+                # Institutional Policy: Zero Meme Coins in prediction system
+                if is_meme_coin(sym):
+                    logger.info(f"[SCANNER [MEME EXCLUDED]] Symbol {sym} strictly excluded from institutional universe.")
+                    return sym, None
+
                 live_p = all_tickers.get(sym, coin_meta.get("price", 0.0))
                 vol_24h = coin_meta.get("quote_volume_usd", 0.0)
                 # Delisted / Zero / Sub-Threshold Volume Altcoin Exclusion Guard (< $250k)

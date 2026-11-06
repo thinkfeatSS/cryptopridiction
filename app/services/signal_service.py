@@ -15,6 +15,7 @@ from app.config import settings
 from app.models import SignalAudit, PaperPosition, ClosedTrade, MarketForecast
 from app.services.db_sync import sync_files_to_db_live, get_sync_state, get_cached_forecast, set_cached_forecast
 from app.engine.scanner.filters import UniverseFilter
+from app.engine.config import is_meme_coin
 from app.quant_v16.validation import safe_float, safe_ratio
 
 _LIVE_PRICES_CACHE: Dict[str, float] = {}
@@ -247,7 +248,7 @@ def _get_or_compute_regime() -> Dict[str, Any]:
         raw_s = item.get('symbol', '')
         if raw_s.endswith('USDT'):
             base = raw_s[:-4]
-            if base in _EXCLUDED_STABLES:
+            if base in _EXCLUDED_STABLES or is_meme_coin(base) or is_meme_coin(raw_s):
                 continue
             vol = float(item.get('quoteVolume', 0.0))
             if vol >= 1000000.0:
@@ -311,7 +312,7 @@ def _get_or_compute_gainers(regime: dict = None) -> List[Dict[str, Any]]:
         raw_s = item.get('symbol', '')
         if raw_s.endswith('USDT'):
             base = raw_s[:-4]
-            if base in _EXCLUDED_STABLES:
+            if base in _EXCLUDED_STABLES or is_meme_coin(base) or is_meme_coin(raw_s):
                 continue
             vol = float(item.get('quoteVolume', 0.0))
             chg = float(item.get('priceChangePercent', 0.0))
@@ -379,7 +380,7 @@ def _get_or_compute_losers(regime: dict = None) -> List[Dict[str, Any]]:
         raw_s = item.get('symbol', '')
         if raw_s.endswith('USDT'):
             base = raw_s[:-4]
-            if base in _EXCLUDED_STABLES:
+            if base in _EXCLUDED_STABLES or is_meme_coin(base) or is_meme_coin(raw_s):
                 continue
             vol = float(item.get('quoteVolume', 0.0))
             chg = float(item.get('priceChangePercent', 0.0))
@@ -450,7 +451,7 @@ def _get_or_compute_high_markup_signals(regime: dict = None) -> List[Dict[str, A
         raw_s = item.get('symbol', '')
         if raw_s.endswith('USDT'):
             base = raw_s[:-4]
-            if base in _EXCLUDED_STABLES:
+            if base in _EXCLUDED_STABLES or is_meme_coin(base) or is_meme_coin(raw_s):
                 continue
             vol = float(item.get('quoteVolume', 0.0))
             chg = float(item.get('priceChangePercent', 0.0))
@@ -1498,6 +1499,8 @@ class SignalService:
         results = []
         for s in signals:
             d = s.to_dict()
+            if is_meme_coin(d.get("symbol", "")):
+                continue
             s_hz = str(d.get("horizon") or "15M").upper()
             norm_hz = "15M" if "15" in s_hz else ("24H" if ("24" in s_hz or "1D" in s_hz) else "1H")
             op = open_pos_map.get(d.get("signal_id")) or open_pos_map.get((str(d.get("symbol")).upper(), norm_hz)) or open_pos_map.get((str(d.get("symbol")).replace("/", "").upper(), norm_hz))
@@ -1521,6 +1524,8 @@ class SignalService:
 
     def get_signals_by_symbol(self, db: Session, symbol: str, limit: int = 100) -> List[Dict[str, Any]]:
         """Retrieve all chronological 15-minute signals generated for a specific cryptocurrency."""
+        if is_meme_coin(symbol):
+            return []
         sym_clean = symbol.strip().replace('-', '/').upper()
         signals = db.query(SignalAudit).filter(
             or_(SignalAudit.symbol == sym_clean, SignalAudit.symbol.ilike(f"%{sym_clean}%"))
@@ -1906,7 +1911,7 @@ class SignalService:
             res["server_prediction_ts"] = now_ts
         
         # Overlay live prices on scanner leaderboard
-        leaderboard = res.get("scanner_leaderboard", [])
+        leaderboard = [item for item in res.get("scanner_leaderboard", []) if not is_meme_coin(item.get("symbol", ""))]
         if leaderboard:
             for item in leaderboard:
                 sym = item.get("symbol", "")
@@ -1915,9 +1920,10 @@ class SignalService:
                 if p and p > 0:
                     item["current_price"] = p
                     item["live_price"] = p
+        res["scanner_leaderboard"] = leaderboard
 
         # Overlay on top round signals
-        top_signals = res.get("top_round_signals", [])
+        top_signals = [sig for sig in res.get("top_round_signals", []) if not is_meme_coin(sig.get("symbol", ""))]
         if top_signals:
             for sig in top_signals:
                 sym = sig.get("symbol", "")
@@ -1931,9 +1937,10 @@ class SignalService:
                     direction = str(sig.get("direction", "LONG")).upper()
                     if entry_p > 0:
                         sig["live_pnl_pct"] = round(((p - entry_p) / entry_p) * 100.0, 2) if direction in ["LONG", "BULLISH"] else round(((entry_p - p) / entry_p) * 100.0, 2)
+        res["top_round_signals"] = top_signals
 
         # Overlay on dominant_signals_per_coin
-        dominant_signals = res.get("dominant_signals_per_coin", [])
+        dominant_signals = [sig for sig in res.get("dominant_signals_per_coin", []) if not is_meme_coin(sig.get("symbol", ""))]
         if dominant_signals:
             for sig in dominant_signals:
                 sym = sig.get("symbol", "")
@@ -1947,6 +1954,7 @@ class SignalService:
                     direction = str(sig.get("direction", "LONG")).upper()
                     if entry_p > 0:
                         sig["live_pnl_pct"] = round(((p - entry_p) / entry_p) * 100.0, 2) if direction in ["LONG", "BULLISH"] else round(((entry_p - p) / entry_p) * 100.0, 2)
+        res["dominant_signals_per_coin"] = dominant_signals
 
         # Overlay fundamental intelligence overview
         try:

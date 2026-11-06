@@ -10,7 +10,7 @@ from app.engine.signals.ensemble_classifier import FiveModelDirectionClassifier
 from app.engine.signals.ensemble_regressor import FiveModelPriceRegressor
 from app.engine.signals.per_coin_models import PerCoinModelRegistry
 from app.engine.signals.meta_labeler import CoinSpecificMetaLabeler
-from app.engine.config import TIMEFRAMES_9, TIMEFRAME_META, ALLOWED_EMISSION_HORIZONS
+from app.engine.config import TIMEFRAMES_9, TIMEFRAME_META, ALLOWED_EMISSION_HORIZONS, is_meme_coin
 from app.quant_v16.no_trade_zone import no_trade_zone_engine, NoTradeZoneReason
 from app.quant_v16.fractal_consolidation import (
     FractalTimeframeState,
@@ -231,6 +231,9 @@ class SignalGenerationSystem:
         Builds a dedicated institutional trade signal for a single qualified horizon:
         15M (Scalp), 1H (Intraday Swing), or 24H (Daily Swing).
         """
+        if is_meme_coin(symbol):
+            return None
+
         is_ob_setup = bool(order_block_setup and order_block_setup.get("setup_detected"))
         if is_ob_setup:
             ob_dir = order_block_setup.get("direction", direction)
@@ -1772,6 +1775,10 @@ class SignalGenerationSystem:
         Evaluates an individual cryptocurrency pair across all 9 charts.
         Returns complete multi-horizon predictions and dominant trade signal.
         """
+        # Institutional Policy: Zero Meme Coins in prediction system
+        if is_meme_coin(symbol):
+            return None
+
         if not dfs_9 or "15m" not in dfs_9 or dfs_9["15m"] is None:
             return None
 

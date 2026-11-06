@@ -50,8 +50,62 @@ MEME_AND_SHITCOIN_BASES = {
     "CATI", "HMSTR", "NOT", "1000SATS", "ORDI", "PEPE2", "AIDOGE", "LUNA",
     "FTT", "PUPPIES", "MILADY", "COQ", "TOSHI", "WEN", "SILLY", "PUMP",
     "PONKE", "GIGA", "SUNDOG", "SPX", "BILLY", "MOG", "MICHI", "TKO",
-    "TRUMP", "MELANIA", "KAMALA", "BIDEN", "MAGA", "PEOPLE"
+    "TRUMP", "MELANIA", "KAMALA", "BIDEN", "MAGA", "PEOPLE", "FARTCOIN",
+    "CHILLGUY", "LUCE", "DEGEN", "WOJAK", "BAN", "CORGIAI", "SAMO", "ELON",
+    "1000PEPE", "1000BONK", "1000FLOKI", "1000SHIB", "1000CHEEMS", "1000MOG",
+    "1MBABYDOGE", "NEIROETH", "DOGE2", "SHIB2", "KISHU", "AKITA", "MONKY",
+    "AI16Z", "GRIFFAIN", "VIRTUAL", "SWARMS", "ZEREBRO", "TEE", "BIO",
+    "RIF", "URO", "VINE", "MAJOR", "FOXY", "KARRAT", "LADYS", "1000RATS",
+    "1000CAT", "SATS", "RATS"
 }
+
+def is_meme_coin(symbol: str) -> bool:
+    """
+    Authoritative Institutional Meme Coin & Speculative Shitcoin Gate:
+    Strictly identifies and intercepts meme coins across all formatting variants:
+    - Standard pairs (e.g. 'DOGE/USDT', 'PEPEUSDT')
+    - Multiplier-prefixed futures contracts (e.g. '1000PEPE', '1000BONK', '1000SHIB', '1MBABYDOGE', '1000SATS')
+    - Suffix variants (e.g. 'DOGE2', 'PEPE2', 'NEIROETH')
+    - Core meme stems ('INU', 'DOGE', 'SHIB', 'PEPE', 'BONK', 'FLOKI', 'MEME', 'ELON', 'PENGU', etc.)
+    """
+    if not symbol or not isinstance(symbol, str):
+        return False
+
+    raw = str(symbol).strip().upper().replace(":USDT", "")
+    if "/" in raw:
+        base = raw.split("/")[0]
+    else:
+        base = raw
+        for quote in ["USDT", "USDC", "BUSD", "USD", "EUR", "BTC", "ETH"]:
+            if base.endswith(quote) and len(base) > len(quote):
+                base = base[:-len(quote)]
+                break
+
+    stripped = base
+    if stripped.startswith("1000000"):
+        stripped = stripped[7:]
+    elif stripped.startswith("1000"):
+        stripped = stripped[4:]
+    elif stripped.startswith("1M") and len(stripped) > 2 and stripped != "1M":
+        stripped = stripped[2:]
+    elif stripped.startswith("K") and len(stripped) > 1 and stripped not in {"KAVA", "KAS", "KDA", "KLAY", "KNC", "KP3R", "KEY"}:
+        stripped = stripped[1:]
+
+    # 1. Exact match in comprehensive meme registry
+    if base in MEME_AND_SHITCOIN_BASES or stripped in MEME_AND_SHITCOIN_BASES:
+        return True
+
+    # 2. Check for core meme stems and tokens
+    meme_stems = [
+        "DOGE", "SHIB", "PEPE", "BONK", "FLOKI", "BABYDOGE", "INU", "ELON",
+        "MOODENG", "POPCAT", "NEIRO", "PENGU", "CHILLGUY", "FARTCOIN", "GOAT",
+        "PNUT", "SLERF", "TURBO", "BRETT", "WOJAK", "DEGEN", "MOG", "PONKE"
+    ]
+    for stem in meme_stems:
+        if stem in base or stem in stripped:
+            return True
+
+    return False
 
 # Known Stablecoins & Fiat Pegs
 EXCLUDED_STABLECOINS = {

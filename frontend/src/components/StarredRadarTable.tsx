@@ -43,7 +43,7 @@ export default function StarredRadarTable() {
   }, [leaderboard, isStarred, searchQuery]);
 
   // Quick preset coins to suggest if watchlist is empty
-  const suggestedCoins = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"];
+  const suggestedCoins = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "SUI/USDT"];
 
   return (
     <div className="glass-panel rounded-2xl p-5 border border-amber-500/30 shadow-xl shadow-amber-950/10">

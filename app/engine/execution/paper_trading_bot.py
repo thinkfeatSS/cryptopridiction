@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
-from app.engine.config import EXPORT_DIR
+from app.engine.config import EXPORT_DIR, is_meme_coin
 from app.engine.scanner.filters import UniverseFilter
 from app.quant_v16.entry_confirmation import format_dynamic_precision
 
@@ -287,6 +287,12 @@ class PaperTradingBot:
             if not signal:
                 return False
 
+            # 0a. Reject Meme Coins and Speculative Shitcoins
+            sym = str(signal.get("symbol", "")).upper()
+            if is_meme_coin(sym):
+                print(f"[PAPER BOT 🛑 MEME REJECT] Rejected trade entry for meme coin {sym}.")
+                return False
+
             # 0b. Reject if Asset is in No Trade Zone
             if signal.get("is_ntz_active", False):
                 sym = signal.get("symbol", "UNKNOWN")
@@ -345,7 +351,7 @@ class PaperTradingBot:
                 return False
 
             symbol = signal.get("symbol")
-            if not symbol:
+            if not symbol or is_meme_coin(symbol):
                 return False
 
             # 2b. Strictly Reject Delisted, Inactive, Synthetic, or Dead Pairs
@@ -631,7 +637,7 @@ class PaperTradingBot:
                 return False
 
             symbol = signal.get("symbol")
-            if not symbol:
+            if not symbol or is_meme_coin(symbol):
                 return False
 
             entry_p = float(signal.get("entry_price", signal.get("current_price", 0.0)))

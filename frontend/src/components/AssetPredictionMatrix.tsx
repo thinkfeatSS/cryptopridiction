@@ -132,10 +132,17 @@ export function getHorizonStance(h?: any): "bullish" | "consolidate" | "bearish"
 }
 
 // Valid crypto symbol filter (ignores tokenized stocks, delisted tokens, and meme coins)
+const MEME_STEMS = [
+  "SHIB", "DOGE", "PEPE", "BONK", "WIF", "FLOKI", "TRUMP", "OLD",
+  "INU", "ELON", "MOODENG", "POPCAT", "PENGU", "GOAT", "PNUT",
+  "SLERF", "FARTCOIN", "CHILLGUY", "MOG", "TURBO", "NEIRO",
+  "BABYDOGE", "BRETT", "BOME", "MEME", "CAT", "MEW", "AI16Z"
+];
+
 function isValidCryptoSymbol(symbol: string): boolean {
   if (!symbol) return false;
   const upper = symbol.toUpperCase();
-  if (upper.includes("SHIB") || upper.includes("DOGE") || upper.includes("PEPE") || upper.includes("BONK") || upper.includes("WIF") || upper.includes("FLOKI") || upper.includes("TRUMP") || upper.includes("OLD")) return false;
+  if (MEME_STEMS.some((stem) => upper.includes(stem))) return false;
   const base = upper.replace("/USDT", "").replace("USDT", "");
   if (["USDSOLD", "ERD", "VEN", "BCC", "BCHABC", "BCHSV", "BTT", "NANO", "USDSB"].includes(base)) return false;
   if (base.endsWith("B") && base !== "BNB" && base !== "ARB") return false;

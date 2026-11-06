@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
-from app.engine.config import EXPORT_DIR
+from app.engine.config import EXPORT_DIR, is_meme_coin
 from app.engine.scanner.horizon_scanner import MultiHorizonScanner
 from app.engine.scanner.filters import UniverseFilter
 from app.engine.signals.signal_generator import SignalGenerationSystem
@@ -109,6 +109,10 @@ class UnifiedCryptoEngine:
         def _evaluate_single_asset(item):
             sym, coin_meta = item
             try:
+                # Phase 2b: Strict Meme Coin Exclusion Policy
+                if is_meme_coin(sym):
+                    return None
+
                 # Phase 3: Dynamic Toxic Asset Quarantine check
                 is_quar, quar_reason = self.is_symbol_quarantined(sym)
                 if is_quar:

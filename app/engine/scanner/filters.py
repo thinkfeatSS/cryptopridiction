@@ -8,6 +8,7 @@ from app.engine.config import (
     EXCLUDED_STABLECOINS,
     EXCLUDED_SYNTHETIC_STOCKS,
     DELISTED_AND_INACTIVE_COINS,
+    is_meme_coin,
 )
 
 class UniverseFilter:
@@ -48,7 +49,7 @@ class UniverseFilter:
             return False
 
         # 2. Strictly Reject Known Meme Coins & Non-Utility Shitcoins
-        if base in MEME_AND_SHITCOIN_BASES:
+        if is_meme_coin(clean_sym) or is_meme_coin(base) or base in MEME_AND_SHITCOIN_BASES:
             return False
 
         # 3. Reject Synthetic Test Tokens & Non-Alphanumeric Tokens

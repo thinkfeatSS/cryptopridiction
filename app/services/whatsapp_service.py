@@ -11,6 +11,7 @@ from typing import Dict, Any, Optional, List, Union, Set
 from datetime import datetime, timezone
 
 from app.config import settings
+from app.engine.config import is_meme_coin
 from app.quant_v16.validation import safe_float, safe_ratio
 
 logger = logging.getLogger("whatsapp_service")
@@ -288,6 +289,10 @@ class WhatsAppService:
         - Group: Sends signals admitted by SignalAuditTracker according to WHATSAPP_MIN_GRADE and WHATSAPP_MIN_WIN_PROB.
         - Channel: Grade A+, Grade A, or Meta-Win Prob >= 60%
         """
+        sym = str(sig.get("symbol") or "").upper()
+        if is_meme_coin(sym):
+            return False
+
         raw_grade = str(sig.get("quality_grade") or sig.get("grade") or "").upper()
         try:
             grade_tier = int(sig.get("grade_tier", 2))

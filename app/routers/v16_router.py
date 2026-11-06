@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from app.config import settings
 from app.database import get_db
 from app.engine.scanner.filters import UniverseFilter
+from app.engine.config import is_meme_coin
 from app.quant_v16.validation import safe_float, safe_ratio
 
 v16_router = APIRouter(prefix="/api/v16", tags=["Quant Edge V16 Intelligence"])
@@ -604,7 +605,9 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
         except Exception:
             pass
 
-    return immut_data, dyn_data
+    clean_immut = {k: v for k, v in immut_data.items() if not is_meme_coin(v.get("symbol", ""))}
+    clean_dyn = {k: v for k, v in dyn_data.items() if k in clean_immut or (v.get("symbol") and not is_meme_coin(v.get("symbol", "")))}
+    return clean_immut, clean_dyn
 
 def _get_v16_events(limit: int = 100) -> List[Dict[str, Any]]:
     """Returns the immutable event stream, generating and updating it from signal lifecycle."""
@@ -619,6 +622,9 @@ def _get_v16_events(limit: int = 100) -> List[Dict[str, Any]]:
                     line_clean = line.strip()
                     if line_clean:
                         ev_obj = json.loads(line_clean)
+                        ev_sym = (ev_obj.get("metadata") or {}).get("symbol") or ev_obj.get("symbol", "")
+                        if is_meme_coin(ev_sym):
+                            continue
                         events.append(ev_obj)
                         existing_ev_keys.add((ev_obj.get("signal_id"), ev_obj.get("event_type")))
         except Exception:
