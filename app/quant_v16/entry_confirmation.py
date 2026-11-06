@@ -251,12 +251,23 @@ class EntryConfirmationEngine:
                         expansion_ratio = rng / atr14_val
                         is_dual_wick_churn = (upper_wick_ratio >= 0.35 and lower_wick_ratio >= 0.35 and expansion_ratio >= 1.8)
                         is_hyper_expansion = (expansion_ratio >= 3.2)
-                        if is_hyper_expansion or is_dual_wick_churn:
+
+                        # Intrabar Acute News Volatility Shock on live forming candle
+                        live_shock = False
+                        if len(df) >= 2:
+                            live_c = df.iloc[-1]
+                            l_rng = float(live_c.get("high", 0.0)) - float(live_c.get("low", 0.0))
+                            if (l_rng / atr14_val) >= 3.2:
+                                live_shock = True
+                                news_shock_reason = f"Active live bar hyper volatility expansion ({l_rng/atr14_val:.1f}x ATR-14)"
+
+                        if is_hyper_expansion or is_dual_wick_churn or live_shock:
                             is_news_volatility_shock = True
-                            if is_hyper_expansion:
-                                news_shock_reason = f"Hyper volatility expansion ({expansion_ratio:.1f}x ATR-14 >= 3.2x limit)"
-                            else:
-                                news_shock_reason = f"Extreme dual-wick whipsaw churn ({expansion_ratio:.1f}x ATR-14 with upper {upper_wick_ratio*100:.0f}%, lower {lower_wick_ratio*100:.0f}%)"
+                            if not live_shock:
+                                if is_hyper_expansion:
+                                    news_shock_reason = f"Hyper volatility expansion ({expansion_ratio:.1f}x ATR-14 >= 3.2x limit)"
+                                else:
+                                    news_shock_reason = f"Extreme dual-wick whipsaw churn ({expansion_ratio:.1f}x ATR-14 with upper {upper_wick_ratio*100:.0f}%, lower {lower_wick_ratio*100:.0f}%)"
             except Exception:
                 pass
 

@@ -80,9 +80,9 @@ class MultiHorizonScanner:
             try:
                 live_p = all_tickers.get(sym, coin_meta.get("price", 0.0))
                 vol_24h = coin_meta.get("quote_volume_usd", 0.0)
-                # Delisted / Zero / Sub-Threshold Volume Altcoin Exclusion Guard (< $1M)
-                if live_p <= 0.0001 or vol_24h <= 0.0 or (vol_24h > 0 and vol_24h < 1_000_000.0):
-                    logger.warning(f"[SCANNER [SUB-THRESHOLD ILLIQUIDITY]] Altcoin {sym} has sub-threshold volume or missing price (price={live_p}, vol={vol_24h}). Excluded from active prediction universe.")
+                # Delisted / Zero / Sub-Threshold Volume Altcoin Exclusion Guard (< $250k)
+                if live_p <= 0.0001 or (vol_24h > 0 and vol_24h < 250_000.0):
+                    logger.warning(f"[SCANNER [SUB-THRESHOLD ILLIQUIDITY]] Altcoin {sym} has sub-threshold volume or invalid price (price={live_p}, vol={vol_24h}). Excluded from active prediction universe.")
                     return sym, None
 
                 dfs_9 = self.loader.fetch_all_9_timeframes(sym)

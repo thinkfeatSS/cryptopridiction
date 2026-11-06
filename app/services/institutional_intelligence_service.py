@@ -178,13 +178,21 @@ class InstitutionalIntelligenceService:
 
         upcoming.sort(key=lambda x: x["minutes_until"])
 
-        # Blackout Gate: 30 minutes before release through 15 minutes after release
+        # Blackout Gate: 45m pre to 30m post for CRITICAL FOMC/Powell releases; 30m pre to 15m post for HIGH releases
         is_volatility_pause_active = False
         pause_reason = ""
-        if nearest_event and (-30.0 <= nearest_diff_min <= 15.0):
-            is_volatility_pause_active = True
-            time_desc = f"{abs(round(nearest_diff_min, 1))}m {'until' if nearest_diff_min > 0 else 'since'} release"
-            pause_reason = f"US Macro Volatility Blackout: {nearest_event['name']} ({time_desc})"
+        if nearest_event:
+            is_critical = (
+                nearest_event.get("impact") == "CRITICAL"
+                or "FOMC" in str(nearest_event.get("category", "")).upper()
+                or "POWELL" in str(nearest_event.get("category", "")).upper()
+            )
+            pre_release_window = 45.0 if is_critical else 30.0
+            post_release_window = -30.0 if is_critical else -15.0
+            if post_release_window <= nearest_diff_min <= pre_release_window:
+                is_volatility_pause_active = True
+                time_desc = f"{abs(round(nearest_diff_min, 1))}m {'until' if nearest_diff_min > 0 else 'since'} release"
+                pause_reason = f"US Macro Volatility Blackout: {nearest_event['name']} ({time_desc})"
 
         # Federal Reserve Media Blackout Window (Mandatory silence period: second Saturday before FOMC to following Thursday)
         fed_blackout_active = False

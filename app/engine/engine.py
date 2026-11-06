@@ -126,6 +126,14 @@ class UnifiedCryptoEngine:
 
                 p = float(coin_meta.get("price", 0.0) or 0.0)
                 v = float(coin_meta.get("volume_24h", 0.0) or 0.0)
+
+                # Dynamic 24h Turnover Synthesis: If ticker volume is missing or zero, compute rolling 24h turnover from candles
+                if v <= 0.0 and "1h" in coin_meta.get("dfs_9", {}):
+                    df_1h = coin_meta["dfs_9"]["1h"]
+                    if df_1h is not None and len(df_1h) >= 5 and "volume" in df_1h.columns and "close" in df_1h.columns:
+                        v = float((df_1h["close"].iloc[-24:].astype(float) * df_1h["volume"].iloc[-24:].astype(float)).sum())
+                        coin_meta["volume_24h"] = v
+
                 if p <= 0.0001 or v <= 0.0:
                     return None
                 sig = self.signal_system.evaluate_asset_multi_horizon(

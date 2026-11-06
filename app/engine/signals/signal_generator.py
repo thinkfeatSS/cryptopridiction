@@ -422,6 +422,19 @@ class SignalGenerationSystem:
             recent_high = exec_entry_price + (active_atr * 2.0)
             recent_low = exec_entry_price - (active_atr * 2.0)
 
+        # Dynamic 24h Turnover Synthesis: If ticker volume is missing or zero, compute rolling 24h turnover from candles
+        if (volume_24h_usd is None or volume_24h_usd <= 0.0) and dfs_9 and "1h" in dfs_9:
+            df_1h = dfs_9["1h"]
+            if df_1h is not None and len(df_1h) >= 5 and "volume" in df_1h.columns and "close" in df_1h.columns:
+                volume_24h_usd = float((df_1h["close"].iloc[-24:].astype(float) * df_1h["volume"].iloc[-24:].astype(float)).sum())
+
+        # Adaptive Low-Liquidity Tail Noise Multiplier:
+        # For lower-volume pairs (< $2.5M), thin order books produce wider predatory wicks.
+        # Widen the noise floor dynamically up to 1.35x so wicks do not prematurely trigger stops.
+        tail_noise_mult = 1.0
+        if volume_24h_usd and 0 < volume_24h_usd < 2_500_000.0:
+            tail_noise_mult = float(np.clip(1.0 + 0.35 * ((2_500_000.0 - volume_24h_usd) / 2_500_000.0), 1.0, 1.35))
+
         if is_ob_setup:
             cand_tp1 = format_dynamic_precision(order_block_setup["tp1_price"])
             cand_tp2 = format_dynamic_precision(order_block_setup["tp2_price"])
@@ -495,7 +508,8 @@ class SignalGenerationSystem:
                 tp3_mult = 5.50
 
             # Phase 1 & 2: Dynamic Noise Floor & Structural Stop Loss Placement
-            min_sl_dist = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
+            base_min_sl = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
+            min_sl_dist = base_min_sl * tail_noise_mult
             structural_low = recent_low
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_low = min(structural_low, float(candle_metrics["swept_price"]))
@@ -548,7 +562,8 @@ class SignalGenerationSystem:
                 tp3_mult = 5.50
 
             # Phase 1 & 2: Dynamic Noise Floor & Structural Stop Loss Placement for SHORT
-            min_sl_dist = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
+            base_min_sl = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
+            min_sl_dist = base_min_sl * tail_noise_mult
             structural_high = recent_high
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_high = max(structural_high, float(candle_metrics["swept_price"]))
@@ -940,10 +955,30 @@ class SignalGenerationSystem:
             is_order_book_void = True
             order_book_void_reason = f"Modeled book spread blowout ({spread_bps:.1f} bps > 500 bps limit)"
 
-        if volume_24h_usd and 0 < volume_24h_usd < 1_000_000.0:
+        # Low-liquidity gate: Below $250k daily volume, order books are too thin for institutional execution.
+        # For tail pairs between $250k and $1.0M, require verified institutional pattern confirmation and tight spread (<= 20 bps)
+        is_sub_threshold_illiquid = False
+        illiquidity_reason = ""
+        if volume_24h_usd and 0 < volume_24h_usd < 250_000.0:
+            is_sub_threshold_illiquid = True
+            illiquidity_reason = f"${volume_24h_usd/1e3:.0f}k < $250k minimum viable daily volume"
+        elif volume_24h_usd and 250_000.0 <= volume_24h_usd < 1_000_000.0:
+            has_strong_setup = bool(
+                is_ob_setup or
+                (candle_metrics and candle_metrics.get("is_sweep_reclaim")) or
+                (candle_metrics and candle_metrics.get("is_engulfing"))
+            )
+            if not has_strong_setup:
+                is_sub_threshold_illiquid = True
+                illiquidity_reason = f"${volume_24h_usd/1e6:.2f}M tail pair requires confirmed OB or Sweep Reclaim"
+            elif float(spread_bps) > 20.0:
+                is_sub_threshold_illiquid = True
+                illiquidity_reason = f"Tail pair spread {spread_bps:.1f} bps > 20.0 bps limit on ${volume_24h_usd/1e6:.2f}M volume"
+
+        if is_sub_threshold_illiquid:
             status = "HOLD_VETOED_BY_SUB_THRESHOLD_ILLIQUIDITY"
             trade_active = False
-            grade = f"Grade C (SUB-THRESHOLD ILLIQUIDITY: ${volume_24h_usd/1e6:.2f}M < $1.00M minimum volume)"
+            grade = f"Grade C (SUB-THRESHOLD ILLIQUIDITY: {illiquidity_reason})"
             conviction = 0.0
             tp1_price = cand_tp1
             tp2_price = cand_tp2
@@ -1744,8 +1779,14 @@ class SignalGenerationSystem:
         if current_price <= 0.0001:
             return None
 
-        # Hard Liquidity Floor Gate: Exclude coins with sub-threshold volume (< $1M) from active emission
-        if volume_24h_usd is not None and 0 < volume_24h_usd < 1_000_000.0:
+        # Dynamic 24h Turnover Synthesis: If ticker volume is missing or zero, compute rolling 24h turnover from candles
+        if (volume_24h_usd is None or volume_24h_usd <= 0.0) and "1h" in dfs_9:
+            df_1h = dfs_9["1h"]
+            if df_1h is not None and len(df_1h) >= 5 and "volume" in df_1h.columns and "close" in df_1h.columns:
+                volume_24h_usd = float((df_1h["close"].iloc[-24:].astype(float) * df_1h["volume"].iloc[-24:].astype(float)).sum())
+
+        # Hard Liquidity Floor Gate: Exclude coins with extreme sub-threshold volume (< $250k) from active emission
+        if volume_24h_usd is not None and 0 < volume_24h_usd < 250_000.0:
             return None
 
         # Fetch asset fundamental intelligence & news matrix

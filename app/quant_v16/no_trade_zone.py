@@ -312,18 +312,18 @@ class NoTradeZoneEngine:
             except Exception:
                 vol_24h_quote = 0.0
 
-        # Strict Tier-2 Liquidity Floor: $1.0M USDT baseline
-        # Even for exempt strategies, trading below $1M incurs severe slippage and wide spread
-        effective_min_vol = max(1_000_000.0, (min_quote_vol * 0.50) if is_exempt_strategy else min_quote_vol)
+        # Tier-2/3 Liquidity Floor: $250k for confirmed institutional strategies, $1.0M baseline
+        base_floor = 250_000.0 if is_exempt_strategy else 1_000_000.0
+        effective_min_vol = max(base_floor, (min_quote_vol * 0.50) if is_exempt_strategy else min_quote_vol)
         is_sub_liquidity = (vol_24h_quote > 0 and vol_24h_quote < effective_min_vol)
 
-        # Multi-day rolling volume check: If rolling volume across recent daily history is dry (< $1M)
+        # Multi-day rolling volume check: If rolling volume across recent daily history is dry (< base_floor)
         if (not is_sub_liquidity) and df is not None and "volume" in df.columns and len(df) >= 3:
             try:
                 tf_clean_str = str(anchor_tf or "").lower()
                 if any(k in tf_clean_str for k in ["1d", "daily", "24h", "1w", "15d"]):
                     rolling_daily_usd = float((df["volume"].iloc[-3:] * df["close"].iloc[-3:]).mean())
-                    if 0 < rolling_daily_usd < 1_000_000.0:
+                    if 0 < rolling_daily_usd < base_floor:
                         is_sub_liquidity = True
                         vol_24h_quote = rolling_daily_usd
             except Exception:
