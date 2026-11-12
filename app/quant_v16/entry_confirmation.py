@@ -1012,17 +1012,30 @@ class EntryConfirmationEngine:
         if bullish_ob_high is not None and bullish_ob_high > hl_price and bullish_ob_high <= current_price:
             zone_ceiling = max(zone_ceiling, float(bullish_ob_high))
 
+        # Check active candle bounce confirmation on 15M
+        candle_has_bounce = True
+        if df_15m is not None and len(df_15m) > 0 and "close" in df_15m.columns and "open" in df_15m.columns:
+            c_now = float(df_15m["close"].iloc[-1])
+            o_now = float(df_15m["open"].iloc[-1])
+            h_now = float(df_15m["high"].iloc[-1]) if "high" in df_15m.columns else max(c_now, o_now)
+            l_now = float(df_15m["low"].iloc[-1]) if "low" in df_15m.columns else min(c_now, o_now)
+            rng_now = max(1e-8, h_now - l_now)
+            # If current candle is strongly dumping red without lower wick bounce, do not market-buy falling knife
+            is_dumping_red = (c_now < o_now) and ((c_now - l_now) < 0.20 * rng_now)
+            if is_dumping_red:
+                candle_has_bounce = False
+
         # Anti-chase logic: If price is already extended > 1.2 ATR above the Higher Low, use RESTING LIMIT
         is_extended = current_price > (hl_price + 1.20 * atr_15m)
         if is_extended:
             execution_mode = "RESTING_LIMIT"
             entry_price = format_dynamic_precision(hl_price + 0.20 * atr_15m)
             decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO HL @ ${entry_price})"
-        elif current_price < zone_floor:
-            # Price is retesting deep below the HL
-            execution_mode = "MARKET_TRIGGER"
-            entry_price = format_dynamic_precision(current_price)
-            decision_label = f"🟢 BUY 15M (DEEP HL RETEST @ ${entry_price})"
+        elif current_price < zone_floor or not candle_has_bounce:
+            # Price is retesting deep below the HL or candle is still dumping red: Place resting limit at HL
+            execution_mode = "RESTING_LIMIT"
+            entry_price = format_dynamic_precision(hl_price)
+            decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO HL @ ${entry_price})"
         else:
             execution_mode = "MARKET_TRIGGER"
             entry_price = format_dynamic_precision(current_price)
@@ -1032,13 +1045,13 @@ class EntryConfirmationEngine:
         ob_is_local = (bullish_ob_low is not None and 0 < float(bullish_ob_low) and (hl_price - float(bullish_ob_low)) <= (1.50 * atr_15m))
         structural_floor = min(hl_price, float(bullish_ob_low)) if ob_is_local else hl_price
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
-        vol_cushion = max(0.25 * atr_15m, 2.0 * spread_drag_usd, entry_price * 0.002)
-        min_sl_dist = max(0.35 * atr_15m, 3.0 * spread_drag_usd, entry_price * 0.0035)
+        vol_cushion = max(0.40 * atr_15m, 3.0 * spread_drag_usd, entry_price * 0.0035)
+        min_sl_dist = max(0.65 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0060)
         sl_price = format_dynamic_precision(min(structural_floor - vol_cushion, entry_price - min_sl_dist))
 
         # Invariant assertion: SL must be strictly below Entry by at least the noise floor
         if sl_price >= entry_price or (entry_price - sl_price) < (min_sl_dist * 0.90):
-            sl_price = format_dynamic_precision(entry_price - max(0.50 * atr_15m, min_sl_dist))
+            sl_price = format_dynamic_precision(entry_price - max(0.75 * atr_15m, min_sl_dist))
 
         risk_amount = max(1e-8, entry_price - sl_price)
 
@@ -1144,17 +1157,30 @@ class EntryConfirmationEngine:
         if bearish_ob_low is not None and bearish_ob_low < lh_price and bearish_ob_low >= current_price:
             zone_floor = min(zone_floor, float(bearish_ob_low))
 
+        # Check active candle rejection confirmation on 15M
+        candle_has_rejection = True
+        if df_15m is not None and len(df_15m) > 0 and "close" in df_15m.columns and "open" in df_15m.columns:
+            c_now = float(df_15m["close"].iloc[-1])
+            o_now = float(df_15m["open"].iloc[-1])
+            h_now = float(df_15m["high"].iloc[-1]) if "high" in df_15m.columns else max(c_now, o_now)
+            l_now = float(df_15m["low"].iloc[-1]) if "low" in df_15m.columns else min(c_now, o_now)
+            rng_now = max(1e-8, h_now - l_now)
+            # If current candle is strongly pumping green without upper wick rejection, do not market-sell into rocket
+            is_pumping_green = (c_now > o_now) and ((h_now - c_now) < 0.20 * rng_now)
+            if is_pumping_green:
+                candle_has_rejection = False
+
         # Anti-chase logic: If price is already dumped > 1.2 ATR below the Lower High, use RESTING LIMIT
         is_extended = current_price < (lh_price - 1.20 * atr_15m)
         if is_extended:
             execution_mode = "RESTING_LIMIT"
             entry_price = format_dynamic_precision(lh_price - 0.20 * atr_15m)
             decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO LH @ ${entry_price})"
-        elif current_price > zone_ceiling:
-            # Price is retesting deep above the LH
-            execution_mode = "MARKET_TRIGGER"
-            entry_price = format_dynamic_precision(current_price)
-            decision_label = f"🔴 SELL 15M (DEEP LH RETEST @ ${entry_price})"
+        elif current_price > zone_ceiling or not candle_has_rejection:
+            # Price is retesting deep above the LH or candle is still driving green: Place resting limit at LH
+            execution_mode = "RESTING_LIMIT"
+            entry_price = format_dynamic_precision(lh_price)
+            decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO LH @ ${entry_price})"
         else:
             execution_mode = "MARKET_TRIGGER"
             entry_price = format_dynamic_precision(current_price)
@@ -1164,13 +1190,13 @@ class EntryConfirmationEngine:
         ob_is_local = (bearish_ob_high is not None and float(bearish_ob_high) > 0 and (float(bearish_ob_high) - lh_price) <= (1.50 * atr_15m))
         structural_ceiling = max(lh_price, float(bearish_ob_high)) if ob_is_local else lh_price
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
-        vol_cushion = max(0.25 * atr_15m, 2.0 * spread_drag_usd, entry_price * 0.002)
-        min_sl_dist = max(0.35 * atr_15m, 3.0 * spread_drag_usd, entry_price * 0.0035)
+        vol_cushion = max(0.40 * atr_15m, 3.0 * spread_drag_usd, entry_price * 0.0035)
+        min_sl_dist = max(0.65 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0060)
         sl_price = format_dynamic_precision(max(structural_ceiling + vol_cushion, entry_price + min_sl_dist))
 
         # Invariant assertion: SL must be strictly above Entry by at least the noise floor
         if sl_price <= entry_price or (sl_price - entry_price) < (min_sl_dist * 0.90):
-            sl_price = format_dynamic_precision(entry_price + max(0.50 * atr_15m, min_sl_dist))
+            sl_price = format_dynamic_precision(entry_price + max(0.75 * atr_15m, min_sl_dist))
 
         risk_amount = max(1e-8, sl_price - entry_price)
 

@@ -480,6 +480,135 @@ class TestSMCMarketStructure15M(unittest.TestCase):
         self.assertGreaterEqual(long_sl_pct, 0.0034, f"LONG SL too tight: {long_sl_pct:.6f}")
         self.assertLessEqual(long_anc["risk_reward_ratio"], 3.0)
 
+    def test_16_candle_rejection_validation_prevents_market_chasing(self):
+        """
+        Regression Test (TIA_USDT_15M_1794476194):
+        Verifies that when an active 15M candle is driving strongly in the opposite direction
+        (e.g., green candle without upper rejection wick for SHORT), the engine sets RESTING_LIMIT
+        at LH rather than executing MARKET_TRIGGER right into the rally.
+        Also verifies SL buffer exceeds micro-noise floor (>= 0.50% / 0.65*ATR).
+        """
+        from app.quant_v16.entry_confirmation import EntryConfirmationEngine
+
+        # Construct candles where last candle is strongly green (open=0.4048, high=0.4071, low=0.4048, close=0.4070)
+        df_15m = self._create_synthetic_candles(n=30, trend="BEARISH", base_price=0.4000, step=0.0005, timeframe_secs=900)
+        df_15m.iloc[-1, df_15m.columns.get_loc("open")] = 0.4048
+        df_15m.iloc[-1, df_15m.columns.get_loc("high")] = 0.4071
+        df_15m.iloc[-1, df_15m.columns.get_loc("low")] = 0.4048
+        df_15m.iloc[-1, df_15m.columns.get_loc("close")] = 0.4070
+
+        short_anc = EntryConfirmationEngine.anchor_to_lower_high_and_ob(
+            df_15m=df_15m,
+            lh_pivot_price=0.4060,
+            current_price=0.4070,
+            spread_bps=5.0,
+        )
+        self.assertEqual(short_anc["execution_mode"], "RESTING_LIMIT", "Must not market-execute into an unconfirmed green rally")
+        self.assertIn("AWAIT BOUNCE TO LH", short_anc["decision_label"])
+        sl_pct = (short_anc["sl_price"] - short_anc["entry_price"]) / short_anc["entry_price"]
+        self.assertGreaterEqual(sl_pct, 0.0050, f"SHORT SL must be >= 0.50% (got {sl_pct:.4%})")
+
+        # Now test symmetric LONG with strongly red candle driving down
+        df_15m.iloc[-1, df_15m.columns.get_loc("open")] = 0.4070
+        df_15m.iloc[-1, df_15m.columns.get_loc("high")] = 0.4070
+        df_15m.iloc[-1, df_15m.columns.get_loc("low")] = 0.4045
+        df_15m.iloc[-1, df_15m.columns.get_loc("close")] = 0.4048
+
+        long_anc = EntryConfirmationEngine.anchor_to_higher_low_and_ob(
+            df_15m=df_15m,
+            hl_pivot_price=0.4055,
+            current_price=0.4048,
+            spread_bps=5.0,
+        )
+        self.assertEqual(long_anc["execution_mode"], "RESTING_LIMIT", "Must not market-execute into an unconfirmed falling knife")
+        self.assertIn("AWAIT PULLBACK TO HL", long_anc["decision_label"])
+        sl_pct = (long_anc["entry_price"] - long_anc["sl_price"]) / long_anc["entry_price"]
+        self.assertGreaterEqual(sl_pct, 0.0050, f"LONG SL must be >= 0.50% (got {sl_pct:.4%})")
+
+    def test_17_mtf_trend_unanimity_gate(self):
+        """
+        Regression Test (TIA / MEGA 2026-11-12 09:36):
+        Verifies that evaluate_multi_horizon_gates strictly requires 15M, 1H, and 4H
+        to all share the same trend direction, and rejects signals when there is a mismatch
+        even if 1D Range Rotation exists.
+        """
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+
+        sig_sys = SignalGenerationSystem()
+
+        matrix_rotation = {
+            "archetype": "ARCHETYPE_C_RANGE_ROTATION",
+            "trade_permitted": True,
+            "dominant_direction": "SHORT",
+            "strategy": "RANGE_MEAN_REVERSION"
+        }
+
+        # Case 1: 15M BULLISH, 1H BULLISH, 4H BEARISH -> Must fail closed
+        trend_mismatch = {
+            "15m": "BULLISH",
+            "1h": "BULLISH",
+            "4h": "BEARISH",
+        }
+        preds = {
+            "15m": {"is_cold_start": False, "candle_count": 50, "trend_state": "BULLISH"},
+            "1h": {"is_cold_start": False, "candle_count": 50, "trend_state": "BULLISH"},
+            "4h": {"is_cold_start": False, "candle_count": 50, "trend_state": "BEARISH"},
+        }
+        q_15m, q_1h, q_24h = sig_sys.evaluate_multi_horizon_gates(trend_mismatch, preds, matrix_rotation)
+        self.assertFalse(q_15m["qualified"], "Must reject when 15M/1H/4H trend is misaligned")
+        self.assertTrue(any("MTF_TREND_MISALIGNMENT" in c for c in q_15m.get("conflicts", [])))
+
+        # Case 2: 15M BEARISH, 1H BULLISH, 4H BEARISH -> Must fail closed
+        trend_mismatch_2 = {
+            "15m": "BEARISH",
+            "1h": "BULLISH",
+            "4h": "BEARISH",
+        }
+        preds_2 = {
+            "15m": {"is_cold_start": False, "candle_count": 50, "trend_state": "BEARISH"},
+            "1h": {"is_cold_start": False, "candle_count": 50, "trend_state": "BULLISH"},
+            "4h": {"is_cold_start": False, "candle_count": 50, "trend_state": "BEARISH"},
+        }
+        q_15m_2, _, _ = sig_sys.evaluate_multi_horizon_gates(trend_mismatch_2, preds_2, matrix_rotation)
+        self.assertFalse(q_15m_2["qualified"], "Must reject when 1H is misaligned with 15M/4H")
+        self.assertTrue(len(q_15m_2.get("conflicts", [])) > 0)
+
+        # Case 3: 15M, 1H, 4H all BEARISH -> Unanimously qualified
+        trend_unanimous_bear = {
+            "15m": "BEARISH",
+            "1h": "BEARISH",
+            "4h": "BEARISH",
+        }
+        preds_bear = {
+            "15m": {"is_cold_start": False, "candle_count": 50, "trend_state": "BEARISH"},
+            "1h": {"is_cold_start": False, "candle_count": 50, "trend_state": "BEARISH"},
+            "4h": {"is_cold_start": False, "candle_count": 50, "trend_state": "BEARISH"},
+        }
+        q_15m_bear, _, _ = sig_sys.evaluate_multi_horizon_gates(trend_unanimous_bear, preds_bear, matrix_rotation)
+        self.assertTrue(q_15m_bear["qualified"], "Must qualify when 15M, 1H, 4H are all BEARISH")
+        self.assertEqual(q_15m_bear["direction"], "SHORT")
+
+        # Case 4: 15M, 1H, 4H all BULLISH -> Unanimously qualified
+        trend_unanimous_bull = {
+            "15m": "BULLISH",
+            "1h": "BULLISH",
+            "4h": "BULLISH",
+        }
+        preds_bull = {
+            "15m": {"is_cold_start": False, "candle_count": 50, "trend_state": "BULLISH"},
+            "1h": {"is_cold_start": False, "candle_count": 50, "trend_state": "BULLISH"},
+            "4h": {"is_cold_start": False, "candle_count": 50, "trend_state": "BULLISH"},
+        }
+        matrix_rotation_bull = {
+            "archetype": "ARCHETYPE_C_RANGE_ROTATION",
+            "trade_permitted": True,
+            "dominant_direction": "LONG",
+            "strategy": "RANGE_MEAN_REVERSION"
+        }
+        q_15m_bull, _, _ = sig_sys.evaluate_multi_horizon_gates(trend_unanimous_bull, preds_bull, matrix_rotation_bull)
+        self.assertTrue(q_15m_bull["qualified"], "Must qualify when 15M, 1H, 4H are all BULLISH")
+        self.assertEqual(q_15m_bull["direction"], "LONG")
+
 
 if __name__ == "__main__":
     unittest.main()

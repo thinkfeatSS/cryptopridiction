@@ -1858,7 +1858,7 @@ class SignalGenerationSystem:
 
         # Zero-distance & price geometry invariant guard (Section 4.2 AGENTS.md)
         if trade_active:
-            min_rel_sl_pct = max(0.0025, 2.5 * (float(spread_bps) / 10000.0))
+            min_rel_sl_pct = max(0.0050, 3.0 * (float(spread_bps) / 10000.0))
             if exec_entry_price <= 0.0001 or sl_price <= 0.0001 or tp1_price <= 0.0001:
                 trade_active = False
                 status = "REJECTED_ZERO_PRICE"
@@ -2191,6 +2191,12 @@ class SignalGenerationSystem:
             matrix_eval.get("archetype") == InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value and
             matrix_eval.get("trade_permitted")
         )
+        is_range_rotation_valid = bool(
+            is_range_rotation and (
+                (matrix_eval.get("dominant_direction") == "SHORT" and trend_matrix.get("15m") != "BULLISH" and trend_matrix.get("1h") != "BULLISH" and trend_matrix.get("4h") != "BULLISH") or
+                (matrix_eval.get("dominant_direction") == "LONG" and trend_matrix.get("15m") != "BEARISH" and trend_matrix.get("1h") != "BEARISH" and trend_matrix.get("4h") != "BEARISH")
+            )
+        )
         is_breakout_expansion = bool(
             matrix_eval.get("strategy") == "DIRECTIONAL_BREAKOUT_EXPANSION" and
             matrix_eval.get("trade_permitted")
@@ -2264,7 +2270,7 @@ class SignalGenerationSystem:
         q_15m_qualified = bool(
             not cold_start_tfs_15m and (
                 ((not is_middle_chop_veto or (desk_bull_cnt_15m >= 2 or desk_bear_cnt_15m >= 2)) and matrix_trade_permitted and (
-                    is_15m_bull or is_15m_bear or is_coiling_breakout or (is_range_rotation and matrix_eval.get("dominant_direction") in ["LONG", "SHORT"]) or is_breakout_expansion
+                    is_15m_bull or is_15m_bear or is_coiling_breakout or (is_range_rotation_valid and matrix_eval.get("dominant_direction") in ["LONG", "SHORT"]) or is_breakout_expansion
                 )) or has_valid_institutional_trigger_15m
             )
         )
@@ -2274,7 +2280,7 @@ class SignalGenerationSystem:
                     "LONG" if is_15m_bull else (
                         "SHORT" if is_15m_bear else (
                             (ob_setup_15m.get("direction") if (has_ob_15m and ob_setup_15m.get("direction") == matrix_eval.get("dominant_direction") and ob_setup_15m.get("direction") in ["LONG", "SHORT"]) else (
-                                matrix_eval.get("dominant_direction") if ((is_coiling_breakout or is_range_rotation or is_breakout_expansion) and matrix_eval.get("dominant_direction") in ["LONG", "SHORT"]) else None
+                                matrix_eval.get("dominant_direction") if ((is_coiling_breakout or is_range_rotation_valid or is_breakout_expansion) and matrix_eval.get("dominant_direction") in ["LONG", "SHORT"]) else None
                             ))
                         )
                     )
@@ -2285,16 +2291,36 @@ class SignalGenerationSystem:
             q_15m_qualified = False
             q_15m_direction = None
 
-        # Pillar 2: Strict Higher-Timeframe Trend Confluence (Anchor = 4H)
+        # Pillar 2: Strict Higher-Timeframe Trend Confluence (Anchor = 4H, Context = 1H, Trigger = 15M)
+        # 1. Macro Anchor (4H): Cannot oppose trade direction
+        # 2. Context Horizon (1H): Cannot oppose trade direction
+        # 3. Trigger Horizon (15M): Cannot oppose trade direction unless confirmed by active OB/SMC trigger
+        # 4. Range Rotation: Cannot trade counter-trend against 15M, 1H, or 4H
+        t_15m_str = str(trend_matrix.get("15m", "CONSOLIDATION")).upper()
+        t_1h_str = str(trend_matrix.get("1h", "CONSOLIDATION")).upper()
         htf_4h_str = str(trend_matrix.get("4h", "CONSOLIDATION")).upper()
         htf_1d_str = str(trend_matrix.get("1d", "CONSOLIDATION")).upper()
-        # Decouple 1D: 1D does not veto 15M Scalp signals (4H is the sole macro anchor for 15M execution)
-        is_htf_conflict_15m = bool(
-            cand_15m_dir and (
-                (cand_15m_dir == "SHORT" and htf_4h_str == "BULLISH") or
-                (cand_15m_dir == "LONG" and htf_4h_str == "BEARISH")
-            )
-        )
+
+        is_htf_conflict_15m = False
+        if cand_15m_dir == "SHORT":
+            if htf_4h_str == "BULLISH":
+                is_htf_conflict_15m = True
+            elif t_1h_str == "BULLISH":
+                is_htf_conflict_15m = True
+            elif is_range_rotation and (t_15m_str == "BULLISH" or t_1h_str == "BULLISH" or htf_4h_str == "BULLISH"):
+                is_htf_conflict_15m = True
+            elif not has_valid_institutional_trigger_15m and t_15m_str == "BULLISH":
+                is_htf_conflict_15m = True
+        elif cand_15m_dir == "LONG":
+            if htf_4h_str == "BEARISH":
+                is_htf_conflict_15m = True
+            elif t_1h_str == "BEARISH":
+                is_htf_conflict_15m = True
+            elif is_range_rotation and (t_15m_str == "BEARISH" or t_1h_str == "BEARISH" or htf_4h_str == "BEARISH"):
+                is_htf_conflict_15m = True
+            elif not has_valid_institutional_trigger_15m and t_15m_str == "BEARISH":
+                is_htf_conflict_15m = True
+
         # Macro Pullback Exhaustion Trap (Phase 4):
         # If 15M was attempting to buy counter-trend into HTF Bearish Resistance, but touches a verified Bearish OB or SMC Supply,
         # invert direction to SHORT aligned with the macro trend!
@@ -2328,21 +2354,22 @@ class SignalGenerationSystem:
                 is_htf_conflict_15m = True
             elif getattr(triad_structure, "is_unanimously_aligned", False):
                 if getattr(triad_structure, "trend_direction", None) in ["LONG", "SHORT"]:
-                    cand_15m_dir = triad_structure.trend_direction
-                    # Universal Market Structure: Both Scenario A (Order Block tap) and Scenario B (Unanimous 4H+1H+15M trend)
-                    # provide authoritative structural qualification
-                    if getattr(triad_structure, "is_unanimously_aligned", False) and not cold_start_tfs_15m:
-                        if not is_middle_chop_veto or getattr(triad_structure, "has_order_block", False):
-                            q_15m_qualified = True
-                    if q_15m_qualified:
-                        q_15m_direction = triad_structure.trend_direction
+                    triad_dir = triad_structure.trend_direction
+                    if (triad_dir == "LONG" and htf_4h_str != "BEARISH" and t_1h_str != "BEARISH") or (triad_dir == "SHORT" and htf_4h_str != "BULLISH" and t_1h_str != "BULLISH"):
+                        cand_15m_dir = triad_dir
+                        if not cold_start_tfs_15m:
+                            if not is_middle_chop_veto or getattr(triad_structure, "has_order_block", False):
+                                q_15m_qualified = True
+                        if q_15m_qualified:
+                            q_15m_direction = triad_dir
+                    else:
+                        q_15m_qualified = False
+                        q_15m_direction = None
+                        is_htf_conflict_15m = True
             else:
-                # 4H is consolidating / ranging (Scenario B = NO_SIGNAL): lower-timeframe 15M setups are permitted IF
-                # they have a valid institutional trigger (Order Block reaction, SMC pattern [sweep reclaim, FVG retest, VWAP bounce, engulfing],
-                # or coiling breakout) or pass Elder's Triple Screen (15M trend + 1H context) with NO opposing HTF trend conflict.
-                if not (has_valid_institutional_trigger_15m or is_15m_bull or is_15m_bear):
-                    q_15m_qualified = False
-                    q_15m_direction = None
+                q_15m_qualified = False
+                q_15m_direction = None
+                is_htf_conflict_15m = True
 
         if is_htf_conflict_15m:
             q_15m_qualified = False
@@ -2367,7 +2394,7 @@ class SignalGenerationSystem:
             "conflicts": (
                 [f"COLD_START_HORIZON_ACCUMULATION: 15M Scalp requires >= 15 historical candles (3.75h). Under-accumulated horizons: {cold_start_tfs_15m}."]
                 if cold_start_tfs_15m else (
-                    [f"HTF_COUNTER_TREND_CONFLICT: {cand_15m_dir} blocked by adverse higher timeframe (4H: {htf_4h_str})."]
+                    [f"HTF_COUNTER_TREND_CONFLICT: MTF_TREND_MISALIGNMENT: {cand_15m_dir} blocked by adverse higher timeframe (4H: {htf_4h_str}, 1H: {t_1h_str}, 15M: {t_15m_str})."]
                     if is_htf_conflict_15m else (
                         [f"CAPITAL_PRESERVATION: Trapped in middle 50% chop zone of 1D range box. Section 35 gate locked."]
                         if (is_middle_chop_veto and not has_valid_institutional_trigger_15m) else (
@@ -3296,12 +3323,11 @@ class SignalGenerationSystem:
             if q_1h.get("qualified") and q_1h.get("direction") in ["LONG", "SHORT"]:
                 h1_dir = q_1h["direction"]
                 triad_match = (
-                    (h1_dir == "LONG" and trend_matrix.get("15m") == "BULLISH" and trend_matrix.get("1h") == "BULLISH" and trend_matrix.get("4h") == "BULLISH") or
-                    (h1_dir == "SHORT" and trend_matrix.get("15m") == "BEARISH" and trend_matrix.get("1h") == "BEARISH" and trend_matrix.get("4h") == "BEARISH") or
+                    (h1_dir == "LONG" and trend_matrix.get("15m") != "BEARISH" and trend_matrix.get("1h") == "BULLISH" and trend_matrix.get("4h") != "BEARISH") or
+                    (h1_dir == "SHORT" and trend_matrix.get("15m") != "BULLISH" and trend_matrix.get("1h") == "BEARISH" and trend_matrix.get("4h") != "BULLISH") or
                     (triad_structure is not None and getattr(triad_structure, "is_unanimously_aligned", False) and getattr(triad_structure, "trend_direction", None) == h1_dir)
                 )
-                if triad_match or (h1_dir == "LONG" and trend_matrix.get("1h") == "BULLISH" and trend_matrix.get("4h") != "BEARISH") or \
-                                  (h1_dir == "SHORT" and trend_matrix.get("1h") == "BEARISH" and trend_matrix.get("4h") != "BULLISH"):
+                if triad_match:
                     target_dir_15m = h1_dir
                     converted_from_hz = "1H"
                     q_15m["qualified"] = True
@@ -3309,12 +3335,11 @@ class SignalGenerationSystem:
             elif q_24h.get("qualified") and q_24h.get("direction") in ["LONG", "SHORT"]:
                 h24_dir = q_24h["direction"]
                 triad_match = (
-                    (h24_dir == "LONG" and trend_matrix.get("15m") == "BULLISH" and trend_matrix.get("1h") == "BULLISH" and trend_matrix.get("4h") == "BULLISH") or
-                    (h24_dir == "SHORT" and trend_matrix.get("15m") == "BEARISH" and trend_matrix.get("1h") == "BEARISH" and trend_matrix.get("4h") == "BEARISH") or
+                    (h24_dir == "LONG" and trend_matrix.get("15m") != "BEARISH" and trend_matrix.get("1h") != "BEARISH" and trend_matrix.get("4h") == "BULLISH") or
+                    (h24_dir == "SHORT" and trend_matrix.get("15m") != "BULLISH" and trend_matrix.get("1h") != "BULLISH" and trend_matrix.get("4h") == "BEARISH") or
                     (triad_structure is not None and getattr(triad_structure, "is_unanimously_aligned", False) and getattr(triad_structure, "trend_direction", None) == h24_dir)
                 )
-                if triad_match or (h24_dir == "LONG" and trend_matrix.get("4h") == "BULLISH" and trend_matrix.get("1h") != "BEARISH") or \
-                                  (h24_dir == "SHORT" and trend_matrix.get("4h") == "BEARISH" and trend_matrix.get("1h") != "BULLISH"):
+                if triad_match:
                     target_dir_15m = h24_dir
                     converted_from_hz = "24H"
                     q_15m["qualified"] = True
