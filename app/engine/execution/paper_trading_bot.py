@@ -1380,20 +1380,51 @@ class PaperTradingBot:
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
 
-                    # B. Chase Buffer Exceeded / Structure Invalidated
-                    # Cancel if price rallies/drops away from admission point without pulling back to fill the resting limit
+                    # B. Chase Buffer Exceeded / Structure Invalidated vs Runaway Reversal Conversion
+                    # In runaway parabolic markets, if price reverses before retesting the LH/HL zone
+                    # and begins expanding in the trade direction with institutional R:R (>= 1.20), convert to market fill
                     admission_p = float(pos.get("admission_price", pos.get("current_price", limit_p)))
                     chase_thresh = float(pos.get("chase_threshold_pct", 0.40))
                     max_allowed_long = max(float(pos.get("entry_zone_max", 0.0)), admission_p * (1.0 + chase_thresh / 100.0))
                     min_allowed_short = min(float(pos.get("entry_zone_min", float('inf'))), admission_p * (1.0 - chase_thresh / 100.0))
-                    if direction == "LONG" and curr_p > max_allowed_long:
-                        canc_rec = self._create_cancellation_record(pos, "CANCELLED_CHASE_EXCEEDED", "Price expanded beyond chase threshold without fill")
-                        self._archive_cancelled_order(canc_rec, pos.get("desk"))
-                        continue
-                    elif direction == "SHORT" and curr_p < min_allowed_short:
-                        canc_rec = self._create_cancellation_record(pos, "CANCELLED_CHASE_EXCEEDED", "Price dropped beyond chase threshold without fill")
-                        self._archive_cancelled_order(canc_rec, pos.get("desk"))
-                        continue
+
+                    is_runaway_long = (direction == "LONG" and curr_p > max_allowed_long)
+                    is_runaway_short = (direction == "SHORT" and curr_p < min_allowed_short)
+
+                    if is_runaway_long or is_runaway_short:
+                        tp1_p = float(pos.get("tp1_price", 0.0))
+                        sl_p = float(pos.get("sl_price", 0.0))
+                        tp_not_reached = (curr_p < tp1_p) if direction == "LONG" else (curr_p > tp1_p)
+                        eff_rr = 0.0
+                        if tp_not_reached and sl_p > 0 and tp1_p > 0:
+                            live_spread_bps = float(pos.get("spread_bps", 4.0))
+                            eff_rr, _, _ = self.calculate_effective_rr(
+                                entry_p=curr_p,
+                                tp1_p=tp1_p,
+                                sl_p=sl_p,
+                                spread_bps=live_spread_bps,
+                                volume_24h_usd=float(pos.get("volume_24h_usd", 0.0)),
+                                tick_latency_ms=tick_latency_ms,
+                                is_limit=False
+                            )
+
+                        if tp_not_reached and eff_rr >= 1.20:
+                            pos["status"] = "OPEN"
+                            pos["is_limit_resting"] = False
+                            pos["entry_price"] = curr_p
+                            pos["current_price"] = curr_p
+                            pos["opened_at"] = now_utc.isoformat()
+                            pos["opened_at_utc"] = now_utc.isoformat()
+                            pos["awaiting_microstructure_inflow"] = False
+                            pos["fill_confirmation_type"] = "RUNAWAY_REVERSAL_CONVERTED"
+                            print(f"[PAPER BOT 🚀 RUNAWAY REVERSAL CONVERTED] {sym} ({direction} {norm_h}) price reversed early! Filled at ${curr_p:,.4f} with effective R:R 1:{eff_rr:.2f}")
+                            remaining_positions.append(pos)
+                            continue
+                        else:
+                            canc_detail = "Price expanded beyond chase threshold without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.20) without limit fill"
+                            canc_rec = self._create_cancellation_record(pos, "CANCELLED_CHASE_EXCEEDED", canc_detail)
+                            self._archive_cancelled_order(canc_rec, pos.get("desk"))
+                            continue
 
                     # C. Macro Regime / NTZ Shift Invalidation (Fix 1)
                     if btc_shield_state:
@@ -1441,7 +1472,13 @@ class PaperTradingBot:
                         remaining_positions.append(pos)
                         continue
 
-                    if (direction == "LONG" and curr_p <= limit_p) or (direction == "SHORT" and curr_p >= limit_p):
+                    touch_tol = min(pos.get("active_atr", 0.0) * 0.10, limit_p * 0.0008) if pos.get("active_atr") else (limit_p * 0.0008)
+                    is_price_touched = (
+                        (direction == "LONG" and (curr_p <= (limit_p + touch_tol) or (live_bid > 0 and live_bid <= limit_p))) or
+                        (direction == "SHORT" and (curr_p >= (limit_p - touch_tol) or (live_ask > 0 and live_ask >= limit_p)))
+                    )
+
+                    if is_price_touched:
                         # Live Spread Widening & Effective R:R Guard (Flash Liquidity Void Defense)
                         live_spread_bps = 0.0
                         if live_ask and live_bid and live_ask > live_bid and curr_p > 0:
@@ -1485,7 +1522,8 @@ class PaperTradingBot:
                             cvd_metrics=sym_cvd,
                             candle_metrics=pos.get("metrics") or pos.get("microstructure_features") or {},
                             obi_threshold=0.25,
-                            cvd_threshold=0.20
+                            cvd_threshold=0.20,
+                            touch_tolerance=touch_tol
                         )
 
                         if not is_confirmed:

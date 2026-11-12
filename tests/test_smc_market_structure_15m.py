@@ -22,6 +22,7 @@ Authoritative Test Coverage:
    - Price geometry invariants: SL < Entry < TP1 < TP2 < TP3 (Long) | SL > Entry > TP1 > TP2 > TP3 (Short).
 """
 
+from datetime import datetime, timezone
 import unittest
 import numpy as np
 import pandas as pd
@@ -608,6 +609,89 @@ class TestSMCMarketStructure15M(unittest.TestCase):
         q_15m_bull, _, _ = sig_sys.evaluate_multi_horizon_gates(trend_unanimous_bull, preds_bull, matrix_rotation_bull)
         self.assertTrue(q_15m_bull["qualified"], "Must qualify when 15M, 1H, 4H are all BULLISH")
         self.assertEqual(q_15m_bull["direction"], "LONG")
+
+    def test_18_runaway_parabolic_resting_limit_fill_conversion(self):
+        """
+        Regression Test:
+        Verifies that in runaway parabolic markets, if price reverses before reaching
+        the distant LH/HL resting limit, PaperTradingBot does NOT let the order expire
+        unfilled or cancel prematurely if effective R:R to TP1 remains >= 1:1.20.
+        Instead, it converts the resting limit to an active market fill (RUNAWAY_REVERSAL_CONVERTED).
+        Also verifies that if R:R is degraded below 1:1.20, it safely cancels.
+        """
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+
+        bot = PaperTradingBot(ledger_file="scratch/test_paper_runaway_reversal.json")
+        bot.data = {
+            "account_equity_usd": 1000.0,
+            "open_positions": [],
+            "closed_trades": [],
+            "cancelled_orders": [],
+            "desks": {
+                "day": {"name": "Day Trading Desk", "allocated_usd": 350.0, "max_slots": 2, "active_slots": 0, "leverage": 3},
+                "scalp": {"name": "High-Frequency Scalp Desk", "allocated_usd": 150.0, "max_slots": 2, "active_slots": 0, "leverage": 5},
+                "swing": {"name": "Macro Swing Desk", "allocated_usd": 500.0, "max_slots": 2, "active_slots": 0, "leverage": 2}
+            }
+        }
+
+        # Case A: SHORT resting limit at $0.4080 with admission at $0.4060, SL at $0.4100, TP1 at $0.3900.
+        # Price reverses early at $0.4065 and starts dumping to $0.4040.
+        # At $0.4040: Reward = 0.4040 - 0.3900 = 0.0140, Risk = 0.4100 - 0.4040 = 0.0060 -> R:R = 1:2.33 (>= 1.20)
+        pos_short = {
+            "trade_id": "TEST_RUNAWAY_SHORT",
+            "symbol": "TIA/USDT",
+            "direction": "SHORT",
+            "horizon": "15M",
+            "status": "RESTING_LIMIT",
+            "is_limit_resting": True,
+            "entry_price": 0.4080,
+            "optimal_entry_limit": 0.4080,
+            "admission_price": 0.4060,
+            "current_price": 0.4060,
+            "tp1_price": 0.3900,
+            "sl_price": 0.4100,
+            "desk": "scalp",
+            "chase_threshold_pct": 0.40,
+            "active_atr": 0.0040,
+            "opened_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        bot.data["open_positions"] = [pos_short]
+
+        # Price dumps to 0.4040 (< 0.4060 * (1 - 0.004) = 0.40438)
+        bot.on_tick(live_prices={"TIA/USDT": 0.4040})
+
+        pos_after = bot.data["open_positions"][0]
+        self.assertEqual(pos_after["status"], "OPEN")
+        self.assertFalse(pos_after["is_limit_resting"])
+        self.assertEqual(pos_after["fill_confirmation_type"], "RUNAWAY_REVERSAL_CONVERTED")
+        self.assertEqual(pos_after["entry_price"], 0.4040)
+
+        # Case B: Price dropped too far (e.g. 0.3930, where reward is 0.0030 and risk is 0.0170 -> R:R = 0.18 < 1.20)
+        pos_chase_bad = {
+            "trade_id": "TEST_CHASE_EXCEEDED",
+            "symbol": "MEGA/USDT",
+            "direction": "SHORT",
+            "horizon": "15M",
+            "status": "RESTING_LIMIT",
+            "is_limit_resting": True,
+            "entry_price": 0.4080,
+            "optimal_entry_limit": 0.4080,
+            "admission_price": 0.4060,
+            "current_price": 0.4060,
+            "tp1_price": 0.3900,
+            "sl_price": 0.4100,
+            "desk": "scalp",
+            "chase_threshold_pct": 0.40,
+            "active_atr": 0.0040,
+            "opened_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        bot.data["open_positions"] = [pos_after, pos_chase_bad]
+        bot.on_tick(live_prices={"MEGA/USDT": 0.3930, "TIA/USDT": 0.4040})
+
+        # Order must be safely cancelled as CANCELLED_CHASE_EXCEEDED to protect capital
+        self.assertEqual(len(bot.data["open_positions"]), 1) # Only pos_short remains
+        self.assertEqual(len(bot.data["cancelled_orders"]), 1)
+        self.assertEqual(bot.data["cancelled_orders"][0]["cancellation_reason"], "CANCELLED_CHASE_EXCEEDED")
 
 
 if __name__ == "__main__":

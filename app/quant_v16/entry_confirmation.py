@@ -742,6 +742,7 @@ class EntryConfirmationEngine:
             "entry_zone_min": zone_min,
             "entry_zone_max": zone_max,
             "distance_from_limit_pct": round(dist_pct, 2),
+            "chase_threshold_pct": round(dynamic_chase_pct, 2),
             "is_chasing": is_chasing,
             "chase_warning": chase_warning
         }
@@ -859,7 +860,8 @@ class EntryConfirmationEngine:
         cvd_metrics: Optional[Dict[str, Any]] = None,
         candle_metrics: Optional[Dict[str, Any]] = None,
         obi_threshold: float = 0.25,
-        cvd_threshold: float = 0.20
+        cvd_threshold: float = 0.20,
+        touch_tolerance: float = 0.0
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Authoritative Live OBI / CVD Inflow Confirmation for Resting Limit Fills.
@@ -873,10 +875,12 @@ class EntryConfirmationEngine:
         dir_upper = str(direction).upper()
         is_long = dir_upper in ["LONG", "BULLISH", "BUY"]
 
-        # 1. Price touch verification
-        if is_long and current_price > limit_price:
+        # 1. Price touch verification (with dynamic micro-bracket touch tolerance)
+        max_allowed_long_p = limit_price + touch_tolerance
+        min_allowed_short_p = limit_price - touch_tolerance
+        if is_long and current_price > max_allowed_long_p:
             return False, f"Price (${current_price:,.4f}) above Long limit (${limit_price:,.4f})", {}
-        elif not is_long and current_price < limit_price:
+        elif not is_long and current_price < min_allowed_short_p:
             return False, f"Price (${current_price:,.4f}) below Short limit (${limit_price:,.4f})", {}
 
         # 2. Extract Top-5 OBI metrics
@@ -1032,9 +1036,17 @@ class EntryConfirmationEngine:
             entry_price = format_dynamic_precision(hl_price + 0.20 * atr_15m)
             decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO HL @ ${entry_price})"
         elif current_price < zone_floor or not candle_has_bounce:
-            # Price is retesting deep below the HL or candle is still dumping red: Place resting limit at HL
+            # Price is retesting deep below the HL or candle is still dumping red: Place resting limit
             execution_mode = "RESTING_LIMIT"
-            entry_price = format_dynamic_precision(hl_price)
+            if current_price > hl_price:
+                # Dynamic retest entry: Anchor to Bullish OB high or 50% Mean Threshold of pullback zone
+                # to prevent resting limits expiring unfilled when price reverses early in runaway markets
+                ob_entry = float(bullish_ob_high) if (bullish_ob_high is not None and hl_price <= float(bullish_ob_high) <= current_price) else None
+                mean_entry = (current_price + hl_price) / 2.0
+                target_limit = ob_entry if ob_entry is not None else mean_entry
+                entry_price = format_dynamic_precision(max(hl_price, min(current_price, target_limit)))
+            else:
+                entry_price = format_dynamic_precision(hl_price)
             decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO HL @ ${entry_price})"
         else:
             execution_mode = "MARKET_TRIGGER"
@@ -1177,9 +1189,17 @@ class EntryConfirmationEngine:
             entry_price = format_dynamic_precision(lh_price - 0.20 * atr_15m)
             decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO LH @ ${entry_price})"
         elif current_price > zone_ceiling or not candle_has_rejection:
-            # Price is retesting deep above the LH or candle is still driving green: Place resting limit at LH
+            # Price is retesting deep above the LH or candle is still driving green: Place resting limit
             execution_mode = "RESTING_LIMIT"
-            entry_price = format_dynamic_precision(lh_price)
+            if current_price < lh_price:
+                # Dynamic retest entry: Anchor to Order Block low or 50% Mean Threshold of retest zone
+                # to prevent resting limits expiring unfilled when price reverses early in runaway markets
+                ob_entry = float(bearish_ob_low) if (bearish_ob_low is not None and current_price <= float(bearish_ob_low) <= lh_price) else None
+                mean_entry = (current_price + lh_price) / 2.0
+                target_limit = ob_entry if ob_entry is not None else mean_entry
+                entry_price = format_dynamic_precision(min(lh_price, max(current_price, target_limit)))
+            else:
+                entry_price = format_dynamic_precision(lh_price)
             decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO LH @ ${entry_price})"
         else:
             execution_mode = "MARKET_TRIGGER"
