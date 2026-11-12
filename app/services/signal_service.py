@@ -1226,9 +1226,10 @@ class SignalService:
                 max_gain = ((high_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - low_p) / entry_p) * 100.0
                 s.max_potential_gain_pct = round(max_gain, 2)
 
-                is_hit_tp3 = (direction == "LONG" and high_p >= tp3_p) or (direction == "SHORT" and low_p <= tp3_p)
-                is_hit_tp2 = (direction == "LONG" and high_p >= tp2_p) or (direction == "SHORT" and low_p <= tp2_p)
-                is_hit_tp1 = (direction == "LONG" and high_p >= tp1_p) or (direction == "SHORT" and low_p <= tp1_p)
+                tp_tol = entry_p * 0.0008
+                is_hit_tp3 = (direction == "LONG" and (high_p + tp_tol) >= tp3_p) or (direction == "SHORT" and (low_p - tp_tol) <= tp3_p)
+                is_hit_tp2 = (direction == "LONG" and (high_p + tp_tol) >= tp2_p) or (direction == "SHORT" and (low_p - tp_tol) <= tp2_p)
+                is_hit_tp1 = (direction == "LONG" and (high_p + tp_tol) >= tp1_p) or (direction == "SHORT" and (low_p - tp_tol) <= tp1_p)
 
                 # Stop loss check: evaluate against intra-candle extremes and current spot price
                 is_be_locked = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]

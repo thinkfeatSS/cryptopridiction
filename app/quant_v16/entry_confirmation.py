@@ -356,10 +356,12 @@ class EntryConfirmationEngine:
                 if v_sum > 0:
                     rolling_vwap = float((typ_p * vols).sum() / v_sum)
                     if is_long:
-                        if c_low <= (rolling_vwap * 1.004) and c_close >= rolling_vwap:
+                        has_buyer_defense = is_green or lower_wick_ratio >= 0.20 or (c_close >= rolling_vwap * 1.001)
+                        if c_low <= (rolling_vwap * 1.004) and c_close >= rolling_vwap and has_buyer_defense:
                             is_vwap_bounce = True
                     else:
-                        if c_high >= (rolling_vwap * 0.996) and c_close <= rolling_vwap:
+                        has_seller_rejection = is_red or upper_wick_ratio >= 0.20 or (c_close <= rolling_vwap * 0.999)
+                        if c_high >= (rolling_vwap * 0.996) and c_close <= rolling_vwap and has_seller_rejection:
                             is_vwap_bounce = True
             except Exception:
                 is_vwap_bounce = False
@@ -473,8 +475,9 @@ class EntryConfirmationEngine:
 
             # Institutional Setup 4: Rolling VWAP Rebound
             if is_vwap_bounce:
-                metrics["pattern"] = "VWAP_BOUNCE_LONG"
-                return True, f"Bullish Institutional VWAP Rebound Confirmed (VWAP: {rolling_vwap:.4f})", metrics
+                if not is_red or lower_wick_ratio >= 0.20:
+                    metrics["pattern"] = "VWAP_BOUNCE_LONG"
+                    return True, f"Bullish Institutional VWAP Rebound Confirmed (VWAP: {rolling_vwap:.4f})", metrics
 
             # Institutional Setup 5: Squeeze Expansion
             if is_squeeze_expansion:
@@ -552,8 +555,9 @@ class EntryConfirmationEngine:
 
             # Institutional Setup 4: Rolling VWAP Rejection
             if is_vwap_bounce:
-                metrics["pattern"] = "VWAP_BOUNCE_SHORT"
-                return True, f"Bearish Institutional VWAP Rejection Confirmed (VWAP: {rolling_vwap:.4f})", metrics
+                if not is_green or upper_wick_ratio >= 0.20:
+                    metrics["pattern"] = "VWAP_BOUNCE_SHORT"
+                    return True, f"Bearish Institutional VWAP Rejection Confirmed (VWAP: {rolling_vwap:.4f})", metrics
 
             # Institutional Setup 5: Squeeze Expansion
             if is_squeeze_expansion:
@@ -1058,8 +1062,8 @@ class EntryConfirmationEngine:
         ob_is_local = (bullish_ob_low is not None and 0 < float(bullish_ob_low) and (hl_price - float(bullish_ob_low)) <= (1.50 * atr_15m))
         structural_floor = min(hl_price, float(bullish_ob_low)) if ob_is_local else hl_price
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
-        vol_cushion = max(0.60 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0060)
-        min_sl_dist = max(1.00 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0120)
+        vol_cushion = max(0.65 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0070)
+        min_sl_dist = max(1.10 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0150)
         sl_price = format_dynamic_precision(min(structural_floor - vol_cushion, entry_price - min_sl_dist))
 
         # Invariant assertion: SL must be strictly below Entry by at least the noise floor
@@ -1212,8 +1216,8 @@ class EntryConfirmationEngine:
         ob_is_local = (bearish_ob_high is not None and float(bearish_ob_high) > 0 and (float(bearish_ob_high) - lh_price) <= (1.50 * atr_15m))
         structural_ceiling = max(lh_price, float(bearish_ob_high)) if ob_is_local else lh_price
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
-        vol_cushion = max(0.60 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0060)
-        min_sl_dist = max(1.00 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0120)
+        vol_cushion = max(0.65 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0070)
+        min_sl_dist = max(1.10 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0150)
         sl_price = format_dynamic_precision(max(structural_ceiling + vol_cushion, entry_price + min_sl_dist))
 
         # Invariant assertion: SL must be strictly above Entry by at least the noise floor

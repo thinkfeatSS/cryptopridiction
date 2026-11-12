@@ -5441,15 +5441,15 @@ class SignalAuditTracker:
                 is_fast_h = (h_tag in ['15M', '30M'] or 'SCALP' in sig_id.upper() or '30M' in sig_id.upper())
                 
                 horizon_max_sl_map = {
-                    '15M': 0.0120,
-                    '30M': 0.0160,
-                    '1H': 0.0240,
-                    '4H': 0.0380,
-                    '24H': 0.0650,
-                    '4D': 0.0800,
-                    '7D': 0.0950,
-                    '15D': 0.1200,
-                    '30D': 0.1500
+                    '15M': 0.0250,
+                    '30M': 0.0300,
+                    '1H': 0.0400,
+                    '4H': 0.0600,
+                    '24H': 0.0800,
+                    '4D': 0.0950,
+                    '7D': 0.1100,
+                    '15D': 0.1400,
+                    '30D': 0.1800
                 }
                 max_allowed_sl_dist = horizon_max_sl_map.get(h_tag, 0.0120 if is_fast_h else 0.0240)
                 if entry_p > 0 and not is_tp1_locked and not is_tier0_locked:
@@ -6266,15 +6266,15 @@ class ActiveInstitutionalSignalManager:
                 is_fast_early = (h_tag_early in ['15M', '30M'] or s.get('horizon_key') in ['scalp', 'horizon_30m'])
                 
                 horizon_max_sl_map = {
-                    '15M': 0.0120,
-                    '30M': 0.0160,
-                    '1H': 0.0240,
-                    '4H': 0.0380,
-                    '24H': 0.0650,
-                    '4D': 0.0800,
-                    '7D': 0.0950,
-                    '15D': 0.1200,
-                    '30D': 0.1500
+                    '15M': 0.0250,
+                    '30M': 0.0300,
+                    '1H': 0.0400,
+                    '4H': 0.0600,
+                    '24H': 0.0800,
+                    '4D': 0.0950,
+                    '7D': 0.1100,
+                    '15D': 0.1400,
+                    '30D': 0.1800
                 }
                 max_allowed_sl_dist = horizon_max_sl_map.get(h_tag_early, 0.0120 if is_fast_early else 0.0240)
                 if entry_p > 0 and not is_tp1_locked and not is_tier0_locked:

@@ -874,13 +874,13 @@ class SignalGenerationSystem:
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_low = min(structural_low, float(candle_metrics["swept_price"]))
 
-            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.20% and >= 0.85x ATR)
+            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.50% and >= 1.00x ATR)
             if has_structural_anchor:
-                base_min_sl = max(exec_entry_price * 0.0120, active_atr * 0.85) if horizon_label == "15M" else max(exec_entry_price * 0.0150, active_atr * 1.00)
-                vol_cushion = max(active_atr * 0.50, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0150, active_atr * 1.00) if horizon_label == "15M" else max(exec_entry_price * 0.0180, active_atr * 1.20)
+                vol_cushion = max(active_atr * 0.60, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
             else:
-                base_min_sl = max(exec_entry_price * 0.0140, active_atr * 1.00) if horizon_label == "15M" else (active_atr * 1.25)
-                vol_cushion = max(active_atr * 0.75, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0180, active_atr * 1.20) if horizon_label == "15M" else (active_atr * 1.50)
+                vol_cushion = max(active_atr * 0.85, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
 
             min_sl_dist = base_min_sl * tail_noise_mult
             structural_sl = structural_low - vol_cushion
@@ -889,18 +889,18 @@ class SignalGenerationSystem:
             cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - cand_sl_dist))
             actual_sl_dist = exec_entry_price - cand_sl
 
-            # Anchor primary TP1 dynamically based on market regime and structural anchor:
-            min_target_rr = 2.20 if has_structural_anchor else 1.80
+            # Anchor primary TP1 dynamically: Strictly enforce institutional 1:2.0 R:R
+            min_target_rr = 2.00
             if is_range_regime:
                 range_eq = (recent_high + recent_low) / 2.0
                 eq_dist = max(0.0, range_eq - exec_entry_price)
                 target_tp1_dist = max(actual_sl_dist * min_target_rr, min(active_atr * 1.30, max(active_atr * 0.85, eq_dist)))
-                target_tp2_dist = max(actual_sl_dist * (min_target_rr + 0.80), active_atr * 2.20, target_tp1_dist + active_atr * 0.6)
-                target_tp3_dist = max(actual_sl_dist * (min_target_rr + 1.80), active_atr * 3.20, target_tp2_dist + active_atr * 0.8)
+                target_tp2_dist = max(actual_sl_dist * 3.00, active_atr * 2.20, target_tp1_dist + active_atr * 0.6)
+                target_tp3_dist = max(actual_sl_dist * 4.50, active_atr * 3.20, target_tp2_dist + active_atr * 0.8)
             else:
-                target_tp1_dist = max(actual_sl_dist * (min_target_rr + 0.30), active_atr * 1.50)
-                target_tp2_dist = max(actual_sl_dist * (min_target_rr + 1.30), active_atr * 2.50, target_tp1_dist + active_atr * 0.8)
-                target_tp3_dist = max(actual_sl_dist * (min_target_rr + 2.50), active_atr * 4.00, target_tp2_dist + active_atr * 1.2)
+                target_tp1_dist = max(actual_sl_dist * min_target_rr, active_atr * 1.20)
+                target_tp2_dist = max(actual_sl_dist * 3.00, active_atr * 2.20, target_tp1_dist + active_atr * 0.8)
+                target_tp3_dist = max(actual_sl_dist * 4.50, active_atr * 3.50, target_tp2_dist + active_atr * 1.2)
 
             cand_tp1 = format_dynamic_precision(exec_entry_price + target_tp1_dist)
             cand_tp2 = format_dynamic_precision(exec_entry_price + target_tp2_dist)
@@ -939,13 +939,13 @@ class SignalGenerationSystem:
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_high = max(structural_high, float(candle_metrics["swept_price"]))
 
-            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.20% and >= 0.85x ATR)
+            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.50% and >= 1.00x ATR)
             if has_structural_anchor:
-                base_min_sl = max(exec_entry_price * 0.0120, active_atr * 0.85) if horizon_label == "15M" else max(exec_entry_price * 0.0150, active_atr * 1.00)
-                vol_cushion = max(active_atr * 0.50, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0150, active_atr * 1.00) if horizon_label == "15M" else max(exec_entry_price * 0.0180, active_atr * 1.20)
+                vol_cushion = max(active_atr * 0.60, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
             else:
-                base_min_sl = max(exec_entry_price * 0.0140, active_atr * 1.00) if horizon_label == "15M" else (active_atr * 1.25)
-                vol_cushion = max(active_atr * 0.75, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0180, active_atr * 1.20) if horizon_label == "15M" else (active_atr * 1.50)
+                vol_cushion = max(active_atr * 0.85, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
 
             min_sl_dist = base_min_sl * tail_noise_mult
             structural_sl = structural_high + vol_cushion
@@ -954,18 +954,18 @@ class SignalGenerationSystem:
             cand_sl = format_dynamic_precision(exec_entry_price + cand_sl_dist)
             actual_sl_dist = cand_sl - exec_entry_price
 
-            # Anchor primary TP1 dynamically based on market regime and structural anchor:
-            min_target_rr = 2.20 if has_structural_anchor else 1.80
+            # Anchor primary TP1 dynamically: Strictly enforce institutional 1:2.0 R:R
+            min_target_rr = 2.00
             if is_range_regime:
                 range_eq = (recent_high + recent_low) / 2.0
                 eq_dist = max(0.0, exec_entry_price - range_eq)
                 target_tp1_dist = max(actual_sl_dist * min_target_rr, min(active_atr * 1.30, max(active_atr * 0.85, eq_dist)))
-                target_tp2_dist = max(actual_sl_dist * (min_target_rr + 0.80), active_atr * 2.20, target_tp1_dist + active_atr * 0.6)
-                target_tp3_dist = max(actual_sl_dist * (min_target_rr + 1.80), active_atr * 3.20, target_tp2_dist + active_atr * 0.8)
+                target_tp2_dist = max(actual_sl_dist * 3.00, active_atr * 2.20, target_tp1_dist + active_atr * 0.6)
+                target_tp3_dist = max(actual_sl_dist * 4.50, active_atr * 3.20, target_tp2_dist + active_atr * 0.8)
             else:
-                target_tp1_dist = max(actual_sl_dist * (min_target_rr + 0.30), active_atr * 1.50)
-                target_tp2_dist = max(actual_sl_dist * (min_target_rr + 1.30), active_atr * 2.50, target_tp1_dist + active_atr * 0.8)
-                target_tp3_dist = max(actual_sl_dist * (min_target_rr + 2.50), active_atr * 4.00, target_tp2_dist + active_atr * 1.2)
+                target_tp1_dist = max(actual_sl_dist * min_target_rr, active_atr * 1.20)
+                target_tp2_dist = max(actual_sl_dist * 3.00, active_atr * 2.20, target_tp1_dist + active_atr * 0.8)
+                target_tp3_dist = max(actual_sl_dist * 4.50, active_atr * 3.50, target_tp2_dist + active_atr * 1.2)
 
             cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp1_dist))
             cand_tp2 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - target_tp2_dist))
@@ -2344,25 +2344,29 @@ class SignalGenerationSystem:
 
         # Macro Pullback Exhaustion Trap (Phase 4):
         # If 15M was attempting to buy counter-trend into HTF Bearish Resistance, but touches a verified Bearish OB or SMC Supply,
-        # invert direction to SHORT aligned with the macro trend!
+        # ONLY invert direction if the OB has an active, confirmed structural trigger (NOT a passive POI)!
         if is_htf_conflict_15m and cand_15m_dir == "LONG" and htf_4h_str == "BEARISH":
             has_bearish_exhaustion = bool(
-                (has_ob_15m and ob_setup_15m.get("direction") == "SHORT") or
+                (has_ob_15m and ob_setup_15m.get("direction") == "SHORT" and ob_setup_15m.get("structural_trigger_confirmed", False) and not ob_setup_15m.get("is_passive_poi", False)) or
                 (has_smc_15m and smc_dir_15m == "SHORT")
             )
             if has_bearish_exhaustion:
                 cand_15m_dir = "SHORT"
                 is_htf_conflict_15m = False
                 q_15m_qualified = True
+            else:
+                q_15m_qualified = False
         elif is_htf_conflict_15m and cand_15m_dir == "SHORT" and htf_4h_str == "BULLISH":
             has_bullish_exhaustion = bool(
-                (has_ob_15m and ob_setup_15m.get("direction") == "LONG") or
+                (has_ob_15m and ob_setup_15m.get("direction") == "LONG" and ob_setup_15m.get("structural_trigger_confirmed", False) and not ob_setup_15m.get("is_passive_poi", False)) or
                 (has_smc_15m and smc_dir_15m == "LONG")
             )
             if has_bullish_exhaustion:
                 cand_15m_dir = "LONG"
                 is_htf_conflict_15m = False
                 q_15m_qualified = True
+            else:
+                q_15m_qualified = False
 
         if triad_structure is not None:
             if getattr(triad_structure, "opposing_ob_veto", False):
