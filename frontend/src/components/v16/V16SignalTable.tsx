@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo, useEffect } from "react";
 import { V16SignalEnvelope } from "@/types/v16";
-import { formatPrice, formatPercent, formatProbability, getGradeBadge } from "@/lib/utils/v16";
+import { formatPrice, formatPercent, formatProbability, getGradeBadge, getSignalStatus as getSignalCategory } from "@/lib/utils/v16";
 import { Search, ArrowUpDown, ChevronRight, ChevronLeft, Layers, ShieldCheck, CheckCircle2, SlidersHorizontal, RefreshCw, TrendingUp } from "lucide-react";
 
 interface Props {
@@ -34,26 +34,6 @@ export default function V16SignalTable({
     });
     return Array.from(set);
   }, [signals]);
-
-  // Deterministic signal status classifier
-  const getSignalCategory = (item: V16SignalEnvelope): "ACTIVE" | "WON" | "LOST" | "BREAKEVEN" | "EXPIRED" => {
-    const st = (item.dynamic?.status || item.immutable?.status || "").toUpperCase();
-    const out = (item.dynamic?.outcome_label || "").toUpperCase();
-
-    if (st.includes("WON") || out.includes("WON") || out.includes("TP1") || out.includes("TP2") || out.includes("TP3") || st.includes("PROFIT")) {
-      return "WON";
-    }
-    if (st.includes("LOST") || out.includes("LOST") || st.includes("STOP") || out.includes("STOP")) {
-      return "LOST";
-    }
-    if (st.includes("BREAKEVEN") || st.includes("BE_") || st.includes("SOFT_BE") || out.includes("BREAKEVEN") || out.includes("BE") || st.includes("TIER0_BE")) {
-      return "BREAKEVEN";
-    }
-    if (st.includes("EXP") || out.includes("EXP") || st.includes("STAGNATION") || out.includes("STAGNATION") || st.includes("TIMEOUT")) {
-      return "EXPIRED";
-    }
-    return "ACTIVE";
-  };
 
   // Counts by status
   const counts = useMemo(() => {

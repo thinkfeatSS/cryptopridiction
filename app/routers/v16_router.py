@@ -23,7 +23,7 @@ from app.database import get_db
 from app.engine.scanner.filters import UniverseFilter
 from app.engine.config import is_meme_coin
 from app.quant_v16.validation import safe_float, safe_ratio
-from app.quant_v16.audit import calculate_trailing_stop_evolution
+from app.quant_v16.audit import calculate_trailing_stop_evolution, classify_signal_outcome
 from app.quant_v16.thesis import normalize_horizon, HORIZON_SORT_ORDER
 
 v16_router = APIRouter(prefix="/api/v16", tags=["Quant Edge V16 Intelligence"])
@@ -256,7 +256,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 modified = True
 
         # Always update dynamic state if CSV contains an evaluated outcome
-        is_csv_terminal = any(term in csv_st for term in ["WON", "LOST", "STOP", "BE", "EXP", "CANCEL"])
+        is_csv_terminal = classify_signal_outcome(csv_st, out, pnl) != "PENDING"
         # TP1 is locked ONLY if TP1 was reached, or explicitly recorded as is_tp1_locked
         is_tp1_locked = (
             str(r.get("is_tp1_locked", "")).lower() == "true"
@@ -997,8 +997,10 @@ def get_trade_theses() -> Dict[str, Any]:
 
         dyn = dyn_data.get(sig_id, {})
         st = str(dyn.get("status", immut.get("status", ""))).upper()
-        is_terminal = any(term in st for term in ["WON", "LOST", "STOP", "BE", "EXP", "CANCEL"])
-        is_sig_active = not is_terminal
+        out = str(dyn.get("outcome_label", "")).upper()
+        ret = dyn.get("realized_return_pct")
+        is_sig_active = classify_signal_outcome(st, out, ret) == "PENDING"
+        is_terminal = not is_sig_active
 
         if th_id not in theses:
             theses[th_id] = {
@@ -1159,8 +1161,10 @@ def get_v16_status() -> Dict[str, Any]:
     for sig_id, immut in immut_data.items():
         dyn = dyn_data.get(sig_id, {})
         st = str(dyn.get("status", immut.get("status", ""))).upper()
-        is_terminal = any(term in st for term in ["WON", "LOST", "STOP", "BE", "EXP", "CANCEL"])
-        is_sig_active = not is_terminal
+        out = str(dyn.get("outcome_label", "")).upper()
+        ret = dyn.get("realized_return_pct")
+        is_sig_active = classify_signal_outcome(st, out, ret) == "PENDING"
+        is_terminal = not is_sig_active
 
         sym = immut.get("symbol", "")
         sym_clean = sym.replace("/", "").replace(":USDT", "").upper()

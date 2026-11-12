@@ -6,6 +6,7 @@ import { Target, Layers, TrendingUp, Shield, Cpu, Activity, Zap } from "lucide-r
 
 interface Props {
   activeSignalsCount: number;
+  totalSignalsCount?: number;
   activeThesesCount: number;
   avgNetEv: number | null;
   avgPtp1: number | null;
@@ -15,6 +16,7 @@ interface Props {
 
 export default function V16KpiRow({
   activeSignalsCount,
+  totalSignalsCount,
   activeThesesCount,
   avgNetEv,
   avgPtp1,
@@ -37,7 +39,7 @@ export default function V16KpiRow({
           <span className="text-[10px] text-cyan-400 font-mono font-bold">V16 QUALIFIED</span>
         </div>
         <div className="text-[10px] text-slate-400 mt-1 flex items-center justify-between">
-          <span>Zero Invalid Rates</span>
+          <span>{totalSignalsCount !== undefined ? `${activeSignalsCount} Active / ${totalSignalsCount} Total` : "Zero Invalid Rates"}</span>
           <span className="text-emerald-400 font-mono">100% Guarded</span>
         </div>
       </div>
@@ -77,7 +79,7 @@ export default function V16KpiRow({
           <span className="text-[10px] text-emerald-400/90 font-mono font-bold">POST-COST</span>
         </div>
         <div className="text-[10px] text-slate-400 mt-1 flex items-center justify-between">
-          <span>Frictions Deducted</span>
+          <span>{activeSignalsCount > 0 ? "Active Setups EV" : "Frictions Deducted"}</span>
           <span className="text-emerald-400 font-mono">EV &gt; 0%</span>
         </div>
       </div>
@@ -98,7 +100,7 @@ export default function V16KpiRow({
           <span className="text-[10px] text-indigo-400 font-mono font-bold">CALIBRATED</span>
         </div>
         <div className="text-[10px] text-slate-400 mt-1 flex items-center justify-between">
-          <span>Platt / Isotonic</span>
+          <span>{activeSignalsCount > 0 ? "Active Calibrated" : "Platt / Isotonic"}</span>
           <span className="text-indigo-400 font-mono">ECE ≤ 0.12</span>
         </div>
       </div>

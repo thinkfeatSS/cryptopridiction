@@ -19,6 +19,7 @@ import {
   useV16MarketIntelligence,
 } from "@/hooks/useV16Data";
 import { V16SignalEnvelope } from "@/types/v16";
+import { getSignalStatus, isV16RuleQualified } from "@/lib/utils/v16";
 import { AlertCircle, RefreshCw, Sparkles, Activity, LayoutGrid, Table } from "lucide-react";
 
 export default function V16Dashboard() {
@@ -39,46 +40,41 @@ export default function V16Dashboard() {
   const regimeData = regimeQuery.data?.regime;
   const intelligenceData = intelligenceQuery.data?.intelligence;
 
-  // Active signals partition (strictly excludes terminal/evaluated signals)
-  const activeSignals = useMemo(() => {
-    return signals.filter((s) => {
-      const st = (s.dynamic?.status || s.immutable?.status || "").toUpperCase();
-      const out = (s.dynamic?.outcome_label || "").toUpperCase();
-      const isTerminal =
-        st.includes("WON") ||
-        st.includes("LOST") ||
-        st.includes("STOP") ||
-        st.includes("EXP") ||
-        st.includes("BREAKEVEN") ||
-        st.includes("BE_") ||
-        st.includes("CANCEL") ||
-        out.includes("WON") ||
-        out.includes("LOST") ||
-        out.includes("STOPPED") ||
-        out.includes("EXPIRED");
-      return !isTerminal;
-    });
+  // 1. Qualified signals pool (strictly V16 qualified)
+  const v16Signals = useMemo(() => {
+    return signals.filter(isV16RuleQualified);
   }, [signals]);
 
-  // Aggregate stats derived strictly from real signals
+  // 2. Active signals partition (strictly ACTIVE / PENDING per Rule 9)
+  const activeSignals = useMemo(() => {
+    return v16Signals.filter((s) => getSignalStatus(s) === "ACTIVE");
+  }, [v16Signals]);
+
+  // 3. Aggregate stats derived strictly from real signals
   const { avgNetEv, avgPtp1 } = useMemo(() => {
-    const targetPool = activeSignals.length > 0 ? activeSignals : signals;
+    const targetPool = activeSignals.length > 0 ? activeSignals : v16Signals;
     if (targetPool.length === 0) return { avgNetEv: null, avgPtp1: null };
 
-    const netEvs = targetPool.map((s) => s.immutable.expected_net_return);
-    const ptp1s = targetPool.map((s) => {
-      const p = s.immutable.p_tp1;
-      return p > 1.0 ? p / 100.0 : p;
-    });
+    const validEvs = targetPool
+      .map((s) => s.immutable?.expected_net_return)
+      .filter((v): v is number => v !== undefined && v !== null && !isNaN(v));
 
-    const sumEv = netEvs.reduce((a, b) => a + b, 0);
-    const sumP = ptp1s.reduce((a, b) => a + b, 0);
+    const validPtp1s = targetPool
+      .map((s) => {
+        const p = s.immutable?.p_tp1;
+        if (p === undefined || p === null || isNaN(p)) return null;
+        return p > 1.0 ? p / 100.0 : p;
+      })
+      .filter((v): v is number => v !== null);
+
+    const sumEv = validEvs.reduce((a, b) => a + b, 0);
+    const sumP = validPtp1s.reduce((a, b) => a + b, 0);
 
     return {
-      avgNetEv: sumEv / targetPool.length,
-      avgPtp1: sumP / targetPool.length,
+      avgNetEv: validEvs.length > 0 ? sumEv / validEvs.length : null,
+      avgPtp1: validPtp1s.length > 0 ? sumP / validPtp1s.length : null,
     };
-  }, [signals, activeSignals]);
+  }, [v16Signals, activeSignals]);
 
   // Aggregate health records
   const healthRecords = {
@@ -93,10 +89,20 @@ export default function V16Dashboard() {
     signalsQuery.data?.health?.status === 200 ||
     regimeQuery.data?.health?.status === 200;
 
+  // Active theses count: clustered 1 position per thesis cap (Section 25)
   const activeThesesCount = useMemo(() => {
-    if (theses.length === 0) return activeSignals.length;
+    if (activeSignals.length > 0) {
+      const activeThesisIds = new Set<string>();
+      activeSignals.forEach((s) => {
+        const sym = (s.immutable?.symbol || "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+        const dir = (s.immutable?.direction || "LONG").toUpperCase();
+        const thId = s.immutable?.trade_thesis_id || `THESIS-${sym}-${dir}`;
+        activeThesisIds.add(thId);
+      });
+      return activeThesisIds.size;
+    }
     const activeTheses = theses.filter((t) => t.is_active || (t.active_signals_count && t.active_signals_count > 0));
-    return activeTheses.length > 0 ? activeTheses.length : (activeSignals.length > 0 ? Math.min(activeSignals.length, theses.length) : 0);
+    return activeTheses.length;
   }, [theses, activeSignals]);
 
   return (
@@ -117,6 +123,7 @@ export default function V16Dashboard() {
       {/* 2. Top KPI Metric Row */}
       <V16KpiRow
         activeSignalsCount={activeSignals.length}
+        totalSignalsCount={v16Signals.length}
         activeThesesCount={activeThesesCount}
         avgNetEv={avgNetEv}
         avgPtp1={avgPtp1}

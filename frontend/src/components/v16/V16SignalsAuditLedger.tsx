@@ -3,7 +3,7 @@
 import React, { useState, useMemo } from "react";
 import { useV16Signals } from "@/hooks/useV16Data";
 import { V16SignalEnvelope } from "@/types/v16";
-import { formatPrice, formatPercent, formatProbability, getGradeBadge, getRegimeTheme } from "@/lib/utils/v16";
+import { formatPrice, formatPercent, formatProbability, getGradeBadge, getRegimeTheme, getSignalStatus, isV16RuleQualified } from "@/lib/utils/v16";
 import V16SignalCard from "@/components/v16/V16SignalCard";
 import V16SignalDetailModal from "@/components/v16/V16SignalDetailModal";
 import {
@@ -47,115 +47,10 @@ export default function V16SignalsAuditLedger() {
   const [page, setPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(25);
 
-  // STRICT V16 FILTER: Must strictly be V16 signals (has valid V16 immutable structure, model_version v16.0 or expected_net_return defined)
+  // STRICT V16 FILTER: Must strictly be V16 signals (has valid V16 immutable structure and passes V16 rules)
   const v16Signals = useMemo(() => {
-    return allSignals.filter((s) => {
-      const imm = s.immutable;
-      if (!imm) return false;
-      const isV16 =
-        imm.model_version?.toLowerCase().includes("v16") ||
-        imm.strategy_version?.toLowerCase().includes("v16") ||
-        (imm.expected_net_return !== undefined && imm.p_tp1 !== undefined);
-      return isV16;
-    });
+    return allSignals.filter(isV16RuleQualified);
   }, [allSignals]);
-
-  // Deterministic status classifier strictly aligned with app/quant_v16/audit.py
-  const getSignalStatus = (item: V16SignalEnvelope): "ACTIVE" | "WON" | "LOST" | "BREAKEVEN" | "EXPIRED" => {
-    const st = (item.dynamic?.status || item.immutable?.status || "").trim().toUpperCase();
-    const out = (item.dynamic?.outcome_label || "").trim().toUpperCase();
-
-    // 1. Pending / Active trades (Strict Gate: must be evaluated first per Rule 9)
-    const pendingStatuses = [
-      "PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "RESTING_LIMIT",
-      "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"
-    ];
-    if (
-      pendingStatuses.includes(st) ||
-      st === "ACTIVE" ||
-      out.includes("ACTIVE") ||
-      out.includes("PENDING") ||
-      out.includes("RUNNING") ||
-      out.includes("AWAIT") ||
-      out.includes("RESTING")
-    ) {
-      return "ACTIVE";
-    }
-
-    // 2. Breakeven outcomes
-    const beStatuses = [
-      "WON_TIER0_BE", "WON_TP1_BE", "EXPIRED_BREAKEVEN",
-      "BREAKEVEN_EXP", "TIER0_BE_HIT", "BREAKEVEN", "BREAKEVEN_GUARD",
-      "STOP_LOSS_BREAKEVEN", "TIER0_GUARD"
-    ];
-    if (
-      beStatuses.includes(st) ||
-      st.includes("BREAKEVEN") ||
-      st.includes("BE_") ||
-      st.includes("TIER0_BE") ||
-      st.includes("SOFT_BE") ||
-      out.includes("BREAKEVEN") ||
-      out.includes("TIER-0") ||
-      out.includes("BE RUNNER") ||
-      out.includes("(BE")
-    ) {
-      return "BREAKEVEN";
-    }
-
-    // 3. Won outcomes
-    const wonStatuses = [
-      "WON_TP3", "WON_TP2_TRAIL", "WON_TP2", "WON_TP1",
-      "WON_TP2_EXP", "WON_TP1_EXP", "WON_EXP_PROFIT", "WON_PROFIT_EXPIRED", "WON",
-      "WON_PROFIT_RATCHET"
-    ];
-    if (
-      wonStatuses.includes(st) ||
-      st.includes("WON") ||
-      (out.includes("WON") && !out.includes("LOST")) ||
-      out.includes("TP HIT") ||
-      out.includes("TP1 HIT") ||
-      out.includes("TP2 HIT") ||
-      out.includes("TP3 HIT") ||
-      st.includes("PROFIT_EXPIRED") ||
-      out.includes("PROFIT")
-    ) {
-      return "WON";
-    }
-
-    // 4. Lost outcomes
-    const lostStatuses = ["LOST_SL", "LOST_EXP", "LOST_EXPIRED", "LOST"];
-    if (
-      lostStatuses.includes(st) ||
-      st.includes("LOST") ||
-      (out.includes("LOST") && !out.includes("WON")) ||
-      st.includes("STOP_LOSS") ||
-      out.includes("SL HIT") ||
-      out.includes("STOPPED")
-    ) {
-      return "LOST";
-    }
-
-    // 5. Expired outcomes
-    if (
-      st.includes("EXP") ||
-      out.includes("EXPIRED") ||
-      out.includes("MISSED") ||
-      out.includes("TIMEOUT") ||
-      st.includes("STAGNATION")
-    ) {
-      return "EXPIRED";
-    }
-
-    // Fallback: if realized return is recorded and non-zero
-    const ret = item.dynamic?.realized_return_pct;
-    if (ret !== undefined && ret !== null && !isNaN(ret)) {
-      if (ret > 0.05) return "WON";
-      if (ret < -0.05) return "LOST";
-      return "BREAKEVEN";
-    }
-
-    return "ACTIVE";
-  };
 
   // Status Counts
   const counts = useMemo(() => {
