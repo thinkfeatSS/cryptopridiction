@@ -257,6 +257,10 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
 
         # Always update dynamic state if CSV contains an evaluated outcome
         is_csv_terminal = classify_signal_outcome(csv_st, out, pnl) != "PENDING"
+        # Compute dynamic MFE/MAE from CSV extremes when available
+        pk_p = safe_float(r.get("peak_price_seen"), 0.0)
+        tr_p = safe_float(r.get("trough_price_seen"), 0.0)
+
         # TP1 is locked ONLY if TP1 was reached, or explicitly recorded as is_tp1_locked
         is_tp1_locked = (
             str(r.get("is_tp1_locked", "")).lower() == "true"
@@ -280,9 +284,6 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
             or str(r.get("is_breakeven_locked", "")).lower() == "true"
         )
 
-        # Compute dynamic MFE/MAE from CSV extremes when available
-        pk_p = safe_float(r.get("peak_price_seen"), 0.0)
-        tr_p = safe_float(r.get("trough_price_seen"), 0.0)
         mfe_val = max(0.0, safe_float(r.get("max_potential_gain_pct"), 0.0))
         mae_val = 0.0
         if entry > 0.0:
