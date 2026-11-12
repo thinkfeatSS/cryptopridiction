@@ -82,6 +82,10 @@ def trim_process_memory():
     except Exception:
         pass
 
+# Signal Expiry Policy: when False (default), signals and positions never expire by time/horizon/TTL
+# and strictly wait until Take Profit (TP) or Stop Loss (SL) is hit.
+ENABLE_SIGNAL_EXPIRY: bool = os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes")
+
 def _safe_float(v, default=0.0):
     if v is None:
         return default
@@ -4097,12 +4101,12 @@ class PaperTradingLedger:
             # 6. Check SL hit (evaluated strictly against real-time price to match exchange stop orders)
             is_hit_sl = (curr_p <= sl_p) if is_long else (curr_p >= sl_p)
 
-            # 7. Check Expiry
-            is_expired = dur_secs >= desk_cfg["max_hold_seconds"]
+            # 7. Check Expiry (Disabled when ENABLE_SIGNAL_EXPIRY is False)
+            is_expired = ENABLE_SIGNAL_EXPIRY and (dur_secs >= desk_cfg["max_hold_seconds"])
 
             # 8. Early Stagnation Scratch Exit: If >= 60% of duration elapsed with zero momentum (MFE < 0.25%) and underwater, scratch early
             curr_unreal_ret = ((curr_p - entry_p)/entry_p * 100.0) if is_long else ((entry_p - curr_p)/entry_p * 100.0)
-            is_stagnant = (dur_secs >= (desk_cfg["max_hold_seconds"] * 0.60)) and not pos.get("is_tp1_locked") and not pos.get("is_tier0_locked") and (mfe < 0.25) and (curr_unreal_ret <= -0.25)
+            is_stagnant = ENABLE_SIGNAL_EXPIRY and (dur_secs >= (desk_cfg["max_hold_seconds"] * 0.60)) and not pos.get("is_tp1_locked") and not pos.get("is_tier0_locked") and (mfe < 0.25) and (curr_unreal_ret <= -0.25)
 
             is_final_exit = is_hit_sl or is_hit_tp3 or is_expired or is_stagnant
 
@@ -5577,56 +5581,57 @@ class SignalAuditTracker:
                     updated = True
 
                 is_expired = False
-                pred_close_str = str(r.get('predicted_close_utc', '')).strip()
-                # Resilient fallback: parse predicted close from predicted_window (e.g. "... ➔ 2026-09-09 19:15 UTC (15 Mins)")
-                if not pred_close_str or pred_close_str == 'N/A':
-                    pred_win = str(r.get('predicted_window', ''))
-                    if '➔' in pred_win:
-                        after_arrow = pred_win.split('➔')[-1].strip()
-                        if '(' in after_arrow:
-                            pred_close_str = after_arrow.split('(')[0].strip()
-                        else:
-                            pred_close_str = after_arrow.strip()
+                if ENABLE_SIGNAL_EXPIRY:
+                    pred_close_str = str(r.get('predicted_close_utc', '')).strip()
+                    # Resilient fallback: parse predicted close from predicted_window (e.g. "... ➔ 2026-09-09 19:15 UTC (15 Mins)")
+                    if not pred_close_str or pred_close_str == 'N/A':
+                        pred_win = str(r.get('predicted_window', ''))
+                        if '➔' in pred_win:
+                            after_arrow = pred_win.split('➔')[-1].strip()
+                            if '(' in after_arrow:
+                                pred_close_str = after_arrow.split('(')[0].strip()
+                            else:
+                                pred_close_str = after_arrow.strip()
 
-                try:
-                    if pred_close_str and pred_close_str != 'N/A':
-                        clean_dt_str = pred_close_str.replace(' UTC', '').strip()
-                        close_dt = datetime.fromisoformat(clean_dt_str) if 'T' in clean_dt_str else datetime.strptime(clean_dt_str, '%Y-%m-%d %H:%M:%S' if len(clean_dt_str) > 16 else '%Y-%m-%d %H:%M')
-                        if close_dt.tzinfo is None:
-                            close_dt = close_dt.replace(tzinfo=timezone.utc)
-                        if now_utc >= close_dt:
-                            is_expired = True
-                            if r.get('predicted_close_utc') in ('', 'N/A', None):
-                                r['predicted_close_utc'] = pred_close_str
-                except Exception:
-                    pass
-
-                # Resilient Zombie Expiry Guard: If still not expired, evaluate against created timestamp + duration
-                if not is_expired:
                     try:
-                        sig_id = str(r.get('signal_id', ''))
-                        date_u = str(r.get('date_utc', '')).strip()
-                        time_u = str(r.get('time_utc', '')).replace(' UTC', '').strip()
-                        h_name = str(r.get('horizon', '15M')).upper()
-                        h_tag = resolve_horizon_tag(h_name)
-                        dur_sec = HORIZON_EXPIRY_SECONDS.get(h_tag, 3600)
-                        created_dt = None
-                        if date_u and time_u:
-                            created_dt = datetime.strptime(f"{date_u} {time_u}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                        elif 'SIG_' in sig_id:
-                            parts = sig_id.split('_')
-                            if len(parts) >= 3 and len(parts[1]) == 8 and len(parts[2]) == 4:
-                                dt_str = f"{parts[1]}_{parts[2]}"
-                                created_dt = datetime.strptime(dt_str, "%Y%m%d_%H%M").replace(tzinfo=timezone.utc)
-                        if created_dt and (now_utc - created_dt).total_seconds() >= dur_sec:
-                            is_expired = True
-                            r['predicted_close_utc'] = (created_dt + timedelta(seconds=dur_sec)).strftime('%Y-%m-%d %H:%M:%S UTC')
+                        if pred_close_str and pred_close_str != 'N/A':
+                            clean_dt_str = pred_close_str.replace(' UTC', '').strip()
+                            close_dt = datetime.fromisoformat(clean_dt_str) if 'T' in clean_dt_str else datetime.strptime(clean_dt_str, '%Y-%m-%d %H:%M:%S' if len(clean_dt_str) > 16 else '%Y-%m-%d %H:%M')
+                            if close_dt.tzinfo is None:
+                                close_dt = close_dt.replace(tzinfo=timezone.utc)
+                            if now_utc >= close_dt:
+                                is_expired = True
+                                if r.get('predicted_close_utc') in ('', 'N/A', None):
+                                    r['predicted_close_utc'] = pred_close_str
                     except Exception:
                         pass
 
+                    # Resilient Zombie Expiry Guard: If still not expired, evaluate against created timestamp + duration
+                    if not is_expired:
+                        try:
+                            sig_id = str(r.get('signal_id', ''))
+                            date_u = str(r.get('date_utc', '')).strip()
+                            time_u = str(r.get('time_utc', '')).replace(' UTC', '').strip()
+                            h_name = str(r.get('horizon', '15M')).upper()
+                            h_tag = resolve_horizon_tag(h_name)
+                            dur_sec = HORIZON_EXPIRY_SECONDS.get(h_tag, 3600)
+                            created_dt = None
+                            if date_u and time_u:
+                                created_dt = datetime.strptime(f"{date_u} {time_u}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                            elif 'SIG_' in sig_id:
+                                parts = sig_id.split('_')
+                                if len(parts) >= 3 and len(parts[1]) == 8 and len(parts[2]) == 4:
+                                    dt_str = f"{parts[1]}_{parts[2]}"
+                                    created_dt = datetime.strptime(dt_str, "%Y%m%d_%H%M").replace(tzinfo=timezone.utc)
+                            if created_dt and (now_utc - created_dt).total_seconds() >= dur_sec:
+                                is_expired = True
+                                r['predicted_close_utc'] = (created_dt + timedelta(seconds=dur_sec)).strftime('%Y-%m-%d %H:%M:%S UTC')
+                        except Exception:
+                            pass
+
                 # Calibrated Stagnation Cut: If >= 60% of duration has elapsed with zero forward momentum (max_gain < 0.20%)
                 # and negative return (ret_now <= -0.30%), scratch early before bleeding into full stop-out or delayed expiry!
-                if not is_hit_tp1 and not is_tier0_locked and not is_tp1_locked and not is_hit_sl and not is_expired:
+                if ENABLE_SIGNAL_EXPIRY and not is_hit_tp1 and not is_tier0_locked and not is_tp1_locked and not is_hit_sl and not is_expired:
                     if created_dt and (now_utc - created_dt).total_seconds() >= (0.60 * dur_sec):
                         ret_now = ((curr_p - entry_p) / safe_denom) * 100.0 if is_long else ((entry_p - curr_p) / safe_denom) * 100.0
                         if max_gain < 0.20 and ret_now <= -0.30:
@@ -6344,51 +6349,52 @@ class ActiveInstitutionalSignalManager:
                 # Evaluated strictly against live real-time price to match exchange stop-market order execution
                 is_hit_sl = (curr_p <= sl_p) if is_long else (curr_p >= sl_p)
 
-                # Check expiration
+                # Check expiration (Disabled when ENABLE_SIGNAL_EXPIRY is False)
                 is_expired = False
-                pred_close_str = str(s.get('predicted_close_utc', '')).strip()
-                if pred_close_str and pred_close_str != 'N/A':
-                    try:
-                        clean_dt_str = pred_close_str.replace(' UTC', '').strip()
-                        close_dt = datetime.fromisoformat(clean_dt_str) if 'T' in clean_dt_str else datetime.strptime(clean_dt_str, '%Y-%m-%d %H:%M:%S' if len(clean_dt_str) > 16 else '%Y-%m-%d %H:%M')
-                        if close_dt.tzinfo is None:
-                            close_dt = close_dt.replace(tzinfo=timezone.utc)
-                        if now_utc >= close_dt:
-                            is_expired = True
-                    except Exception:
-                        pass
+                if ENABLE_SIGNAL_EXPIRY:
+                    pred_close_str = str(s.get('predicted_close_utc', '')).strip()
+                    if pred_close_str and pred_close_str != 'N/A':
+                        try:
+                            clean_dt_str = pred_close_str.replace(' UTC', '').strip()
+                            close_dt = datetime.fromisoformat(clean_dt_str) if 'T' in clean_dt_str else datetime.strptime(clean_dt_str, '%Y-%m-%d %H:%M:%S' if len(clean_dt_str) > 16 else '%Y-%m-%d %H:%M')
+                            if close_dt.tzinfo is None:
+                                close_dt = close_dt.replace(tzinfo=timezone.utc)
+                            if now_utc >= close_dt:
+                                is_expired = True
+                        except Exception:
+                            pass
 
-                if not is_expired:
-                    created_ts = s.get('created_ts')
+                    if not is_expired:
+                        created_ts = s.get('created_ts')
+                        h_tag = s.get('horizon_tag') or resolve_horizon_tag(s.get('horizon_key', 'scalp'))
+                        dur_sec = HORIZON_EXPIRY_SECONDS.get(h_tag, 3600)
+                        if created_ts and (now_ts - float(created_ts)) >= dur_sec:
+                            is_expired = True
+
+                    # Auto-Extension on in-profit trades (Let winners run without closing prematurely)
                     h_tag = s.get('horizon_tag') or resolve_horizon_tag(s.get('horizon_key', 'scalp'))
                     dur_sec = HORIZON_EXPIRY_SECONDS.get(h_tag, 3600)
-                    if created_ts and (now_ts - float(created_ts)) >= dur_sec:
-                        is_expired = True
-
-                # Auto-Extension on in-profit trades (Let winners run without closing prematurely)
-                h_tag = s.get('horizon_tag') or resolve_horizon_tag(s.get('horizon_key', 'scalp'))
-                dur_sec = HORIZON_EXPIRY_SECONDS.get(h_tag, 3600)
-                can_auto_extend = (
-                    pnl_pct >= 0.35
-                    and not is_hit_sl
-                    and s.get('auto_extended_count', 0) < 1
-                )
-                if is_expired and can_auto_extend:
-                    s['auto_extended_count'] = s.get('auto_extended_count', 0) + 1
-                    ext_close = now_utc + timedelta(seconds=dur_sec)
-                    s['predicted_close_utc'] = ext_close.strftime('%Y-%m-%d %H:%M:%S UTC')
-                    # Protect profits: lock trailing stop at breakeven / profit floor (+0.20%)
-                    lock_be_p = (entry_p * 1.002) if is_long else (entry_p * 0.998)
-                    s['sl_price'] = format_precision_price(max(sl_p, lock_be_p) if is_long else min(sl_p, lock_be_p))
-                    s['status'] = "TP1_LOCKED_BREAKEVEN" if is_tp1_locked else "TIER0_PROTECTED_BREAKEVEN"
-                    s['is_tier0_locked'] = True
-                    s['outcome_label'] = f"🚀 EXTENDED (+{pnl_pct:.2f}% RUNNER)"
-                    is_expired = False
-                    updated = True
+                    can_auto_extend = (
+                        pnl_pct >= 0.35
+                        and not is_hit_sl
+                        and s.get('auto_extended_count', 0) < 1
+                    )
+                    if is_expired and can_auto_extend:
+                        s['auto_extended_count'] = s.get('auto_extended_count', 0) + 1
+                        ext_close = now_utc + timedelta(seconds=dur_sec)
+                        s['predicted_close_utc'] = ext_close.strftime('%Y-%m-%d %H:%M:%S UTC')
+                        # Protect profits: lock trailing stop at breakeven / profit floor (+0.20%)
+                        lock_be_p = (entry_p * 1.002) if is_long else (entry_p * 0.998)
+                        s['sl_price'] = format_precision_price(max(sl_p, lock_be_p) if is_long else min(sl_p, lock_be_p))
+                        s['status'] = "TP1_LOCKED_BREAKEVEN" if is_tp1_locked else "TIER0_PROTECTED_BREAKEVEN"
+                        s['is_tier0_locked'] = True
+                        s['outcome_label'] = f"🚀 EXTENDED (+{pnl_pct:.2f}% RUNNER)"
+                        is_expired = False
+                        updated = True
 
                 # Calibrated Stagnation Cut: Only cut near duration end (> 85% elapsed) if severely underwater
                 # (> 75% of max allowed SL) with zero upward momentum, protecting capital without premature whipsaws.
-                if not is_hit_tp1 and not is_tier0_locked and not is_tp1_locked and not is_hit_sl and not is_expired:
+                if ENABLE_SIGNAL_EXPIRY and not is_hit_tp1 and not is_tier0_locked and not is_tp1_locked and not is_hit_sl and not is_expired:
                     created_ts = s.get('created_ts')
                     if created_ts and dur_sec and (now_ts - float(created_ts)) >= (0.85 * dur_sec):
                         max_g = ((s.get('peak_price', curr_p) - entry_p)/safe_denom*100.0) if is_long else ((entry_p - s.get('trough_price', curr_p))/safe_denom*100.0)

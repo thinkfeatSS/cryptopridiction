@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     EXPORT_DIR: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "export_app_data"))
     WEBSOCKET_FEED_ENABLED: bool = os.getenv("WEBSOCKET_FEED_ENABLED", "true").lower() in ("true", "1", "yes")
+    # Signal Expiry Policy: when False (default), signals and positions never expire by time/horizon/TTL
+    # and strictly wait until Take Profit (TP) or Stop Loss (SL) is hit.
+    ENABLE_SIGNAL_EXPIRY: bool = os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes")
 
     # WhatsApp Automation & Broadcast Settings
     WHATSAPP_ENABLED: bool = os.getenv("WHATSAPP_ENABLED", "false").lower() in ("true", "1", "yes")

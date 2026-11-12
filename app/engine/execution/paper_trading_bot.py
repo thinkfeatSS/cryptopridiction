@@ -11,6 +11,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger("paper_trading_bot")
 
+from app.config import settings
 from app.engine.config import EXPORT_DIR, is_meme_coin
 from app.engine.scanner.filters import UniverseFilter
 from app.quant_v16.entry_confirmation import format_dynamic_precision, EntryConfirmationEngine
@@ -40,6 +41,7 @@ class PaperTradingBot:
         else:
             self.ledger_file = os.path.join(EXPORT_DIR, "paper_trading_ledger.json")
         self.taker_fee_rate = 0.000405 # 0.045% with 10% BNB discount
+        self.enable_signal_expiry: bool = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
         self.blackout_ceiling_ms: float = float(os.getenv("BLACKOUT_CEILING_MS", "8000.0"))
         self.MAX_SAFEGUARD_VOID_HOLD_SECONDS: float = 1800.0  # 30m maximum safeguard hold before auto-liquidation
         self.ABANDONED_MICRO_CAP_VOID_TIMEOUT: float = 60.0  # 60s fast auto-liquidation on abandoned/depleted micro-caps
@@ -1440,12 +1442,13 @@ class PaperTradingBot:
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
 
-                    # D. Resting Order TTL Expiration (45m for 15M, 3h for 1H, 12h for 24H)
-                    limit_ttl_secs = 2700 if "15M" in norm_h else (43200 if any(x in norm_h for x in ["24H", "1D", "SWING", "MACRO"]) else 10800)
-                    if elapsed_secs >= limit_ttl_secs:
-                        canc_rec = self._create_cancellation_record(pos, "CANCELLED_RESTING_TTL_EXPIRED", f"Resting limit expired after {dur_str}")
-                        self._archive_cancelled_order(canc_rec, pos.get("desk"))
-                        continue
+                    # D. Resting Order TTL Expiration (Disabled when ENABLE_SIGNAL_EXPIRY is False)
+                    if getattr(self, "enable_signal_expiry", False):
+                        limit_ttl_secs = 2700 if "15M" in norm_h else (43200 if any(x in norm_h for x in ["24H", "1D", "SWING", "MACRO"]) else 10800)
+                        if elapsed_secs >= limit_ttl_secs:
+                            canc_rec = self._create_cancellation_record(pos, "CANCELLED_RESTING_TTL_EXPIRED", f"Resting limit expired after {dur_str}")
+                            self._archive_cancelled_order(canc_rec, pos.get("desk"))
+                            continue
 
                     # E. Multi-Touch Zone Invalidation (Support/Resistance Depletion)
                     # When price enters the optimal entry zone without filling the limit order,
@@ -1732,7 +1735,9 @@ class PaperTradingBot:
                 is_be_or_t0_locked = bool(pos.get("is_breakeven_locked") or pos.get("status") in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"])
                 is_profitable = (gain_pct >= 0.40) or (is_be_or_t0_locked and gain_pct >= 0.15)
 
-                if elapsed_secs < base_hold_secs:
+                if not getattr(self, "enable_signal_expiry", False):
+                    hit_expiry = False
+                elif elapsed_secs < base_hold_secs:
                     hit_expiry = False
                 else:
                     # Elapsed time has exceeded canonical base hold time
@@ -1776,7 +1781,7 @@ class PaperTradingBot:
                 # Feature 5.2: Dynamic Time-Decay TP Compaction (Section 20 & Phase 5)
                 # -------------------------------------------------------------
                 compaction_base = (base_hold_secs * 2.5) if pos.get("is_trailing_expiry_active") else base_hold_secs
-                if elapsed_secs >= (0.80 * compaction_base) and not pos.get("tp1_hit") and tp1_p > 0:
+                if getattr(self, "enable_signal_expiry", False) and elapsed_secs >= (0.80 * compaction_base) and not pos.get("tp1_hit") and tp1_p > 0:
                     final_window = max(1.0, 0.20 * compaction_base)
                     elapsed_in_window = min(final_window, max(0.0, elapsed_secs - (0.80 * compaction_base)))
                     decay_lambda = math.exp(-2.5 * (elapsed_in_window / final_window))
@@ -2435,7 +2440,7 @@ class PaperTradingBot:
 
                     s_hit_tp1 = (curr_p >= s_tp1) if s_dir == "LONG" else (curr_p <= s_tp1)
                     s_hit_sl = (curr_p <= spos["sl_price"]) if s_dir == "LONG" else (curr_p >= spos["sl_price"])
-                    s_hit_expiry = s_elapsed >= s_eff_hold
+                    s_hit_expiry = getattr(self, "enable_signal_expiry", False) and (s_elapsed >= s_eff_hold)
 
                     if s_hit_tp1 or s_hit_sl or s_hit_expiry:
                         is_win = s_hit_tp1 or (s_hit_expiry and s_gain > 0.05)

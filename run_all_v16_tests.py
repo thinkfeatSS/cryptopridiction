@@ -46,6 +46,7 @@ def run_suite():
         "tests.test_candlestick_structure_and_order_blocks",
         "tests.test_smc_market_structure_15m",
         "tests.test_candle_pagination_and_cache",
+        "tests.test_v16_no_signal_expiry",
     ]
 
     print("=" * 80)

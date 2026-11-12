@@ -10,8 +10,10 @@ class TestTrailingExpiryAndRunnerProtection(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         self.ledger_file = os.path.join(self.tmp_dir, "test_paper_trading_ledger.json")
+        os.environ["ENABLE_SIGNAL_EXPIRY"] = "true"
 
     def tearDown(self):
+        os.environ.pop("ENABLE_SIGNAL_EXPIRY", None)
         import shutil
         if os.path.exists(self.tmp_dir):
             shutil.rmtree(self.tmp_dir, ignore_errors=True)

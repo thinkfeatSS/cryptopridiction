@@ -1121,71 +1121,73 @@ class SignalService:
                 low_p = s.trough_price_seen
 
                 is_expired = False
-                pred_close = str(s.predicted_close_utc or "").strip()
-                if not pred_close or pred_close == "N/A":
-                    p_win = str(s.predicted_window or "")
-                    if "➔" in p_win:
-                        after_arrow = p_win.split("➔")[-1].strip()
-                        pred_close = after_arrow.split("(")[0].strip() if "(" in after_arrow else after_arrow.strip()
+                enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
+                if enable_expiry:
+                    pred_close = str(s.predicted_close_utc or "").strip()
+                    if not pred_close or pred_close == "N/A":
+                        p_win = str(s.predicted_window or "")
+                        if "➔" in p_win:
+                            after_arrow = p_win.split("➔")[-1].strip()
+                            pred_close = after_arrow.split("(")[0].strip() if "(" in after_arrow else after_arrow.strip()
 
-                if pred_close and pred_close != "N/A":
+                    if pred_close and pred_close != "N/A":
+                        try:
+                            clean_str = pred_close.replace(" UTC", "").strip()
+                            close_dt = datetime.fromisoformat(clean_str) if "T" in clean_str else datetime.strptime(clean_str, "%Y-%m-%d %H:%M")
+                            if close_dt.tzinfo is None:
+                                close_dt = close_dt.replace(tzinfo=timezone.utc)
+                            if now_utc >= close_dt:
+                                is_expired = True
+                                s.predicted_close_utc = pred_close
+                        except Exception:
+                            pass
+
+                    # Dynamic Horizon TTL with Anti-Expiry Consolidation Grace
+                    horizon_max_secs = {
+                        "15M": 7200,      # 2 hours (8 candles)
+                        "30M": 10800,     # 3 hours (6 candles)
+                        "1H": 21600,      # 6 hours (6 candles)
+                        "4H": 43200,      # 12 hours (3 candles)
+                        "12H": 86400,     # 24 hours (2 candles)
+                        "24H": 172800,    # 48 hours (2 candles)
+                    }
+                    max_sec = horizon_max_secs.get(norm_hz, 21600)
+                    sig_age_sec = None
                     try:
-                        clean_str = pred_close.replace(" UTC", "").strip()
-                        close_dt = datetime.fromisoformat(clean_str) if "T" in clean_str else datetime.strptime(clean_str, "%Y-%m-%d %H:%M")
-                        if close_dt.tzinfo is None:
-                            close_dt = close_dt.replace(tzinfo=timezone.utc)
-                        if now_utc >= close_dt:
-                            is_expired = True
-                            s.predicted_close_utc = pred_close
+                        if getattr(s, "created_at", None):
+                            c_dt = s.created_at
+                            if c_dt.tzinfo is None:
+                                c_dt = c_dt.replace(tzinfo=timezone.utc)
+                            sig_age_sec = (now_utc - c_dt).total_seconds()
+                        elif s.date_utc and s.time_utc:
+                            t_clean = str(s.time_utc).replace(" UTC", "").strip()
+                            c_dt = datetime.strptime(f"{s.date_utc} {t_clean}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                            sig_age_sec = (now_utc - c_dt).total_seconds()
                     except Exception:
                         pass
 
-                # Dynamic Horizon TTL with Anti-Expiry Consolidation Grace
-                horizon_max_secs = {
-                    "15M": 7200,      # 2 hours (8 candles)
-                    "30M": 10800,     # 3 hours (6 candles)
-                    "1H": 21600,      # 6 hours (6 candles)
-                    "4H": 43200,      # 12 hours (3 candles)
-                    "12H": 86400,     # 24 hours (2 candles)
-                    "24H": 172800,    # 48 hours (2 candles)
-                }
-                max_sec = horizon_max_secs.get(norm_hz, 21600)
-                sig_age_sec = None
-                try:
-                    if getattr(s, "created_at", None):
-                        c_dt = s.created_at
-                        if c_dt.tzinfo is None:
-                            c_dt = c_dt.replace(tzinfo=timezone.utc)
-                        sig_age_sec = (now_utc - c_dt).total_seconds()
-                    elif s.date_utc and s.time_utc:
-                        t_clean = str(s.time_utc).replace(" UTC", "").strip()
-                        c_dt = datetime.strptime(f"{s.date_utc} {t_clean}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                        sig_age_sec = (now_utc - c_dt).total_seconds()
-                except Exception:
-                    pass
+                    # Dynamic Trailing Expiry & Runner Protection Engine:
+                    is_runner_sig = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
+                    ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
+                    is_prof_sig = (direction == "LONG" and curr_p >= entry_p * 1.004) or (direction == "SHORT" and curr_p <= entry_p * 0.996) or (s.status == "TIER0_PROTECTED_BREAKEVEN" and ret_now >= 0.15)
 
-                # Dynamic Trailing Expiry & Runner Protection Engine:
-                is_runner_sig = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
-                ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
-                is_prof_sig = (direction == "LONG" and curr_p >= entry_p * 1.004) or (direction == "SHORT" and curr_p <= entry_p * 0.996) or (s.status == "TIER0_PROTECTED_BREAKEVEN" and ret_now >= 0.15)
+                    if is_runner_sig:
+                        # 1. Runner Protection: Risk is hedged by trailed SL; extend TTL up to 4.0x base
+                        eff_max_sec = max_sec * 4.0
+                    elif is_prof_sig:
+                        # 2. Profitable Pre-TP1 Trade: Dynamic trailing horizon up to 2.5x base
+                        eff_max_sec = max_sec * 2.5
+                    elif ret_now <= 0.60:
+                        # 3. Dynamic Consolidation Grace Extension (+50% TTL if coiled in flat consolidation)
+                        eff_max_sec = max_sec * 1.50
+                    else:
+                        # 4. Stagnant or losing trade: strictly enforce canonical base TTL
+                        eff_max_sec = max_sec
 
-                if is_runner_sig:
-                    # 1. Runner Protection: Risk is hedged by trailed SL; extend TTL up to 4.0x base
-                    eff_max_sec = max_sec * 4.0
-                elif is_prof_sig:
-                    # 2. Profitable Pre-TP1 Trade: Dynamic trailing horizon up to 2.5x base
-                    eff_max_sec = max_sec * 2.5
-                elif ret_now <= 0.60:
-                    # 3. Dynamic Consolidation Grace Extension (+50% TTL if coiled in flat consolidation)
-                    eff_max_sec = max_sec * 1.50
-                else:
-                    # 4. Stagnant or losing trade: strictly enforce canonical base TTL
-                    eff_max_sec = max_sec
-
-                if sig_age_sec is not None and sig_age_sec >= eff_max_sec:
-                    is_expired = True
-                else:
-                    is_expired = False
+                    if sig_age_sec is not None and sig_age_sec >= eff_max_sec:
+                        is_expired = True
+                    else:
+                        is_expired = False
 
                 # Microstructure Resting Limit Order Lifecycle Check:
                 # Do NOT trigger premature TP/SL before the resting limit order is filled!
@@ -1616,52 +1618,54 @@ class SignalService:
             low_p = s.trough_price_seen
 
             is_expired = False
-            # Dynamic Horizon TTL with Anti-Expiry Consolidation Grace
-            horizon_max_secs = {
-                "15M": 7200,      # 2 hours (8 candles)
-                "30M": 10800,     # 3 hours (6 candles)
-                "1H": 21600,      # 6 hours (6 candles)
-                "4H": 43200,      # 12 hours (3 candles)
-                "12H": 86400,     # 24 hours (2 candles)
-                "24H": 172800,    # 48 hours (2 candles)
-            }
-            max_sec = horizon_max_secs.get(norm_hz, 21600)
-            sig_age_sec = None
-            try:
-                if getattr(s, "created_at", None):
-                    c_dt = s.created_at
-                    if c_dt.tzinfo is None:
-                        c_dt = c_dt.replace(tzinfo=timezone.utc)
-                    sig_age_sec = (now_utc - c_dt).total_seconds()
-                elif s.date_utc and s.time_utc:
-                    t_clean = str(s.time_utc).replace(" UTC", "").strip()
-                    c_dt = datetime.strptime(f"{s.date_utc} {t_clean}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                    sig_age_sec = (now_utc - c_dt).total_seconds()
-            except Exception:
-                pass
+            enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
+            if enable_expiry:
+                # Dynamic Horizon TTL with Anti-Expiry Consolidation Grace
+                horizon_max_secs = {
+                    "15M": 7200,      # 2 hours (8 candles)
+                    "30M": 10800,     # 3 hours (6 candles)
+                    "1H": 21600,      # 6 hours (6 candles)
+                    "4H": 43200,      # 12 hours (3 candles)
+                    "12H": 86400,     # 24 hours (2 candles)
+                    "24H": 172800,    # 48 hours (2 candles)
+                }
+                max_sec = horizon_max_secs.get(norm_hz, 21600)
+                sig_age_sec = None
+                try:
+                    if getattr(s, "created_at", None):
+                        c_dt = s.created_at
+                        if c_dt.tzinfo is None:
+                            c_dt = c_dt.replace(tzinfo=timezone.utc)
+                        sig_age_sec = (now_utc - c_dt).total_seconds()
+                    elif s.date_utc and s.time_utc:
+                        t_clean = str(s.time_utc).replace(" UTC", "").strip()
+                        c_dt = datetime.strptime(f"{s.date_utc} {t_clean}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        sig_age_sec = (now_utc - c_dt).total_seconds()
+                except Exception:
+                    pass
 
-            # Dynamic Trailing Expiry & Runner Protection Engine:
-            is_runner_sig = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
-            ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
-            is_prof_sig = (direction == "LONG" and curr_p >= entry_p * 1.004) or (direction == "SHORT" and curr_p <= entry_p * 0.996) or (s.status == "TIER0_PROTECTED_BREAKEVEN" and ret_now >= 0.15)
+                # Dynamic Trailing Expiry & Runner Protection Engine:
+                is_runner_sig = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
+                ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
+                is_prof_sig = (direction == "LONG" and curr_p >= entry_p * 1.004) or (direction == "SHORT" and curr_p <= entry_p * 0.996) or (s.status == "TIER0_PROTECTED_BREAKEVEN" and ret_now >= 0.15)
 
-            if is_runner_sig:
-                # 1. Runner Protection: Risk is hedged by trailed SL; extend TTL up to 4.0x base
-                eff_max_sec = max_sec * 4.0
-            elif is_prof_sig:
-                # 2. Profitable Pre-TP1 Trade: Dynamic trailing horizon up to 2.5x base
-                eff_max_sec = max_sec * 2.5
-            elif ret_now <= 0.60:
-                # 3. Dynamic Consolidation Grace Extension (+50% TTL if coiling within flat consolidation)
-                eff_max_sec = max_sec * 1.50
-            else:
-                # 4. Stagnant or losing trade: strictly enforce canonical base TTL
-                eff_max_sec = max_sec
+                if is_runner_sig:
+                    # 1. Runner Protection: Risk is hedged by trailed SL; extend TTL up to 4.0x base
+                    eff_max_sec = max_sec * 4.0
+                elif is_prof_sig:
+                    # 2. Profitable Pre-TP1 Trade: Dynamic trailing horizon up to 2.5x base
+                    eff_max_sec = max_sec * 2.5
+                elif ret_now <= 0.60:
+                    # 3. Dynamic Consolidation Grace Extension (+50% TTL if coiling within flat consolidation)
+                    eff_max_sec = max_sec * 1.50
+                else:
+                    # 4. Stagnant or losing trade: strictly enforce canonical base TTL
+                    eff_max_sec = max_sec
 
-            if sig_age_sec is not None and sig_age_sec >= eff_max_sec:
-                is_expired = True
-            else:
-                is_expired = False
+                if sig_age_sec is not None and sig_age_sec >= eff_max_sec:
+                    is_expired = True
+                else:
+                    is_expired = False
 
             # Microstructure Resting Limit Order Lifecycle Check:
             # Do NOT trigger premature TP/SL before the resting limit order is filled!

@@ -1626,7 +1626,10 @@ class UnifiedCryptoEngine:
                                         (sym_r, norm_hz_r) in active_pairs or
                                         (sym_r.replace("/", ""), norm_hz_r) in active_pairs
                                     )
-                                    if age_s <= eff_max_s or is_in_paper:
+                                    enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
+                                    if not enable_expiry:
+                                        is_still_active = True
+                                    elif age_s <= eff_max_s or is_in_paper:
                                         is_still_active = True
                                     elif age_s <= (eff_max_s * 1.50):
                                         # Dynamic Consolidation Grace Extension (+50% TTL for flat coiling setups)

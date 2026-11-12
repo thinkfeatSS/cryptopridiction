@@ -644,6 +644,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
         out = str(dyn.get("outcome_label") or "").upper()
         is_term = any(x in st for x in ["WON", "LOST", "STOP", "EXP", "BREAKEVEN", "BE_", "CANCEL"]) or any(x in out for x in ["WON", "LOST", "STOPPED", "EXPIRED"])
 
+        enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
         if not is_term:
             matching_p = next((p for p in open_positions if p.get("symbol") == sym), None)
 
@@ -656,13 +657,14 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                     imm["status"] = "ACTIVE"
                     continue
                 else:
-                    # All other older scan signals or duplicates for this symbol are superseded
-                    dyn["status"] = "EXPIRED_HORIZON"
-                    dyn["outcome_label"] = "⏱️ EXPIRED"
-                    imm["status"] = "EXPIRED_HORIZON"
-                    dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-                    modified = True
-                    continue
+                    # Older scan signals or duplicates for this symbol
+                    if enable_expiry:
+                        dyn["status"] = "EXPIRED_HORIZON"
+                        dyn["outcome_label"] = "⏱️ EXPIRED"
+                        imm["status"] = "EXPIRED_HORIZON"
+                        dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+                        modified = True
+                        continue
 
             # Case B: Symbol has no active open trade in paper trading
             else:
@@ -684,7 +686,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                     if gen_at_str and not gen_at_str.startswith(now_utc.strftime("%Y-%m-%d")):
                         is_stale = True
 
-                if is_stale:
+                if enable_expiry and is_stale:
                     dyn["status"] = "EXPIRED_HORIZON"
                     dyn["outcome_label"] = "⏱️ EXPIRED"
                     imm["status"] = "EXPIRED_HORIZON"

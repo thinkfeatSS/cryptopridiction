@@ -54,6 +54,7 @@ TIMEFRAME_META = {
 }
 
 # Universe & Filtering Specifications
+ENABLE_SIGNAL_EXPIRY: bool = os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes")
 TOP_N_UNIVERSE = int(os.getenv("TOP_N_UNIVERSE", os.getenv("SCANNER_TOP_N", "75"))) # Dynamically configured 75-coin institutional universe
 MIN_24H_VOLUME_USD = float(os.getenv("MIN_24H_VOLUME_USD", "10000000.0")) # $10M min 24h institutional volume
 

@@ -19,6 +19,12 @@ class TestV16BlackSwanAndConsolidation(unittest.TestCase):
     3. Multi-Module Horizon TTL Synchronization
     """
 
+    def setUp(self):
+        os.environ["ENABLE_SIGNAL_EXPIRY"] = "true"
+
+    def tearDown(self):
+        os.environ.pop("ENABLE_SIGNAL_EXPIRY", None)
+
     def test_01_acute_black_swan_gap_down_accounting(self):
         """
         When price gaps through Stop Loss during a black swan flash event,

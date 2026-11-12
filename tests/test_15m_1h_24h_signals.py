@@ -155,6 +155,7 @@ class Test15M1H24HSignals(unittest.TestCase):
         - 24H / 1D: 172,800s (48h)
         Regardless of whether horizon string is '15M', '15m', '24H', '24h', or '1d'.
         """
+        self.bot.enable_signal_expiry = True
         # Test position with lowercase '15m' past 7200s with adverse move (-0.83%)
         pos_15m = {
             "trade_id": "TEST_15M",
