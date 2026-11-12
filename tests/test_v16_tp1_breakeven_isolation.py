@@ -40,6 +40,7 @@ class TestTP1BreakevenIsolation(unittest.TestCase):
             "tp1_hit": False,
             "tp2_hit": False,
             "is_breakeven_locked": True,
+            "max_drawdown_pct": 0.2682,
             "peak_gain_pct": 1.59,
             "unrealized_pnl_pct": 1.21,
             "status": "OPEN",

@@ -625,9 +625,9 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
 
         is_resting = bool(pos.get("is_limit_resting") or pos.get("status") == "RESTING_LIMIT")
         pos_mae = float(pos.get("max_drawdown_pct") or 0.0)
+        p_tr = float(pos.get("trough_price_seen") or 0.0)
+        p_pk = float(pos.get("peak_price_seen") or 0.0)
         if pos_mae == 0.0 and entry > 0.0:
-            p_tr = float(pos.get("trough_price_seen") or 0.0)
-            p_pk = float(pos.get("peak_price_seen") or 0.0)
             if dirn == "LONG" and 0.0 < p_tr < entry:
                 pos_mae = round(((entry - p_tr) / entry) * 100.0, 2)
             elif dirn == "SHORT" and p_pk > entry:
