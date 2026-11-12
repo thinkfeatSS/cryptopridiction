@@ -2698,7 +2698,11 @@ class SignalGenerationSystem:
         if btc_shield_state is None:
             try:
                 from app.engine.scanner.btc_shield import BtcPredictiveMarketShield
-                btc_shield_state = BtcPredictiveMarketShield().assess_market_regime()
+                shield = BtcPredictiveMarketShield()
+                if symbol == "BTC/USDT" and dfs_9:
+                    btc_shield_state = shield.evaluate_regime(dfs_9, live_btc_price=live_price)
+                else:
+                    btc_shield_state = shield.state.copy()
             except Exception as e:
                 logger.warning(f"[SIGNAL GENERATOR] Failed to assess btc shield state: {e}")
                 btc_shield_state = {
