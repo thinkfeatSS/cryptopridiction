@@ -977,6 +977,12 @@ class SignalService:
                     elif "TAKE_PROFIT_1_RUNNER_EXPIRY" in exit_reason or (("HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason) and pt_tp1):
                         s.status = "WON_TP1_EXP"
                         s.outcome_label = f"🟢 WON (TP1 + EXP {ret_pct:+.2f}%)"
+                    elif "TAKE_PROFIT_PRE_TP1_RATCHET" in exit_reason or "PROFIT_RATCHET" in exit_reason:
+                        s.status = "WON_PROFIT_RATCHET"
+                        s.outcome_label = f"🟢 WON (PROFIT RATCHET {ret_pct:+.2f}%)"
+                    elif "PROFIT_HORIZON_CLOSE" in exit_reason:
+                        s.status = "WON_EXP_PROFIT"
+                        s.outcome_label = f"🟢 WON (HORIZON PROFIT {ret_pct:+.2f}%)"
                     elif "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
                         s.status = "BREAKEVEN_GUARD"
                         s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_pct:+.2f}%)"

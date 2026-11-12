@@ -1863,6 +1863,63 @@ class PaperTradingBot:
                     except Exception:
                         pass
 
+                # Multi-Stage Pre-TP1 Trailing Profit Ratchet (Locking in real profits before TP1)
+                # Guarantees that trades moving +1.2% to +4.8% never regress back to Breakeven or a Loss!
+                if not pos.get("tp1_hit") and not pos.get("tp2_hit") and pos["peak_gain_pct"] >= 1.20:
+                    peak_gain = float(pos["peak_gain_pct"])
+                    pos_atr = float(pos.get("active_atr") or (entry_p * 0.015))
+                    new_pre_tp1_sl = None
+
+                    if peak_gain >= 4.00:
+                        # Lock in at least +2.80% or trail within 0.65x ATR of peak
+                        trail_pts = 0.65 * pos_atr
+                        if direction == "LONG":
+                            cand = max(entry_p * 1.0280, float(pos["peak_price_seen"]) - trail_pts)
+                            if cand > float(pos["sl_price"]) and cand < curr_p:
+                                new_pre_tp1_sl = cand
+                        else:
+                            cand = min(entry_p * 0.9720, float(pos["trough_price_seen"]) + trail_pts)
+                            if cand < float(pos["sl_price"]) and cand > curr_p:
+                                new_pre_tp1_sl = cand
+                    elif peak_gain >= 3.00:
+                        # Lock in at least +2.00% or trail within 0.75x ATR of peak
+                        trail_pts = 0.75 * pos_atr
+                        if direction == "LONG":
+                            cand = max(entry_p * 1.0200, float(pos["peak_price_seen"]) - trail_pts)
+                            if cand > float(pos["sl_price"]) and cand < curr_p:
+                                new_pre_tp1_sl = cand
+                        else:
+                            cand = min(entry_p * 0.9800, float(pos["trough_price_seen"]) + trail_pts)
+                            if cand < float(pos["sl_price"]) and cand > curr_p:
+                                new_pre_tp1_sl = cand
+                    elif peak_gain >= 2.00:
+                        # Lock in at least +1.20% or trail within 0.85x ATR of peak
+                        trail_pts = 0.85 * pos_atr
+                        if direction == "LONG":
+                            cand = max(entry_p * 1.0120, float(pos["peak_price_seen"]) - trail_pts)
+                            if cand > float(pos["sl_price"]) and cand < curr_p:
+                                new_pre_tp1_sl = cand
+                        else:
+                            cand = min(entry_p * 0.9880, float(pos["trough_price_seen"]) + trail_pts)
+                            if cand < float(pos["sl_price"]) and cand > curr_p:
+                                new_pre_tp1_sl = cand
+                    elif peak_gain >= 1.20:
+                        # Lock in fee-covered net-green profit buffer (+0.40%)
+                        if direction == "LONG":
+                            cand = entry_p * 1.0040
+                            if cand > float(pos["sl_price"]) and cand < curr_p:
+                                new_pre_tp1_sl = cand
+                        else:
+                            cand = entry_p * 0.9960
+                            if cand < float(pos["sl_price"]) and cand > curr_p:
+                                new_pre_tp1_sl = cand
+
+                    if new_pre_tp1_sl is not None:
+                        pos["sl_price"] = format_dynamic_precision(new_pre_tp1_sl)
+                        pos["is_profit_ratchet_active"] = True
+                        pos["profit_ratchet_locked_gain_pct"] = peak_gain
+                        self._update_position_trailing_evolution(pos, curr_p)
+
                 # Phase 2: Dynamic Order Flow Exhaustion Harvester (Near-Target Profit Harvester)
                 # Evaluates whether the position has reached >= 75% proximity to TP1 and order flow exhibits aggressive exhaustion/absorption.
                 if not pos.get("tp1_hit") and tp1_p > 0 and entry_p > 0:
@@ -1947,15 +2004,24 @@ class PaperTradingBot:
                                     detail_prefix = f"Multi-factor taker exhaustion ({confluence_count}/3 factors)" if confluence_count >= 2 else "Aggressive institutional headwind"
                                     exhaustion_reason = f"{detail_prefix} near TP1 ({', '.join(headwinds)})"
 
-                        if is_exhaustion:
+                        # Near-Target Retracement Harvest: If price achieved >= 70% of TP1 (or >= +2.0% gain) and starts pulling back, bank profit immediately!
+                        is_retracing_from_target = False
+                        if proximity_ratio >= 0.70 or pos["peak_gain_pct"] >= 2.00:
+                            pullback_from_peak = (pos["peak_price_seen"] - curr_p) if direction == "LONG" else (curr_p - pos["trough_price_seen"])
+                            pos_atr = float(pos.get("active_atr") or (entry_p * 0.015))
+                            if pullback_from_peak >= (0.35 * pos_atr) or (pos["peak_gain_pct"] - gain_pct) >= 0.35:
+                                is_retracing_from_target = True
+                                exhaustion_reason = f"Target zone pullback ({pullback_from_peak / pos_atr:.2f}x ATR from peak +{pos['peak_gain_pct']:.2f}%)"
+
+                        if is_exhaustion or is_retracing_from_target:
                             # Compact TP1 directly to current market price to bank profits immediately!
                             pos["tp1_price"] = curr_p
                             pos["is_tp_harvested_early"] = True
-                            pos["tp_harvest_reason"] = "TAKE_PROFIT_1_HARVEST_EXHAUSTION"
+                            pos["tp_harvest_reason"] = "TAKE_PROFIT_1_HARVEST_RETRACEMENT" if is_retracing_from_target else "TAKE_PROFIT_1_HARVEST_EXHAUSTION"
                             pos["tp_harvest_detail"] = exhaustion_reason
                             tp1_p = curr_p
                             is_tp1 = True
-                            print(f"[PAPER BOT 🌾 MICRO-HARVEST] {sym} Near-target exhaustion at {proximity_ratio*100:.1f}% progress: {exhaustion_reason}. Compacting TP1 to ${curr_p:,.4f} to bank profits!", flush=True)
+                            print(f"[PAPER BOT 🌾 MICRO-HARVEST] {sym} Near-target profit harvest at {proximity_ratio*100:.1f}% progress: {exhaustion_reason}. Compacting TP1 to ${curr_p:,.4f} to bank profits!", flush=True)
 
                 # Multi-Tranche Scale Check 1: TP1 Hit (Realize 70%, lock Profit Buffer, hold 30% for TP2)
                 if policy == "MULTI_TRANCHE_SCALE" and has_multi_tp and is_tp1 and not pos.get("tp1_hit"):
@@ -2070,7 +2136,9 @@ class PaperTradingBot:
                         exit_reason = "TAKE_PROFIT_1"
                         exit_p = tp1_p
                     elif hit_sl or hit_ob_invalidation:
-                        if pos.get("tp2_hit"):
+                        if (pos.get("is_profit_ratchet_active") or pos.get("profit_ratchet_locked_gain_pct")) and gain_pct > 0.15:
+                            exit_reason = "TAKE_PROFIT_PRE_TP1_RATCHET"
+                        elif pos.get("tp2_hit"):
                             exit_reason = "TAKE_PROFIT_2_TRAIL_SL"
                         elif pos.get("tp1_hit"):
                             exit_reason = "TAKE_PROFIT_1_TRAIL_SL"
@@ -2108,6 +2176,8 @@ class PaperTradingBot:
                             exit_reason = f"TAKE_PROFIT_2_RUNNER_EXPIRY ({dur_str})"
                         elif pos.get("tp1_hit"):
                             exit_reason = f"TAKE_PROFIT_1_RUNNER_EXPIRY ({dur_str})"
+                        elif gain_pct >= 0.35:
+                            exit_reason = f"PROFIT_HORIZON_CLOSE ({dur_str})"
                         else:
                             exit_reason = f"HORIZON_EXPIRY ({dur_str})"
                         exit_p = curr_p
@@ -2163,6 +2233,23 @@ class PaperTradingBot:
                     else:
                         outcome = "BREAKEVEN"
 
+                    if "TAKE_PROFIT_PRE_TP1_RATCHET" in exit_reason or "PROFIT_RATCHET" in exit_reason:
+                        outcome_label = f"🟢 WON (PROFIT RATCHET {realized_ret_pct:+.2f}%)"
+                    elif "PROFIT_HORIZON_CLOSE" in exit_reason:
+                        outcome_label = f"🟢 WON (HORIZON PROFIT {realized_ret_pct:+.2f}%)"
+                    elif hit_tp3:
+                        outcome_label = "🟢 WON (TP3 HIT)"
+                    elif hit_tp2_final:
+                        outcome_label = "🟢 WON (TP2 HIT)"
+                    elif hit_tp1_final:
+                        outcome_label = "🟢 WON (TP1 HIT)"
+                    elif outcome == "WON":
+                        outcome_label = f"🟢 WON ({exit_reason} {realized_ret_pct:+.2f}%)"
+                    elif outcome == "BREAKEVEN":
+                        outcome_label = f"🛡️ BREAKEVEN ({exit_reason} {realized_ret_pct:+.2f}%)"
+                    else:
+                        outcome_label = f"🔴 LOST ({exit_reason} {realized_ret_pct:+.2f}%)"
+
                     closed_record = {
                         "trade_id": pos.get("trade_id") or pos.get("signal_id") or f"TRADE_{int(time.time()*1000)}",
                         "trade_thesis_id": pos.get("trade_thesis_id") or f"THESIS-{sym.replace('/', '').replace(':', '').replace('-', '')}-{direction.upper()}",
@@ -2177,6 +2264,7 @@ class PaperTradingBot:
                         "exit_price": round(exit_p, 6),
                         "exit_reason": exit_reason,
                         "outcome": outcome,
+                        "outcome_label": outcome_label,
                         "tp1_hit": bool(pos.get("tp1_hit", False)),
                         "tp2_hit": bool(pos.get("tp2_hit", False)),
                         "tp3_hit": bool(pos.get("tp3_hit", False)),
@@ -2644,6 +2732,16 @@ class PaperTradingBot:
             elif "TAKE_PROFIT_1_RUNNER_EXPIRY" in exit_reason or (("HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason) and tp1_hit):
                 audit_status = "WON_TP1_EXP"
                 outcome_label = f"🟢 WON (TP1 + EXP {ret_pct:+.2f}%)"
+                wa_event = "TP1_HIT"
+                tp1_hit = True
+            elif "TAKE_PROFIT_PRE_TP1_RATCHET" in exit_reason or "PROFIT_RATCHET" in exit_reason:
+                audit_status = "WON_PROFIT_RATCHET"
+                outcome_label = f"🟢 WON (PROFIT RATCHET {ret_pct:+.2f}%)"
+                wa_event = "TP1_HIT"
+                tp1_hit = True
+            elif "PROFIT_HORIZON_CLOSE" in exit_reason:
+                audit_status = "WON_EXP_PROFIT"
+                outcome_label = f"🟢 WON (HORIZON PROFIT {ret_pct:+.2f}%)"
                 wa_event = "TP1_HIT"
                 tp1_hit = True
             elif "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":

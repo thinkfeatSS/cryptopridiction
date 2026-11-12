@@ -100,7 +100,7 @@ class SignalEngine15M:
     """
 
     ATR_SL_MULTIPLIER = 0.15 # 0.15 * ATR buffer below HL / above LH
-    MIN_RISK_ATR_RATIO = 0.25 # Minimum risk must be at least 0.25 * ATR to prevent micro-stops
+    MIN_RISK_ATR_RATIO = 0.85 # Minimum risk must be at least 0.85 * ATR to prevent micro-stops
     TARGET_RR = 2.0          # Strict 1:2.0 Risk-to-Reward ratio
 
     @classmethod
@@ -223,13 +223,14 @@ class SignalEngine15M:
                 entry_price = format_dynamic_precision(curr_p)
                 reasons.append(f"Price within 15M Higher Low zone (${zone_floor:.4f}-${zone_ceiling:.4f}); market confirmed entry at ${entry_price}")
 
-            # SL: Structural floor minus 0.15 * ATR buffer
+            # SL: Structural floor minus ATR buffer
             sl_candidate = structural_floor - sl_buffer
             risk = entry_price - sl_candidate
 
-            # Enforce minimum risk floor to prevent micro-stops
-            if risk < (cls.MIN_RISK_ATR_RATIO * atr_15m):
-                risk = cls.MIN_RISK_ATR_RATIO * atr_15m
+            # Enforce minimum risk floor (at least 0.85x ATR and 1.20% distance) to prevent micro-stops
+            min_risk = max(cls.MIN_RISK_ATR_RATIO * atr_15m, entry_price * 0.0120)
+            if risk < min_risk:
+                risk = min_risk
                 sl_candidate = entry_price - risk
 
             sl_price = format_dynamic_precision(sl_candidate)
@@ -292,12 +293,14 @@ class SignalEngine15M:
                 entry_price = format_dynamic_precision(curr_p)
                 reasons.append(f"Price within 15M Lower High zone (${zone_floor:.4f}-${zone_ceiling:.4f}); market confirmed entry at ${entry_price}")
 
-            # SL: Structural ceiling plus 0.15 * ATR buffer
+            # SL: Structural ceiling plus ATR buffer
             sl_candidate = structural_ceiling + sl_buffer
             risk = sl_candidate - entry_price
 
-            if risk < (cls.MIN_RISK_ATR_RATIO * atr_15m):
-                risk = cls.MIN_RISK_ATR_RATIO * atr_15m
+            # Enforce minimum risk floor (at least 0.85x ATR and 1.20% distance) to prevent micro-stops
+            min_risk = max(cls.MIN_RISK_ATR_RATIO * atr_15m, entry_price * 0.0120)
+            if risk < min_risk:
+                risk = min_risk
                 sl_candidate = entry_price + risk
 
             sl_price = format_dynamic_precision(sl_candidate)

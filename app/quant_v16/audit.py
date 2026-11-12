@@ -272,7 +272,8 @@ def classify_signal_outcome(
     # 3. Won outcomes
     won_statuses = {
         "WON_TP3", "WON_TP2_TRAIL", "WON_TP2", "WON_TP1",
-        "WON_TP2_EXP", "WON_TP1_EXP", "WON_EXP_PROFIT", "WON_PROFIT_EXPIRED", "WON"
+        "WON_TP2_EXP", "WON_TP1_EXP", "WON_EXP_PROFIT", "WON_PROFIT_EXPIRED", "WON",
+        "WON_PROFIT_RATCHET"
     }
     if st in won_statuses or ("WON" in out and "LOST" not in out):
         return "WON"

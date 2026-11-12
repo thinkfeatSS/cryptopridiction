@@ -1058,13 +1058,13 @@ class EntryConfirmationEngine:
         ob_is_local = (bullish_ob_low is not None and 0 < float(bullish_ob_low) and (hl_price - float(bullish_ob_low)) <= (1.50 * atr_15m))
         structural_floor = min(hl_price, float(bullish_ob_low)) if ob_is_local else hl_price
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
-        vol_cushion = max(0.40 * atr_15m, 3.0 * spread_drag_usd, entry_price * 0.0035)
-        min_sl_dist = max(0.65 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0060)
+        vol_cushion = max(0.60 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0060)
+        min_sl_dist = max(1.00 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0120)
         sl_price = format_dynamic_precision(min(structural_floor - vol_cushion, entry_price - min_sl_dist))
 
         # Invariant assertion: SL must be strictly below Entry by at least the noise floor
         if sl_price >= entry_price or (entry_price - sl_price) < (min_sl_dist * 0.90):
-            sl_price = format_dynamic_precision(entry_price - max(0.75 * atr_15m, min_sl_dist))
+            sl_price = format_dynamic_precision(entry_price - max(1.00 * atr_15m, min_sl_dist))
 
         risk_amount = max(1e-8, entry_price - sl_price)
 
@@ -1212,13 +1212,13 @@ class EntryConfirmationEngine:
         ob_is_local = (bearish_ob_high is not None and float(bearish_ob_high) > 0 and (float(bearish_ob_high) - lh_price) <= (1.50 * atr_15m))
         structural_ceiling = max(lh_price, float(bearish_ob_high)) if ob_is_local else lh_price
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
-        vol_cushion = max(0.40 * atr_15m, 3.0 * spread_drag_usd, entry_price * 0.0035)
-        min_sl_dist = max(0.65 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0060)
+        vol_cushion = max(0.60 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0060)
+        min_sl_dist = max(1.00 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0120)
         sl_price = format_dynamic_precision(max(structural_ceiling + vol_cushion, entry_price + min_sl_dist))
 
         # Invariant assertion: SL must be strictly above Entry by at least the noise floor
         if sl_price <= entry_price or (sl_price - entry_price) < (min_sl_dist * 0.90):
-            sl_price = format_dynamic_precision(entry_price + max(0.75 * atr_15m, min_sl_dist))
+            sl_price = format_dynamic_precision(entry_price + max(1.00 * atr_15m, min_sl_dist))
 
         risk_amount = max(1e-8, sl_price - entry_price)
 

@@ -796,14 +796,15 @@ class SignalGenerationSystem:
             cand_sl = format_dynamic_precision(order_block_setup["sl_price"])
 
             min_ob_rr = 2.0 if is_range_regime else 2.5
-            vol_cushion = max(active_atr * 0.25, 2.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+            vol_cushion = max(active_atr * 0.50, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+            min_ob_sl_dist = max(active_atr * 0.85, exec_entry_price * 0.0120)
             if direction == "LONG":
                 ob_low_bound = float(order_block_setup["order_block_zone"][0]) if (order_block_setup.get("order_block_zone") and len(order_block_setup["order_block_zone"]) >= 2) else cand_sl
-                cushioned_sl = min(cand_sl, ob_low_bound - vol_cushion)
-                cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, min(exec_entry_price - (active_atr * 0.50), cushioned_sl)))
+                cushioned_sl = min(cand_sl, ob_low_bound - vol_cushion, exec_entry_price - min_ob_sl_dist)
+                cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, cushioned_sl))
 
                 if cand_sl >= exec_entry_price:
-                    cand_sl = format_dynamic_precision(exec_entry_price - (active_atr * 1.2))
+                    cand_sl = format_dynamic_precision(exec_entry_price - max(active_atr * 1.2, min_ob_sl_dist))
 
                 sl_dist = max(1e-9, abs(exec_entry_price - cand_sl))
                 min_tp1_dist = max(min_ob_rr * sl_dist, active_atr * (0.85 if is_range_regime else 1.25))
@@ -818,11 +819,11 @@ class SignalGenerationSystem:
                     cand_tp3 = format_dynamic_precision(max(cand_tp2 + (active_atr * 1.2), exec_entry_price + min_tp3_dist))
             else: # SHORT
                 ob_high_bound = float(order_block_setup["order_block_zone"][1]) if (order_block_setup.get("order_block_zone") and len(order_block_setup["order_block_zone"]) >= 2) else cand_sl
-                cushioned_sl = max(cand_sl, ob_high_bound + vol_cushion)
-                cand_sl = format_dynamic_precision(max(exec_entry_price + (active_atr * 0.50), cushioned_sl))
+                cushioned_sl = max(cand_sl, ob_high_bound + vol_cushion, exec_entry_price + min_ob_sl_dist)
+                cand_sl = format_dynamic_precision(cushioned_sl)
 
                 if cand_sl <= exec_entry_price:
-                    cand_sl = format_dynamic_precision(exec_entry_price + (active_atr * 1.2))
+                    cand_sl = format_dynamic_precision(exec_entry_price + max(active_atr * 1.2, min_ob_sl_dist))
 
                 sl_dist = max(1e-9, abs(exec_entry_price - cand_sl))
                 min_tp1_dist = max(min_ob_rr * sl_dist, active_atr * (0.85 if is_range_regime else 1.25))
@@ -873,13 +874,13 @@ class SignalGenerationSystem:
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_low = min(structural_low, float(candle_metrics["swept_price"]))
 
-            # For verified structural setups (Order Block / Liquidity Sweep), use tight sniper cushion
+            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.20% and >= 0.85x ATR)
             if has_structural_anchor:
-                base_min_sl = max(exec_entry_price * 0.0035, active_atr * 0.45) if horizon_label == "15M" else max(exec_entry_price * 0.0050, active_atr * 0.65)
-                vol_cushion = max(active_atr * 0.25, 2.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0120, active_atr * 0.85) if horizon_label == "15M" else max(exec_entry_price * 0.0150, active_atr * 1.00)
+                vol_cushion = max(active_atr * 0.50, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
             else:
-                base_min_sl = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
-                vol_cushion = max(active_atr * 0.75, 2.5 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0140, active_atr * 1.00) if horizon_label == "15M" else (active_atr * 1.25)
+                vol_cushion = max(active_atr * 0.75, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
 
             min_sl_dist = base_min_sl * tail_noise_mult
             structural_sl = structural_low - vol_cushion
@@ -938,13 +939,13 @@ class SignalGenerationSystem:
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_high = max(structural_high, float(candle_metrics["swept_price"]))
 
-            # For verified structural setups (Order Block / Liquidity Sweep), use tight sniper cushion
+            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.20% and >= 0.85x ATR)
             if has_structural_anchor:
-                base_min_sl = max(exec_entry_price * 0.0035, active_atr * 0.45) if horizon_label == "15M" else max(exec_entry_price * 0.0050, active_atr * 0.65)
-                vol_cushion = max(active_atr * 0.25, 2.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0120, active_atr * 0.85) if horizon_label == "15M" else max(exec_entry_price * 0.0150, active_atr * 1.00)
+                vol_cushion = max(active_atr * 0.50, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
             else:
-                base_min_sl = max(exec_entry_price * 0.0075, active_atr * 0.90) if horizon_label == "15M" else (active_atr * 1.05)
-                vol_cushion = max(active_atr * 0.75, 2.5 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0140, active_atr * 1.00) if horizon_label == "15M" else (active_atr * 1.25)
+                vol_cushion = max(active_atr * 0.75, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
 
             min_sl_dist = base_min_sl * tail_noise_mult
             structural_sl = structural_high + vol_cushion
