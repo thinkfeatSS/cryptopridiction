@@ -672,7 +672,7 @@ export default function V16SignalsAuditLedger() {
                   const currP = dyn?.current_price || entryP;
                   const slP = dyn?.current_sl || imm.sl_initial || 0;
                   const tp1P = imm.tp1_initial || 0;
-                  const isBeLocked = dyn?.is_tp1_locked || dyn?.locked_sl !== null || dyn?.trailing_sl !== null;
+                  const isBeLocked = dyn?.is_breakeven_locked || dyn?.is_tp1_locked || dyn?.locked_sl !== null || dyn?.trailing_sl !== null;
 
                   return (
                     <tr

@@ -145,8 +145,21 @@ export default function V16SignalCard({ signal, onSelect, isSelected = false }: 
   const tp2DistPct = entryPrice > 0 ? (Math.abs(tp2Price - entryPrice) / entryPrice) * 100 : 0;
 
   // Trailing / Breakeven lock active
-  const isBeLocked = dyn?.is_tp1_locked || dyn?.locked_sl !== null || (dyn?.trailing_sl !== null && dyn?.trailing_sl !== undefined);
+  const isBeLocked = dyn?.is_breakeven_locked || dyn?.is_tp1_locked || dyn?.locked_sl !== null || (dyn?.trailing_sl !== null && dyn?.trailing_sl !== undefined);
   const effectiveSl = dyn?.trailing_sl || dyn?.locked_sl || slPrice;
+
+  // Defensive TP1 secured confirmation: strictly true only if is_tp1_locked is verified AND price/MFE reached target
+  const isTp1ActuallySecured = useMemo(() => {
+    if (!dyn?.is_tp1_locked) return false;
+    if (statusCategory.isActive && entryPrice > 0 && tp1Price > 0) {
+      if (isLong) {
+        return currentPrice >= (tp1Price * 0.999) || (mfePct >= tp1DistPct * 0.95);
+      } else {
+        return currentPrice <= (tp1Price * 1.001) || (mfePct >= tp1DistPct * 0.95);
+      }
+    }
+    return Boolean(dyn?.is_tp1_locked);
+  }, [dyn?.is_tp1_locked, statusCategory.isActive, entryPrice, tp1Price, isLong, currentPrice, mfePct, tp1DistPct]);
 
   // Progress relative to Entry, SL, and TP1 [0% at SL, 50% at Entry, 100% at TP1]
   const tradeProgress = useMemo(() => {
@@ -326,7 +339,7 @@ export default function V16SignalCard({ signal, onSelect, isSelected = false }: 
               <span>Take Profit 1 (TP1):</span>
             </span>
             <div className="flex items-center gap-1.5">
-              {dyn?.is_tp1_locked && (
+              {isTp1ActuallySecured && (
                 <span className="text-[9px] px-1 py-0.2 rounded bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 font-bold flex items-center gap-1">
                   <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" /> SECURED
                 </span>

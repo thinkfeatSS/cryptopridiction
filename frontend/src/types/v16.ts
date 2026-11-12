@@ -57,6 +57,7 @@ export interface V16DynamicTradeState {
   mae_pct: number;
   is_tp1_locked: boolean;
   is_tp2_locked: boolean;
+  is_breakeven_locked?: boolean;
   status: string;
   outcome_label: string;
   updated_at_utc: string;

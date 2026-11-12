@@ -2094,9 +2094,20 @@ class SignalService:
                         if s.sl_price is not None and s.sl_price > 0:
                             dyn_data[target_k]["current_sl"] = round(float(s.sl_price), 6)
                         is_tp1_l = any(k in st_u for k in ["WON_TP", "TP1_LOCKED", "TP2", "TP3"])
+                        # Strict price geometry verification
+                        tp1_val = safe_float(getattr(s, "tp1_price", None), 0.0)
+                        entry_val = safe_float(getattr(s, "entry_price", None), 0.0)
+                        dir_val = str(getattr(s, "direction", "LONG")).upper()
+                        peak_val = safe_float(getattr(s, "peak_price_seen", None), 0.0)
+                        trough_val = safe_float(getattr(s, "trough_price_seen", None), 0.0)
+                        if dir_val == "LONG" and tp1_val > entry_val and peak_val > 0.0 and peak_val < (tp1_val * 0.9995):
+                            is_tp1_l = False
+                        elif dir_val == "SHORT" and 0.0 < tp1_val < entry_val and trough_val > 0.0 and trough_val > (tp1_val * 1.0005):
+                            is_tp1_l = False
+
                         is_tp2_l = ("TP2" in st_u) or ("TP3" in st_u)
-                        dyn_data[target_k]["is_tp1_locked"] = bool(dyn_data[target_k].get("is_tp1_locked") or is_tp1_l)
-                        dyn_data[target_k]["is_tp2_locked"] = bool(dyn_data[target_k].get("is_tp2_locked") or is_tp2_l)
+                        dyn_data[target_k]["is_tp1_locked"] = bool(is_tp1_l)
+                        dyn_data[target_k]["is_tp2_locked"] = bool(is_tp2_l)
                         if s.max_potential_gain_pct is not None:
                             dyn_data[target_k]["mfe_pct"] = max(safe_float(dyn_data[target_k].get("mfe_pct"), 0.0), round(float(s.max_potential_gain_pct), 2))
                         entry_p_s = safe_float(getattr(s, "entry_price", None), 0.0)

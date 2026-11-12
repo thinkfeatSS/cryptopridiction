@@ -263,6 +263,12 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
             or any(tp_kw in st for tp_kw in ["WON_TP", "TP1_HIT", "TP1_LOCKED", "TP2", "TP3"])
             or any(tp_kw in out for tp_kw in ["TP1 HIT", "TP1 +", "TP2", "TP3"])
         )
+        # Strict price geometry verification: TP1 cannot be locked if price never reached TP1!
+        if dirn == "LONG" and tp1 > entry and pk_p > 0.0 and pk_p < (tp1 * 0.9995):
+            is_tp1_locked = False
+        elif dirn == "SHORT" and 0.0 < tp1 < entry and tr_p > 0.0 and tr_p > (tp1 * 1.0005):
+            is_tp1_locked = False
+
         is_tp2_locked = "TP2" in st or "TP3" in st or str(r.get("is_tp2_locked", "")).lower() == "true"
         is_be_locked = (
             is_tp1_locked
@@ -271,6 +277,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
             or "GUARD" in st
             or "TIER0" in st
             or str(r.get("is_tier0_locked", "")).lower() == "true"
+            or str(r.get("is_breakeven_locked", "")).lower() == "true"
         )
 
         # Compute dynamic MFE/MAE from CSV extremes when available
@@ -323,8 +330,9 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 dyn_data[sid]["locked_sl"] = sl_curr if (is_tp1_locked or is_be_locked) else dyn_data[sid].get("locked_sl")
                 dyn_data[sid]["mfe_pct"] = max(safe_float(dyn_data[sid].get("mfe_pct"), 0.0), mfe_val)
                 dyn_data[sid]["mae_pct"] = max(safe_float(dyn_data[sid].get("mae_pct"), 0.0), mae_val)
-                dyn_data[sid]["is_tp1_locked"] = bool(is_tp1_locked or dyn_data[sid].get("is_tp1_locked"))
-                dyn_data[sid]["is_tp2_locked"] = bool(is_tp2_locked or dyn_data[sid].get("is_tp2_locked"))
+                dyn_data[sid]["is_tp1_locked"] = is_tp1_locked
+                dyn_data[sid]["is_tp2_locked"] = is_tp2_locked
+                dyn_data[sid]["is_breakeven_locked"] = is_be_locked
                 dyn_data[sid]["is_risk_free"] = evo.is_risk_free
                 dyn_data[sid]["residual_risk_usd"] = evo.residual_risk_usd
                 dyn_data[sid]["locked_profit_usd"] = evo.locked_profit_usd
@@ -344,6 +352,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 "mae_pct": mae_val,
                 "is_tp1_locked": is_tp1_locked,
                 "is_tp2_locked": is_tp2_locked,
+                "is_breakeven_locked": is_be_locked,
                 "is_risk_free": evo.is_risk_free,
                 "residual_risk_usd": evo.residual_risk_usd,
                 "locked_profit_usd": evo.locked_profit_usd,
@@ -517,17 +526,30 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                     elif dirn == "SHORT" and db_pk > entry:
                         db_mae = round(((db_pk - entry) / entry) * 100.0, 2)
 
+                is_tp1_db = (
+                    any(tp_kw in st for tp_kw in ["WON_TP", "TP1_HIT", "TP1_LOCKED", "TP2", "TP3"])
+                    or any(tp_kw in out for tp_kw in ["TP1 HIT", "TP1 +", "TP2", "TP3"])
+                    or str(getattr(s, "is_tp1_locked", "")).lower() == "true"
+                )
+                if dirn == "LONG" and tp1 > entry and db_pk > 0.0 and db_pk < (tp1 * 0.9995):
+                    is_tp1_db = False
+                elif dirn == "SHORT" and 0.0 < tp1 < entry and db_tr > 0.0 and db_tr > (tp1 * 1.0005):
+                    is_tp1_db = False
+
+                is_be_db = is_tp1_db or any(k in st for k in ["BE", "BREAKEVEN", "GUARD", "TIER0"]) or bool(getattr(s, "is_tier0_locked", False))
+
                 dyn_data[sid] = {
                     "signal_id": sid,
                     "current_price": curr,
                     "current_sl": sl,
                     "trailing_sl": None,
-                    "locked_sl": None,
+                    "locked_sl": sl if is_be_db else None,
                     "unrealized_net_pnl_pct": pnl,
                     "mfe_pct": float(s.max_potential_gain_pct or 0.0),
                     "mae_pct": db_mae,
-                    "is_tp1_locked": any(tp_kw in st for tp_kw in ["WON_TP", "TP1_HIT", "TP1_LOCKED", "TP2", "TP3"]) or any(tp_kw in out for tp_kw in ["TP1 HIT", "TP1 +", "TP2", "TP3"]) or str(getattr(s, "is_tp1_locked", "")).lower() == "true",
+                    "is_tp1_locked": is_tp1_db,
                     "is_tp2_locked": "TP2" in st or "TP3" in st,
+                    "is_breakeven_locked": is_be_db,
                     "status": st,
                     "outcome_label": out,
                     "updated_at_utc": s.evaluated_at_utc or f"{s.date_utc or ''} {s.time_utc or ''}".strip(),
@@ -609,19 +631,31 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 pos_mae = round(((entry - p_tr) / entry) * 100.0, 2)
             elif dirn == "SHORT" and p_pk > entry:
                 pos_mae = round(((p_pk - entry) / entry) * 100.0, 2)
-        is_tp1_pos = bool(pos.get("tp1_hit") or pos.get("is_breakeven_locked", False))
-        is_tp2_pos = bool(pos.get("tp2_hit", False))
+        is_tp1_pos = bool(pos.get("tp1_hit") or "TP1" in str(pos.get("status", "")).upper())
+        is_tp2_pos = bool(pos.get("tp2_hit", False) or "TP2" in str(pos.get("status", "")).upper())
+        is_be_pos = bool(pos.get("is_breakeven_locked") or pos.get("is_tier0_locked") or is_tp1_pos)
+
+        # Strict price geometry verification: TP1 can NEVER be marked locked if price never reached TP1!
+        p_pk_curr = p_pk if p_pk > 0.0 else safe_float(pos.get("peak_price_seen"), 0.0)
+        p_tr_curr = p_tr if p_tr > 0.0 else safe_float(pos.get("trough_price_seen"), 0.0)
+        if dirn == "LONG" and tp1 > entry and p_pk_curr > 0.0 and p_pk_curr < (tp1 * 0.9995):
+            is_tp1_pos = False
+        elif dirn == "SHORT" and 0.0 < tp1 < entry and p_tr_curr > 0.0 and p_tr_curr > (tp1 * 1.0005):
+            is_tp1_pos = False
+
         dyn_data[sid] = {
             "signal_id": sid,
             "current_price": curr,
             "current_sl": current_sl,
-            "trailing_sl": current_sl if (is_tp1_pos or current_sl != initial_sl) else None,
-            "locked_sl": current_sl if is_tp1_pos else None,
+            "trailing_sl": current_sl if (is_be_pos or current_sl != initial_sl) else None,
+            "locked_sl": current_sl if is_be_pos else None,
             "unrealized_net_pnl_pct": unrealized_pnl,
             "mfe_pct": float(pos.get("peak_gain_pct") or 0.0),
             "mae_pct": pos_mae,
             "is_tp1_locked": is_tp1_pos,
             "is_tp2_locked": is_tp2_pos,
+            "is_breakeven_locked": is_be_pos,
+            "is_risk_free": bool(is_be_pos or is_tp1_pos),
             "status": "RESTING_LIMIT" if is_resting else "ACTIVE",
             "outcome_label": "RESTING LIMIT 🎯" if is_resting else "RUNNING 🚀",
             "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -738,10 +772,28 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
 
         # Synchronize dynamic state SL if missing or 0
         if sid in dyn_data:
-            cur_sl_dyn = safe_float(dyn_data[sid].get("current_sl"), 0.0)
+            dyn = dyn_data[sid]
+            cur_sl_dyn = safe_float(dyn.get("current_sl"), 0.0)
             if cur_sl_dyn <= 0.0:
-                dyn_data[sid]["current_sl"] = imm["sl_initial"]
+                dyn["current_sl"] = imm["sl_initial"]
                 modified = True
+
+            # Invariant: Strict TP1 hit price geometry verification
+            # A signal CANNOT have is_tp1_locked=True if price has never reached TP1!
+            if dyn.get("is_tp1_locked"):
+                pk = safe_float(dyn.get("peak_price_seen") or getattr(imm, "peak_price_seen", None) or 0.0)
+                tr = safe_float(dyn.get("trough_price_seen") or getattr(imm, "trough_price_seen", None) or 0.0)
+                mfe = safe_float(dyn.get("mfe_pct"), 0.0)
+                tp1_dist = (abs(t1 - e) / e) * 100.0 if e > 0 else 0.0
+
+                if d_dir == "LONG" and t1 > e:
+                    if (pk > 0.0 and pk < (t1 * 0.9995)) or (pk == 0.0 and mfe > 0.0 and mfe < (tp1_dist * 0.95)):
+                        dyn["is_tp1_locked"] = False
+                        modified = True
+                elif d_dir == "SHORT" and 0.0 < t1 < e:
+                    if (tr > 0.0 and tr > (t1 * 1.0005)) or (tr == 0.0 and mfe > 0.0 and mfe < (tp1_dist * 0.95)):
+                        dyn["is_tp1_locked"] = False
+                        modified = True
 
     # Persist cache atomically if updated
     if modified:
@@ -887,8 +939,8 @@ def _get_v16_events(limit: int = 100) -> List[Dict[str, Any]]:
                 existing_ev_keys.add((sid, "EXECUTION_LIVE"))
                 modified = True
 
-        # 3. TP1 reached / locked
-        if (dyn.get("is_tp1_locked") or "WON_TP" in st or "TP1" in out or "TP2" in out) and (sid, "TP1_REACHED") not in existing_ev_keys:
+        # 3. TP1 reached / locked (only when truly verified as reached)
+        if (dyn.get("is_tp1_locked") or any(k in st for k in ["WON_TP", "TP1_HIT", "TP2_HIT", "TP3_HIT"])) and (sid, "TP1_REACHED") not in existing_ev_keys:
             events.append({
                 "event_id": f"EV_TP1_{sid[-8:]}",
                 "signal_id": sid,

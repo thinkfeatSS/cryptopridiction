@@ -80,6 +80,7 @@ class DynamicTradeState:
     mae_pct: float = 0.0                # Maximum Adverse Excursion
     is_tp1_locked: bool = False
     is_tp2_locked: bool = False
+    is_breakeven_locked: bool = False
     status: str = "ACTIVE"
     outcome_label: str = "ACTIVE 🟢"
     updated_at_utc: str = ""

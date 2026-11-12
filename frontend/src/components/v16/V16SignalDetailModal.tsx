@@ -134,11 +134,16 @@ export default function V16SignalDetailModal({ signal, onClose }: Props) {
                   </div>
                   <div className="bg-slate-900/90 p-2.5 rounded-xl border border-slate-800">
                     <div className="text-slate-500">Active SL State</div>
-                    <div className="font-bold text-slate-200 mt-0.5">{formatPrice(dyn.current_sl)}</div>
+                    <div className="font-bold text-slate-200 mt-0.5 flex items-center gap-1.5">
+                      <span>{formatPrice(dyn.current_sl)}</span>
+                      {(dyn.is_breakeven_locked || dyn.locked_sl !== null || dyn.trailing_sl !== null) && (
+                        <span className="text-[10px] text-amber-400 font-bold">(BE LOCK)</span>
+                      )}
+                    </div>
                   </div>
                   <div className="bg-slate-900/90 p-2.5 rounded-xl border border-slate-800">
-                    <div className="text-slate-500">TP1 Locked</div>
-                    <div className="font-bold text-cyan-300 mt-0.5">{dyn.is_tp1_locked ? "YES (Breakeven Locked)" : "PENDING TP1"}</div>
+                    <div className="text-slate-500">TP1 Reached</div>
+                    <div className="font-bold text-cyan-300 mt-0.5">{dyn.is_tp1_locked ? "YES (Target Hit)" : "PENDING TP1"}</div>
                   </div>
                   <div className="bg-slate-900/90 p-2.5 rounded-xl border border-slate-800">
                     <div className="text-slate-500">Unrealized Net PnL</div>
