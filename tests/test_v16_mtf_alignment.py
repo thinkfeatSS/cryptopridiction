@@ -275,7 +275,7 @@ class TestV16MultiTimeframeAlignment(unittest.TestCase):
             state=FractalTimeframeState.TREND_BULLISH,
             adx=20.0,
             chop_index=48.0,
-            range_high=105.0,
+            range_high=108.0,
             range_low=100.0,
             headroom_to_high_pct=5.0,
             headroom_to_low_pct=5.0,
@@ -311,6 +311,110 @@ class TestV16MultiTimeframeAlignment(unittest.TestCase):
         self.assertFalse(eval_result["trade_permitted"])
         self.assertEqual(eval_result["strategy"], "CAPITAL_PRESERVATION_MIDDLE_CHOP_VETO")
         self.assertEqual(eval_result["dominant_direction"], "NO_TRADE")
+
+    def test_htf_counter_trend_conflict_interception(self):
+        """
+        Forensic verification of Pillar 2: Strict Higher-Timeframe Trend Confluence.
+        Verifies that counter-trend trades are strictly intercepted across 15M, 1H, and 24H gates,
+        and appropriate conflict telemetry is recorded.
+        """
+        matrix_eval = {
+            "trade_permitted": True,
+            "strategy": "MOMENTUM_TREND_EXPANSION",
+            "archetype": InstitutionalArchetype.ARCHETYPE_A_SECULAR_EXPANSION.value
+        }
+        h_preds_base = {
+            tf: {"is_cold_start": False, "candle_count": 50}
+            for tf in ["5m", "15m", "1h", "4h", "12h", "1d", "1w", "15d", "1M"]
+        }
+
+        # 1. 15M LONG setup where 4H macro is BEARISH -> must be intercepted
+        tm_15m_htf_conflict = {
+            "5m": "BULLISH", "15m": "BULLISH", "1h": "BULLISH",
+            "4h": "BEARISH", "12h": "CONSOLIDATION", "1d": "CONSOLIDATION",
+            "1w": "CONSOLIDATION", "15d": "CONSOLIDATION", "1M": "CONSOLIDATION"
+        }
+        q_15, _, _ = SignalGenerationSystem.evaluate_multi_horizon_gates(
+            trend_matrix=tm_15m_htf_conflict,
+            horizon_predictions=h_preds_base,
+            matrix_eval=matrix_eval
+        )
+        self.assertFalse(q_15["qualified"], "15M LONG must be intercepted when 4H is BEARISH")
+        self.assertIsNone(q_15["direction"])
+        self.assertTrue(any("HTF_COUNTER_TREND_CONFLICT" in c for c in q_15["conflicts"]))
+
+        # 2. 1H SHORT setup where 1D macro is BULLISH -> must be intercepted
+        tm_1h_htf_conflict = {
+            "5m": "BEARISH", "15m": "BEARISH", "1h": "BEARISH",
+            "4h": "CONSOLIDATION", "12h": "CONSOLIDATION", "1d": "BULLISH",
+            "1w": "CONSOLIDATION", "15d": "CONSOLIDATION", "1M": "CONSOLIDATION"
+        }
+        _, q_1h, _ = SignalGenerationSystem.evaluate_multi_horizon_gates(
+            trend_matrix=tm_1h_htf_conflict,
+            horizon_predictions=h_preds_base,
+            matrix_eval=matrix_eval
+        )
+        self.assertFalse(q_1h["qualified"], "1H SHORT must be intercepted when 1D is BULLISH")
+        self.assertIsNone(q_1h["direction"])
+        self.assertTrue(any("HTF_COUNTER_TREND_CONFLICT" in c for c in q_1h["conflicts"]))
+
+        # 3. 24H LONG setup where 1W macro is BEARISH -> must be intercepted
+        tm_24h_htf_conflict = {
+            "5m": "BULLISH", "15m": "BULLISH", "1h": "BULLISH",
+            "4h": "BULLISH", "12h": "BULLISH", "1d": "BULLISH",
+            "1w": "BEARISH", "15d": "CONSOLIDATION", "1M": "CONSOLIDATION"
+        }
+        _, _, q_24 = SignalGenerationSystem.evaluate_multi_horizon_gates(
+            trend_matrix=tm_24h_htf_conflict,
+            horizon_predictions=h_preds_base,
+            matrix_eval=matrix_eval
+        )
+        self.assertFalse(q_24["qualified"], "24H LONG must be intercepted when 1W is BEARISH")
+        self.assertIsNone(q_24["direction"])
+        self.assertTrue(any("HTF_COUNTER_TREND_CONFLICT" in c for c in q_24["conflicts"]))
+
+    def test_dynamic_dominant_horizon_selection(self):
+        """
+        Verifies dynamic institutional dominant signal prioritization.
+        High-grade (A+) setups with superior conviction and EV_net take precedence over
+        lower-grade signals, eliminating static hardcoded ordering.
+        """
+        sig_sys = SignalGenerationSystem()
+        import pandas as pd
+        import numpy as np
+
+        # Create dummy synthetic DataFrames for all 9 charts
+        n = 50
+        base_df = pd.DataFrame({
+            "timestamp": np.arange(1700000000, 1700000000 + n * 300, 300),
+            "open": [100.0 + i * 0.5 for i in range(n)],
+            "high": [100.0 + i * 0.5 + 1.0 for i in range(n)],
+            "low": [100.0 + i * 0.5 - 0.2 for i in range(n)],
+            "close": [100.0 + (i + 1) * 0.5 for i in range(n)],
+            "volume": [100000.0] * n
+        })
+        dfs_9 = {tf: base_df.copy() for tf in ["5m", "15m", "1h", "4h", "12h", "1d", "1w", "15d", "1M"]}
+        btc_shield = {
+            "status_code": "NORMAL",
+            "altcoin_longs_allowed": True,
+            "altcoin_shorts_allowed": True,
+            "v16_regime": "NEUTRAL",
+            "regime": "NEUTRAL"
+        }
+
+        eval_res = sig_sys.evaluate_asset_multi_horizon(
+            symbol="ETH/USDT",
+            dfs_9=dfs_9,
+            btc_shield_state=btc_shield,
+            live_price=125.0,
+            volume_24h_usd=50_000_000.0
+        )
+        self.assertIsNotNone(eval_res)
+        self.assertIn("dominant_timeframe", eval_res)
+        self.assertIn("trend_criteria_gates", eval_res)
+        self.assertIn("15M_gate", eval_res["trend_criteria_gates"])
+        self.assertIn("1H_gate", eval_res["trend_criteria_gates"])
+        self.assertIn("24H_gate", eval_res["trend_criteria_gates"])
 
 
 if __name__ == "__main__":

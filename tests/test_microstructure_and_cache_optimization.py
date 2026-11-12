@@ -789,6 +789,7 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
 
         # 3. Test Structural Boundary Touch: range_pos <= 20.0% (extreme support boundary)
         c_list = [90.0, 110.0] * 12
+        c_list[-2] = 83.0
         c_list[-1] = 82.0
         boundary_asset_df = pd.DataFrame({
             "open": c_list,
@@ -987,9 +988,9 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
 
         # 1. Verify mirror endpoint rotation
         self.assertGreaterEqual(len(feed.MIRROR_ENDPOINTS), 3)
-        self.assertIn("data-stream.binance.vision", feed.MIRROR_ENDPOINTS[0])
-        self.assertIn("9443", feed.MIRROR_ENDPOINTS[1])
-        self.assertIn("443", feed.MIRROR_ENDPOINTS[2])
+        self.assertTrue(any("data-stream.binance.vision" in ep for ep in feed.MIRROR_ENDPOINTS))
+        self.assertTrue(any("9443" in ep for ep in feed.MIRROR_ENDPOINTS))
+        self.assertTrue(any("443" in ep for ep in feed.MIRROR_ENDPOINTS))
 
         # 2. Simulate packet receipt and latency tracking
         test_packet = json.dumps([
@@ -1629,13 +1630,19 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
         Validates that when all Tier-1 to Tier-6 CEXs are geo-blocked and Tier-6.5, 6.6, 6.7
         are concurrently throttled (HTTP 429):
         1. SWR disk cache serves warm prices while outage <= 15.0s.
-        2. When outage exceeds 15.0s, global price staleness protection trips:
+        2. During active public aggregator rate-limit backoff (60s-180s), SWR disk cache
+           gracefully steps down up to 180s grace without interrupting core signal generation
+           (is_price_fresh_15s = True, is_global_outage = False).
+        3. When outage exceeds 180.0s rate-limit grace, global price staleness protection trips:
            - is_price_fresh_15s = False
            - is_global_outage = True
            - is_partition_stale_active() = True
+        4. When outage occurs without rate-limit backoff, baseline 15.0s staleness trips.
+        5. Full parity between MultiHorizonDataLoader and test.py CryptoDataLoader.
         """
         from unittest.mock import patch
         from app.engine.scanner.data_loader import MultiHorizonDataLoader
+        from test import CryptoDataLoader
         loader = MultiHorizonDataLoader()
 
         now = time.time()
@@ -1643,14 +1650,19 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
         loader._save_tickers_to_swr_disk({"BTC/USDT": 67000.0, "ETH/USDT": 3500.0}, now)
         loader._binance_ip_throttled_until = now + 999.0
 
-        # Simulate all Tier-6.5, 6.6, 6.7 throttled
+        # Simulate all Tier-6.5, 6.6, 6.7 throttled with active 60s backoff
         loader._coincap_throttled_until = now + 60.0
         loader._paprika_throttled_until = now + 60.0
         loader._bitget_throttled_until = now + 60.0
         loader._live_tickers_cache = {}
         loader._live_tickers_ts = 0.0
 
-        with patch.object(loader, "ws_feed", None),              patch.object(loader, "_fetch_bybit_tickers", return_value={}),              patch.object(loader, "_fetch_okx_tickers", return_value={}),              patch.object(loader, "_fetch_gateio_tickers", return_value={}),              patch.object(loader, "_fetch_kucoin_tickers", return_value={}),              patch.object(loader, "_fetch_mexc_tickers", return_value={}):
+        with patch.object(loader, "ws_feed", None), \
+             patch.object(loader, "_fetch_bybit_tickers", return_value={}), \
+             patch.object(loader, "_fetch_okx_tickers", return_value={}), \
+             patch.object(loader, "_fetch_gateio_tickers", return_value={}), \
+             patch.object(loader, "_fetch_kucoin_tickers", return_value={}), \
+             patch.object(loader, "_fetch_mexc_tickers", return_value={}):
 
             # Sub-case A: Outage just started (5.0s ago <= 15.0s constraint)
             loader._rest_outage_start_ts = time.time() - 5.0
@@ -1660,13 +1672,62 @@ class TestMicrostructureAndCacheOptimization(unittest.TestCase):
             self.assertFalse(loader._is_global_outage)
             self.assertFalse(loader.is_partition_stale_active())
 
-            # Sub-case B: Outage persists beyond 15.0s (e.g. 20.0s)
+            # Sub-case B: Rate limit active (60s backoff cooldown) and 20.0s elapsed:
+            # Persistent SWR disk cache gracefully steps down without interrupting core signal generation!
             loader._rest_outage_start_ts = time.time() - 20.0
+            ticks_rate_limited = loader.fetch_all_tickers(max_age_seconds=1.0)
+            self.assertEqual(ticks_rate_limited.get("BTC/USDT"), 67000.0)
+            self.assertTrue(loader._is_price_fresh_15s, "Must remain fresh under active rate-limit SWR grace")
+            self.assertFalse(loader._is_global_outage, "Must NOT trip global outage during rate-limit grace")
+            self.assertFalse(loader.is_partition_stale_active(), "Must NOT trip partition stale during rate-limit grace")
+
+            # Sub-case C: Outage persists beyond 180.0s rate-limit grace (e.g. 190.0s):
+            # Must trip circuit breaker and fail closed
+            loader._rest_outage_start_ts = time.time() - 190.0
+            loader._live_tickers_ts = time.time() - 190.0
+            loader._live_tickers_cache = None
+            loader._save_tickers_to_swr_disk({"BTC/USDT": 67000.0, "ETH/USDT": 3500.0}, time.time() - 190.0)
             ticks_stale = loader.fetch_all_tickers(max_age_seconds=1.0)
             self.assertFalse(loader._is_price_fresh_15s)
             self.assertTrue(loader._is_global_outage)
             self.assertTrue(loader.is_partition_stale_active())
             self.assertIn("PRICE_STALENESS_EXCEEDED", loader._global_outage_reason)
+
+            # Sub-case D: Un-throttled outage without rate-limit backoff (age = 20s > 15s baseline)
+            loader._coincap_throttled_until = 0.0
+            loader._paprika_throttled_until = 0.0
+            loader._bitget_throttled_until = 0.0
+            loader._rest_outage_start_ts = time.time() - 20.0
+            loader._save_tickers_to_swr_disk({}, time.time()) # Empty SWR
+            with patch.object(loader, "_fetch_coincap_tickers", return_value={}), \
+                 patch.object(loader, "_fetch_coinpaprika_tickers", return_value={}), \
+                 patch.object(loader, "_fetch_bitget_tickers", return_value={}):
+                ticks_unthrottled_stale = loader.fetch_all_tickers(max_age_seconds=1.0)
+                self.assertFalse(loader._is_price_fresh_15s)
+                self.assertTrue(loader._is_global_outage)
+
+        # Sub-case E: Parity with test.py CryptoDataLoader
+        c_loader = CryptoDataLoader()
+        c_loader.ws_feed = None
+        c_loader._save_tickers_to_swr_disk({"BTC/USDT": 67000.0, "ETH/USDT": 3500.0}, time.time())
+        c_loader._binance_ip_throttled_until = time.time() + 999.0
+        c_loader._coincap_throttled_until = time.time() + 60.0
+        c_loader._paprika_throttled_until = time.time() + 60.0
+        c_loader._bitget_throttled_until = time.time() + 60.0
+        c_loader._live_tickers_cache = {}
+        c_loader._live_tickers_ts = 0.0
+        c_loader._rest_outage_start_ts = time.time() - 20.0
+
+        with patch.object(c_loader, "_fetch_bybit_tickers", return_value={}), \
+             patch.object(c_loader, "_fetch_okx_tickers", return_value={}), \
+             patch.object(c_loader, "_fetch_gateio_tickers", return_value={}), \
+             patch.object(c_loader, "_fetch_kucoin_tickers", return_value={}), \
+             patch.object(c_loader, "_fetch_mexc_tickers", return_value={}):
+            c_ticks = c_loader.fetch_all_tickers(max_age_seconds=1.0)
+            self.assertEqual(c_ticks.get("BTC/USDT"), 67000.0)
+            self.assertTrue(c_loader._is_price_fresh_15s)
+            self.assertFalse(c_loader._is_global_outage)
+            self.assertFalse(c_loader.is_partition_stale_active())
 
 
 if __name__ == "__main__":

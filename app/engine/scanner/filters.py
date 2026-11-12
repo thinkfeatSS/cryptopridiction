@@ -18,7 +18,7 @@ class UniverseFilter:
     """
     Institutional Asset Universe Screener.
     Enforces:
-    1. Exactly Top 40 High-Volume Pairs (Ranked by 24h quote volume).
+    1. Top High-Volume Pairs (Default Top 75, Ranked by 24h quote volume).
     2. Zero Meme Coins or Hype-driven micro-cap shitcoins.
     3. Zero Synthetic Stocks or Pegged Stables.
     4. Zero Delisted or Inactive Legacy Ghost Pairs (Verified against Binance TRADING status).
@@ -34,7 +34,8 @@ class UniverseFilter:
         min_volume: Optional[float] = None,
         bid_price: Optional[float] = None,
         ask_price: Optional[float] = None,
-        spread_bps: Optional[float] = None
+        spread_bps: Optional[float] = None,
+        allow_quarantined: bool = False
     ) -> bool:
         if not symbol or not isinstance(symbol, str):
             return False
@@ -56,17 +57,19 @@ class UniverseFilter:
             return False
 
         # 2b. Reject Toxic Quarantined Symbols (>= 2 recent stop-outs)
-        try:
-            state_path = os.path.join(EXPORT_DIR, "scanner_daemon_state.json")
-            if os.path.exists(state_path):
-                with open(state_path, "r", encoding="utf-8") as sf:
-                    q_data = json.load(sf).get("quarantined_coins", {})
-                now_t = time.time()
-                for q_k in [clean_sym, base, f"{base}USDT", f"{base}/USDT"]:
-                    if q_k in q_data and float(q_data[q_k]) > now_t:
-                        return False
-        except Exception:
-            pass
+        # Institutional benchmark assets (BTC, ETH, SOL) are immune from toxic altcoin quarantine
+        if not allow_quarantined and base not in {"BTC", "ETH", "SOL"}:
+            try:
+                state_path = os.path.join(EXPORT_DIR, "scanner_daemon_state.json")
+                if os.path.exists(state_path):
+                    with open(state_path, "r", encoding="utf-8") as sf:
+                        q_data = json.load(sf).get("quarantined_coins", {})
+                    now_t = time.time()
+                    for q_k in [clean_sym, base, f"{base}USDT", f"{base}/USDT"]:
+                        if q_k in q_data and float(q_data[q_k]) > now_t:
+                            return False
+            except Exception:
+                pass
 
         # 3. Reject Synthetic Test Tokens & Non-Alphanumeric Tokens
         if base.startswith("COIN") and base[4:].isdigit():
@@ -337,7 +340,10 @@ class UniverseFilter:
         tier1_assets.sort(key=lambda x: x["quote_volume_usd"], reverse=True)
         tier2_assets.sort(key=lambda x: x["quote_volume_usd"], reverse=True)
 
-        # Dynamic volume backfill: If market consolidation causes < 40 pairs to meet $10M,
-        # seamlessly backfill remaining slots from top Tier-2 clean pairs to guarantee exactly 40 assets
+        # Dynamic volume backfill: If market consolidation causes < limit pairs to meet $10M,
+        # seamlessly backfill remaining slots from top Tier-2 clean pairs to guarantee target asset count
         combined = tier1_assets + tier2_assets
         return combined[:limit]
+
+    # Clean alias supporting flexible universe sizes while preserving exact backward compatibility
+    get_top_universe = get_top_40_universe

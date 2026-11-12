@@ -11,6 +11,21 @@ from sklearn.ensemble import (
 )
 from app.engine.config import MODEL_CONFIGS, PRICE_CLUSTER_TOLERANCE_PCT
 
+def _format_price_precision(v: float) -> float:
+    """Dynamically formats price precision based on asset denomination magnitude."""
+    if v <= 0:
+        return 0.0
+    if v >= 1000.0:
+        return round(v, 2)
+    elif v >= 1.0:
+        return round(v, 4)
+    elif v >= 0.01:
+        return round(v, 6)
+    elif v >= 0.0001:
+        return round(v, 8)
+    else:
+        return round(v, 10)
+
 class FiveModelPriceRegressor:
     """
     Ensemble of 5 Top Gradient Boosting & Decision Forest Regressors:
@@ -44,9 +59,20 @@ class FiveModelPriceRegressor:
         """Fits all 5 regressors on coin-specific feature sequences with numerical sanitization.
         When new coins enter universe (< 15 candles), activates Bayesian shrinkage / Laplace prior return model.
         """
-        if X_train is None or len(X_train) < 15 or y_train_return is None or len(y_train_return) == 0:
-            n_samples = len(y_train_return) if (y_train_return is not None and hasattr(y_train_return, "__len__")) else 0
-            sum_r = float(np.sum(y_train_return)) if n_samples > 0 else 0.0
+        y_valid = None
+        if y_train_return is not None:
+            try:
+                y_arr = np.asarray(y_train_return, dtype=np.float64)
+                y_valid = y_arr[~np.isnan(y_arr) & ~np.isinf(y_arr)]
+            except Exception:
+                y_valid = np.array([], dtype=np.float64)
+        else:
+            y_valid = np.array([], dtype=np.float64)
+
+        n_samples = len(y_valid)
+
+        if X_train is None or len(X_train) < 15 or y_train_return is None or n_samples < 15:
+            sum_r = float(np.sum(y_valid)) if n_samples > 0 else 0.0
             # Bayesian shrinkage / Laplace prior return: regularized towards 0.003 baseline
             prior_r = 0.003
             prior_weight = 5.0
@@ -58,7 +84,7 @@ class FiveModelPriceRegressor:
             return False
 
         X_clean = np.nan_to_num(np.asarray(X_train, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
-        y_clean = np.nan_to_num(np.asarray(y_train_return, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        y_clean = np.nan_to_num(np.asarray(y_valid, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         
         self.fitted_models = []
         for name, model in self.models.items():
@@ -77,9 +103,12 @@ class FiveModelPriceRegressor:
 
     def check_feature_compatibility(self, n_features: int) -> bool:
         """Verifies if fitted models match the expected input feature dimension."""
-        if not self.is_fitted or not self.fitted_models:
+        fitted_list = getattr(self, "fitted_models", None)
+        if fitted_list is None:
+            fitted_list = list(self.models.keys())
+        if not self.is_fitted or not fitted_list:
             return True
-        for name in self.fitted_models:
+        for name in fitted_list:
             m = self.models.get(name)
             if m is not None and hasattr(m, "n_features_in_"):
                 if int(m.n_features_in_) != int(n_features):
@@ -115,14 +144,31 @@ class FiveModelPriceRegressor:
             X_live = np.nan_to_num(X_live, nan=0.0, posinf=0.0, neginf=0.0)
 
         exp_dir = str(expected_direction or "").upper()
+
+        # Sanitize raw_atr against NaN, Inf, and negative values
+        try:
+            clean_raw_atr = float(raw_atr) if (raw_atr is not None and not np.isnan(raw_atr) and not np.isinf(raw_atr) and raw_atr > 0) else 0.0
+        except Exception:
+            clean_raw_atr = 0.0
+
+        # Dynamic Modal Consensus Clustering Tolerance:
+        # Standard baseline: current_price * PRICE_CLUSTER_TOLERANCE_PCT (0.20%).
+        # If extreme market wicks widen ATR beyond standard ranges, price regressor modal consensus
+        # clustering dynamically scales its tolerance via (raw_atr * 0.25) to prevent cluster splintering.
+        volatility_tolerance = (clean_raw_atr * 0.25) if clean_raw_atr > 0 else (current_price * 0.001)
+        tolerance = max(current_price * PRICE_CLUSTER_TOLERANCE_PCT, volatility_tolerance)
+
         if not self.is_fitted:
             base_ret = getattr(self, "laplace_base_ret", self.last_base_ret)
-            if exp_dir in ["SHORT", "BEARISH", "SELL"] and base_ret > 0:
+            if abs(base_ret) < 0.001:
+                base_ret = 0.003
+            if exp_dir in ["SHORT", "BEARISH", "SELL"]:
                 base_ret = -abs(base_ret)
-            elif exp_dir in ["LONG", "BULLISH", "BUY"] and base_ret < 0:
+            elif exp_dir in ["LONG", "BULLISH", "BUY"]:
                 base_ret = abs(base_ret)
             
-            target_p = round(current_price * (1.0 + base_ret), 6 if current_price < 1.0 else 4)
+            target_p = _format_price_precision(current_price * (1.0 + base_ret))
+            target_p = max(1e-8, target_p)
             n_sz = getattr(self, "sample_size", 0)
             tally_label = f"5/5 COLD START LAPLACE PRIOR (N={n_sz})" if n_sz < 15 else "5/5 BASELINE CONSENSUS"
             return {
@@ -131,7 +177,9 @@ class FiveModelPriceRegressor:
                 "regression_votes": tally_label,
                 "winning_vote_count": 5,
                 "cluster_agreement_pct": 100.0,
+                "consensus_tolerance_usd": round(tolerance, 4),
                 "model_predictions": {m: target_p for m in self.models},
+                "outlier_models": [],
                 "directional_confluence": True,
                 "is_cold_start": True,
                 "model_type": "COLD_START_LAPLACE_PRIOR",
@@ -143,9 +191,11 @@ class FiveModelPriceRegressor:
         predicted_prices: List[float] = []
 
         fallback_ret = self.last_base_ret
-        if exp_dir in ["SHORT", "BEARISH", "SELL"] and fallback_ret > 0:
+        if abs(fallback_ret) < 0.001:
+            fallback_ret = 0.003
+        if exp_dir in ["SHORT", "BEARISH", "SELL"]:
             fallback_ret = -abs(fallback_ret)
-        elif exp_dir in ["LONG", "BULLISH", "BUY"] and fallback_ret < 0:
+        elif exp_dir in ["LONG", "BULLISH", "BUY"]:
             fallback_ret = abs(fallback_ret)
 
         for name, model in self.models.items():
@@ -162,17 +212,18 @@ class FiveModelPriceRegressor:
                     elif X_live.shape[1] < n_exp:
                         X_input = np.pad(X_live, ((0, 0), (0, n_exp - X_live.shape[1])), mode='constant')
 
-                pred_ret = float(model.predict(X_input)[0])
-                pred_ret = float(np.clip(pred_ret, -0.20, 0.20))
-                pred_price = round(current_price * (1.0 + pred_ret), 6 if current_price < 1.0 else 4)
+                raw_ret = float(model.predict(X_input)[0])
+                pred_ret = float(np.clip(raw_ret, -0.20, 0.20))
+
+                pred_price = _format_price_precision(current_price * (1.0 + pred_ret))
+                pred_price = max(1e-8, pred_price)
                 predictions[name] = pred_price
                 predicted_prices.append(pred_price)
             except Exception:
-                fallback_p = round(current_price * (1.0 + fallback_ret), 6 if current_price < 1.0 else 4)
+                fallback_p = _format_price_precision(current_price * (1.0 + fallback_ret))
+                fallback_p = max(1e-8, fallback_p)
                 predictions[name] = fallback_p
                 predicted_prices.append(fallback_p)
-
-        tolerance = max(current_price * PRICE_CLUSTER_TOLERANCE_PCT, (raw_atr * 0.25) if raw_atr > 0 else (current_price * 0.001))
 
         # Dynamic Modal Consensus Clustering with Direction Confluence and Variance Weighting
         clusters_scored = []
@@ -186,26 +237,55 @@ class FiveModelPriceRegressor:
             # Direction Confluence Score
             dir_score = 0.0
             if exp_dir in ["LONG", "BULLISH", "BUY"]:
-                dir_score = 1.0 if cluster_chg > 0 else -1.0
+                if cluster_chg > 1e-6:
+                    dir_score = 1.0
+                elif cluster_chg < -1e-6:
+                    dir_score = -1.0
+                else:
+                    dir_score = 0.0
             elif exp_dir in ["SHORT", "BEARISH", "SELL"]:
-                dir_score = 1.0 if cluster_chg < 0 else -1.0
+                if cluster_chg < -1e-6:
+                    dir_score = 1.0
+                elif cluster_chg > 1e-6:
+                    dir_score = -1.0
+                else:
+                    dir_score = 0.0
 
-            # Primary: Vote Count. Secondary: Direction Confluence. Tertiary: Cluster Tightness (-std).
-            clusters_scored.append((vote_count, dir_score, -cluster_std, p_cand, cluster))
+            # Dynamic precedence: Direction Confluence is primary when guidance is provided
+            clusters_scored.append((dir_score, vote_count, -cluster_std, p_cand, cluster))
 
         # Sort with deterministic precedence
         clusters_scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
-        best_votes, best_dir_score, neg_std, best_cand, best_cluster = clusters_scored[0]
+        best_dir_score, best_votes, neg_std, best_cand, best_cluster = clusters_scored[0]
 
-        selected_target_price = round(float(np.mean(best_cluster)), 6 if current_price < 1.0 else 4)
+        raw_cluster_mean = float(np.mean(best_cluster))
+        raw_chg = (raw_cluster_mean - current_price) / (current_price + 1e-10)
+
+        # Ensure next candle close target is confluent with trade direction
+        if exp_dir in ["LONG", "BULLISH", "BUY"]:
+            if raw_chg <= 1e-6:
+                guided_ret = max(0.001, abs(raw_chg), (tolerance / (current_price + 1e-10)))
+                selected_target_price = _format_price_precision(current_price * (1.0 + guided_ret))
+            else:
+                selected_target_price = _format_price_precision(raw_cluster_mean)
+        elif exp_dir in ["SHORT", "BEARISH", "SELL"]:
+            if raw_chg >= -1e-6:
+                guided_ret = max(0.001, abs(raw_chg), (tolerance / (current_price + 1e-10)))
+                selected_target_price = _format_price_precision(current_price * (1.0 - guided_ret))
+            else:
+                selected_target_price = _format_price_precision(raw_cluster_mean)
+        else:
+            selected_target_price = _format_price_precision(raw_cluster_mean)
+
+        selected_target_price = max(1e-8, selected_target_price)
         pred_change_pct = round(((selected_target_price - current_price) / (current_price + 1e-10)) * 100.0, 3)
-        outliers = [m for m, p in predictions.items() if abs(p - selected_target_price) > tolerance]
+        outliers = [m for m, p in predictions.items() if p not in best_cluster and abs(p - selected_target_price) > tolerance]
 
         is_direction_aligned = True
         if exp_dir in ["LONG", "BULLISH", "BUY"]:
-            is_direction_aligned = (pred_change_pct >= 0)
+            is_direction_aligned = (pred_change_pct > 0)
         elif exp_dir in ["SHORT", "BEARISH", "SELL"]:
-            is_direction_aligned = (pred_change_pct <= 0)
+            is_direction_aligned = (pred_change_pct < 0)
 
         return {
             "predicted_target_price": selected_target_price,

@@ -3,7 +3,7 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { V16SignalEnvelope } from "@/types/v16";
 import { formatPrice, formatPercent, formatProbability, getGradeBadge } from "@/lib/utils/v16";
-import { Search, ArrowUpDown, ChevronRight, ChevronLeft, Layers, ShieldCheck, CheckCircle2, SlidersHorizontal, RefreshCw } from "lucide-react";
+import { Search, ArrowUpDown, ChevronRight, ChevronLeft, Layers, ShieldCheck, CheckCircle2, SlidersHorizontal, RefreshCw, TrendingUp } from "lucide-react";
 
 interface Props {
   signals: V16SignalEnvelope[];
@@ -186,7 +186,7 @@ export default function V16SignalTable({
                   : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              <span>TP HIT (WON)</span>
+              <span>WON (TP / PROFIT)</span>
               <span className="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] text-emerald-300">
                 {counts.won}
               </span>
@@ -359,6 +359,8 @@ export default function V16SignalTable({
                 const isLong = item.immutable.direction.toUpperCase() === "LONG";
                 const cat = getSignalCategory(item);
                 const gradeBadge = getGradeBadge(item.immutable.grade);
+                const st = (item.dynamic?.status || item.immutable?.status || "").toUpperCase();
+                const out = (item.dynamic?.outcome_label || "").toUpperCase();
 
                 return (
                   <tr
@@ -374,9 +376,15 @@ export default function V16SignalTable({
                     <td className="py-3 px-3.5 whitespace-nowrap">
                       <div className="flex items-center gap-2">
                         {cat === "WON" ? (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                            <CheckCircle2 className="w-2.5 h-2.5" /> TP HIT
-                          </span>
+                          (st.includes("TP") || out.includes("TP")) ? (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                              <CheckCircle2 className="w-2.5 h-2.5" /> TP HIT
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-teal-950/70 text-teal-300 border border-teal-500/30 flex items-center gap-1">
+                              <TrendingUp className="w-2.5 h-2.5" /> PROFIT EXP
+                            </span>
+                          )
                         ) : cat === "LOST" ? (
                           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-950/70 text-rose-300 border border-rose-500/30">
                             STOPPED

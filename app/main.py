@@ -17,6 +17,18 @@ async def lifespan(app: FastAPI):
     ws_manager.set_loop(loop)
     watcher_task = asyncio.create_task(ws_manager.start_background_watcher(settings.EXPORT_DIR))
     
+    # Start decoupled sub-second WebSocket feed for zero-latency price ticks
+    try:
+        from app.database import is_test_environment
+        if not is_test_environment() or os.environ.get("WS_TEST_CONNECT") == "1":
+            from app.engine.scanner.websocket_feed import ws_feed_manager
+            ws_feed_manager.start()
+            print("[BACKEND ⚡] Global WebSocket Feed Manager active.")
+        else:
+            print("[BACKEND ℹ️] Test environment detected: Outbound WebSocket price stream deferred.")
+    except Exception as e:
+        print(f"[BACKEND ⚠️] WebSocket Feed Manager startup error: {e}")
+
     import threading
     def _bg_startup():
         try:
@@ -36,6 +48,14 @@ async def lifespan(app: FastAPI):
         await watcher_task
     except asyncio.CancelledError:
         pass
+    try:
+        from app.database import is_test_environment
+        if not is_test_environment() or os.environ.get("WS_TEST_CONNECT") == "1":
+            from app.engine.scanner.websocket_feed import ws_feed_manager
+            ws_feed_manager.stop()
+            print("[BACKEND 🛑] Global WebSocket Feed Manager stopped.")
+    except Exception as e:
+        print(f"[BACKEND ⚠️] WebSocket Feed Manager stop error: {e}")
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

@@ -33,6 +33,8 @@ def get_live_forecast(response: Response, db: Session = Depends(get_db)):
                 f_data["dominant_signals_per_coin"] = [s for s in f_data["dominant_signals_per_coin"] if not is_meme_coin(s.get("symbol", ""))]
             if "scanner_leaderboard" in f_data and isinstance(f_data["scanner_leaderboard"], list):
                 f_data["scanner_leaderboard"] = [s for s in f_data["scanner_leaderboard"] if not is_meme_coin(s.get("symbol", ""))]
+            if "radar_pre_signals" in f_data and isinstance(f_data["radar_pre_signals"], list):
+                f_data["radar_pre_signals"] = [s for s in f_data["radar_pre_signals"] if not is_meme_coin(s.get("symbol", ""))]
             # Reconcile BTC shield with live Quant Edge V16 regime
             try:
                 from app.quant_v16.regime import reconcile_btc_shield

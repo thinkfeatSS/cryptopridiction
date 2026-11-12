@@ -3,13 +3,18 @@ from sqlalchemy import func, or_, desc
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 from collections import defaultdict
+import logging
 import math
 import os
 import json
 import numpy as np
+import threading
 
 import time
 import requests
+import random
+
+logger = logging.getLogger("signal_service")
 
 from app.config import settings
 from app.models import SignalAudit, PaperPosition, ClosedTrade, MarketForecast
@@ -37,43 +42,215 @@ _TICKERS_24H_CACHE: list = []
 _TICKERS_24H_TS: float = 0.0
 
 _FETCHING_TICKERS = False
+_COINCAP_THROTTLED_UNTIL: float = 0.0
+_COINCAP_CONSECUTIVE_429: int = 0
+_PAPRIKA_THROTTLED_UNTIL: float = 0.0
+_PAPRIKA_CONSECUTIVE_429: int = 0
+_BITGET_THROTTLED_UNTIL: float = 0.0
+_BITGET_CONSECUTIVE_429: int = 0
 
-def _async_refresh_tickers():
+def _async_refresh_tickers(sync: bool = False):
     global _FETCHING_TICKERS, _TICKERS_24H_CACHE, _TICKERS_24H_TS, _LIVE_PRICES_CACHE, _LIVE_PRICES_TS
+    global _COINCAP_THROTTLED_UNTIL, _COINCAP_CONSECUTIVE_429, _PAPRIKA_THROTTLED_UNTIL, _PAPRIKA_CONSECUTIVE_429, _BITGET_THROTTLED_UNTIL, _BITGET_CONSECUTIVE_429
     if _FETCHING_TICKERS:
         return
     _FETCHING_TICKERS = True
     def _worker():
         global _FETCHING_TICKERS, _TICKERS_24H_CACHE, _TICKERS_24H_TS, _LIVE_PRICES_CACHE, _LIVE_PRICES_TS
+        global _COINCAP_THROTTLED_UNTIL, _COINCAP_CONSECUTIVE_429, _PAPRIKA_THROTTLED_UNTIL, _PAPRIKA_CONSECUTIVE_429, _BITGET_THROTTLED_UNTIL, _BITGET_CONSECUTIVE_429
         try:
-            url = "https://data-api.binance.vision/api/v3/ticker/24hr"
-            resp = requests.get(url, timeout=5.0)
-            if resp.status_code == 200:
-                data = resp.json()
-                _TICKERS_24H_CACHE = data
-                _TICKERS_24H_TS = time.time()
-                prices = {}
-                for t in data:
-                    s = t.get('symbol', '')
+            prices = {}
+            # 1. Binance Vision & Binance Spot Mirrors
+            urls = [
+                "https://data-api.binance.vision/api/v3/ticker/24hr",
+                "https://api.binance.com/api/v3/ticker/24hr",
+                "https://api1.binance.com/api/v3/ticker/24hr"
+            ]
+            for u in urls:
+                try:
+                    resp = requests.get(u, timeout=3.5)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            _TICKERS_24H_CACHE = data
+                            _TICKERS_24H_TS = time.time()
+                            for t in data:
+                                s = t.get('symbol', '')
+                                try:
+                                    p = float(t.get('lastPrice', 0.0))
+                                    if p > 0:
+                                        prices[s] = p
+                                        if s.endswith('USDT'):
+                                            base = s[:-4]
+                                            prices[f"{base}/USDT"] = p
+                                            prices[base] = p
+                                except Exception:
+                                    pass
+                            if prices:
+                                break
+                except Exception:
+                    continue
+
+            # 2. Tier-2 Bybit Fallback if Binance is throttled or geo-fenced
+            if not prices:
+                try:
+                    bybit_resp = requests.get("https://api.bybit.com/v5/market/tickers?category=spot", timeout=3.5)
+                    if bybit_resp.status_code == 200:
+                        b_data = bybit_resp.json()
+                        if b_data.get("retCode") == 0:
+                            for it in b_data.get("result", {}).get("list", []):
+                                sym = it.get("symbol")
+                                p_val = it.get("lastPrice")
+                                if sym and p_val:
+                                    p = float(p_val)
+                                    prices[sym] = p
+                                    if sym.endswith("USDT"):
+                                        base = sym[:-4]
+                                        prices[f"{base}/USDT"] = p
+                                        prices[base] = p
+                except Exception:
+                    pass
+
+            # 3. Tier-3 OKX Fallback
+            if not prices:
+                try:
+                    okx_resp = requests.get("https://www.okx.com/api/v5/market/tickers?instType=SPOT", timeout=3.5)
+                    if okx_resp.status_code == 200:
+                        o_data = okx_resp.json()
+                        if str(o_data.get("code")) == "0":
+                            for it in o_data.get("data", []):
+                                inst_id = it.get("instId", "")
+                                last_p = it.get("last")
+                                if inst_id and last_p:
+                                    p = float(last_p)
+                                    clean = inst_id.replace("-", "")
+                                    prices[clean] = p
+                                    if inst_id.endswith("-USDT"):
+                                        base = inst_id[:-5]
+                                        prices[f"{base}/USDT"] = p
+                                        prices[base] = p
+                except Exception:
+                    pass
+
+            now_t = time.time()
+            # 4. Tier-6.5 CoinCap Fallback with exponential backoff on HTTP 429
+            if not prices and now_t >= _COINCAP_THROTTLED_UNTIL:
+                try:
+                    cc_resp = requests.get("https://api.coincap.io/v2/rates", timeout=3.5)
+                    if cc_resp.status_code == 200:
+                        for it in cc_resp.json().get("data", []):
+                            sym = it.get("symbol")
+                            rate_usd = it.get("rateUsd")
+                            if sym and rate_usd:
+                                p = float(rate_usd)
+                                prices[f"{sym}USDT"] = p
+                                prices[f"{sym}/USDT"] = p
+                                prices[sym] = p
+                        if prices:
+                            _COINCAP_CONSECUTIVE_429 = 0
+                    elif cc_resp.status_code == 429:
+                        _COINCAP_CONSECUTIVE_429 += 1
+                        backoff = min(180.0, max(60.0, 60.0 * (1.5 ** min(_COINCAP_CONSECUTIVE_429 - 1, 4)) + random.uniform(0.0, 3.0)))
+                        _COINCAP_THROTTLED_UNTIL = now_t + backoff
+                except Exception:
+                    pass
+
+            # 5. Tier-6.6 Coinpaprika Fallback
+            if not prices and now_t >= _PAPRIKA_THROTTLED_UNTIL:
+                try:
+                    pap_resp = requests.get("https://api.coinpaprika.com/v1/tickers", timeout=3.5)
+                    if pap_resp.status_code == 200:
+                        best_rank: Dict[str, int] = {}
+                        for it in pap_resp.json():
+                            sym = str(it.get("symbol") or "").upper()
+                            p_usd = it.get("quotes", {}).get("USD", {}).get("price")
+                            try:
+                                rank = int(it.get("rank") or 999999)
+                            except Exception:
+                                rank = 999999
+                            if sym and p_usd and float(p_usd) > 0:
+                                if rank < best_rank.get(sym, 999999):
+                                    best_rank[sym] = rank
+                                    p = float(p_usd)
+                                    prices[f"{sym}USDT"] = p
+                                    prices[f"{sym}/USDT"] = p
+                                    prices[sym] = p
+                        if prices:
+                            _PAPRIKA_CONSECUTIVE_429 = 0
+                    elif pap_resp.status_code == 429:
+                        _PAPRIKA_CONSECUTIVE_429 += 1
+                        backoff = min(180.0, max(60.0, 60.0 * (1.5 ** min(_PAPRIKA_CONSECUTIVE_429 - 1, 4)) + random.uniform(0.0, 3.0)))
+                        _PAPRIKA_THROTTLED_UNTIL = now_t + backoff
+                except Exception:
+                    pass
+
+            # 6. Tier-6.7 Bitget Fallback
+            if not prices and now_t >= _BITGET_THROTTLED_UNTIL:
+                try:
+                    bg_resp = requests.get("https://api.bitget.com/api/v2/spot/market/tickers", timeout=3.5)
+                    if bg_resp.status_code == 200:
+                        raw_list = bg_resp.json().get("data", []) if isinstance(bg_resp.json(), dict) else []
+                        for it in raw_list:
+                            sym = it.get("symbol")
+                            last_pr = it.get("lastPr")
+                            if sym and last_pr and float(last_pr) > 0:
+                                p = float(last_pr)
+                                prices[sym] = p
+                                if sym.endswith("USDT"):
+                                    base = sym[:-4]
+                                    prices[f"{base}/USDT"] = p
+                                    prices[base] = p
+                        if prices:
+                            _BITGET_CONSECUTIVE_429 = 0
+                    elif bg_resp.status_code == 429:
+                        _BITGET_CONSECUTIVE_429 += 1
+                        backoff = min(180.0, max(60.0, 60.0 * (1.5 ** min(_BITGET_CONSECUTIVE_429 - 1, 4)) + random.uniform(0.0, 3.0)))
+                        _BITGET_THROTTLED_UNTIL = now_t + backoff
+                except Exception:
+                    pass
+
+            loaded_from_swr = False
+            # 7. Persistent SWR disk cache step down during upstream aggregator rate-limiting
+            if not prices:
+                try:
+                    export_dir = getattr(settings, "EXPORT_DIR", "./export_app_data")
+                    cache_file = os.path.join(export_dir, "live_tickers_swr.json")
+                    if os.path.exists(cache_file):
+                        with open(cache_file, "r", encoding="utf-8") as f:
+                            swr_data = json.load(f)
+                            cached_ticks = swr_data.get("tickers", {})
+                            cached_ts = float(swr_data.get("timestamp", 0.0))
+                            # 180s rate-limit grace period
+                            if cached_ticks and (now_t - cached_ts) <= 180.0:
+                                prices = cached_ticks
+                                loaded_from_swr = True
+                except Exception:
+                    pass
+
+            if prices:
+                _LIVE_PRICES_CACHE = prices
+                _LIVE_PRICES_TS = time.time()
+                # Atomically persist fresh prices to SWR disk cache when fetched from live upstream
+                if not loaded_from_swr:
                     try:
-                        p = float(t.get('lastPrice', 0.0))
-                        if p > 0:
-                            prices[s] = p
-                            if s.endswith('USDT'):
-                                base = s[:-4]
-                                prices[f"{base}/USDT"] = p
-                                prices[base] = p
+                        export_dir = getattr(settings, "EXPORT_DIR", "./export_app_data")
+                        os.makedirs(export_dir, exist_ok=True)
+                        cache_file = os.path.join(export_dir, "live_tickers_swr.json")
+                        tmp_file = f"{cache_file}.tmp_{os.getpid()}_{threading.get_ident()}"
+                        with open(tmp_file, "w", encoding="utf-8") as f:
+                            json.dump({"timestamp": _LIVE_PRICES_TS, "tickers": prices}, f)
+                        os.replace(tmp_file, cache_file)
                     except Exception:
                         pass
-                if prices:
-                    _LIVE_PRICES_CACHE = prices
-                    _LIVE_PRICES_TS = time.time()
         except Exception:
             pass
         finally:
             _FETCHING_TICKERS = False
-    
-    import threading
+
+    if sync:
+        _worker()
+        return
+
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
 
@@ -87,6 +264,21 @@ def _fetch_24hr_tickers_raw(max_age: float = 30.0) -> list:
 def fetch_live_binance_prices(max_age_seconds: float = 15.0) -> Dict[str, float]:
     """Fetches and caches live Binance spot prices instantly in 0ms without blocking request threads."""
     global _LIVE_PRICES_CACHE, _LIVE_PRICES_TS
+
+    # 1. First priority: Sub-second in-memory ticks from WebSocketFeedManager
+    try:
+        from app.engine.scanner.websocket_feed import ws_feed_manager
+        ws_prices = ws_feed_manager.get_prices()
+        if ws_prices and ws_feed_manager.is_healthy(max_staleness_seconds=4.0):
+            _LIVE_PRICES_CACHE.update(ws_prices)
+            _LIVE_PRICES_TS = time.time()
+            return _LIVE_PRICES_CACHE
+        elif ws_prices and not _LIVE_PRICES_CACHE:
+            _LIVE_PRICES_CACHE.update(ws_prices)
+            _LIVE_PRICES_TS = time.time()
+    except Exception:
+        pass
+
     now = time.time()
     if not _LIVE_PRICES_CACHE:
         try:
@@ -107,8 +299,25 @@ def fetch_live_binance_prices(max_age_seconds: float = 15.0) -> Dict[str, float]
                 if prices:
                     _LIVE_PRICES_CACHE = prices
                     _LIVE_PRICES_TS = time.time()
+            else:
+                _async_refresh_tickers()
         except Exception:
             _async_refresh_tickers()
+
+        if not _LIVE_PRICES_CACHE:
+            try:
+                export_dir = getattr(settings, "EXPORT_DIR", "./export_app_data")
+                cache_file = os.path.join(export_dir, "live_tickers_swr.json")
+                if os.path.exists(cache_file):
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        swr_data = json.load(f)
+                        cached_ticks = swr_data.get("tickers", {})
+                        cached_ts = float(swr_data.get("timestamp", 0.0))
+                        if cached_ticks and (now - cached_ts) <= 180.0:
+                            _LIVE_PRICES_CACHE = cached_ticks
+                            _LIVE_PRICES_TS = cached_ts
+            except Exception:
+                pass
     elif (now - _LIVE_PRICES_TS) >= max_age_seconds:
         _async_refresh_tickers()
     return _LIVE_PRICES_CACHE
@@ -133,24 +342,71 @@ def fetch_intra_candle_extremes(symbol: str, horizon: str = "15M", since_ts: Opt
         
     norm_hz = "15M" if "15" in horizon else ("24H" if ("24" in horizon or "1D" in horizon) else "1H")
     interval = "1m" if norm_hz == "15M" else ("5m" if norm_hz == "1H" else "1h")
-    limit = 15 if norm_hz == "15M" else 12
+    bar_secs = 60 if interval == "1m" else (300 if interval == "5m" else 3600)
+    base_limit = 15 if norm_hz == "15M" else 12
+    if since_ts and now_t > since_ts:
+        needed = int((now_t - since_ts) / bar_secs) + 5
+        limit = min(1000, max(base_limit, needed))
+    else:
+        limit = base_limit
 
-    cache_key = f"{raw_sym}:{interval}"
+    cache_key = f"{raw_sym}:{interval}:{limit}"
     klines = None
     if cache_key in _INTRA_KLINES_CACHE and (now_t - _INTRA_KLINES_TS.get(cache_key, 0.0)) < 10.0:
         klines = _INTRA_KLINES_CACHE[cache_key]
     else:
-        try:
-            url = f"https://data-api.binance.vision/api/v3/klines?symbol={raw_sym}&interval={interval}&limit={limit}"
-            resp = requests.get(url, timeout=2.5)
-            if resp.status_code == 200:
-                k_data = resp.json()
-                if isinstance(k_data, list) and len(k_data) > 0:
-                    klines = k_data
-                    _INTRA_KLINES_CACHE[cache_key] = klines
-                    _INTRA_KLINES_TS[cache_key] = now_t
-        except Exception:
-            pass
+        # Tier 1: Binance Vision & Binance Spot Mirrors
+        binance_urls = [
+            f"https://data-api.binance.vision/api/v3/klines?symbol={raw_sym}&interval={interval}&limit={limit}",
+            f"https://api.binance.com/api/v3/klines?symbol={raw_sym}&interval={interval}&limit={limit}"
+        ]
+        for url in binance_urls:
+            try:
+                resp = requests.get(url, timeout=2.5)
+                if resp.status_code == 200:
+                    k_data = resp.json()
+                    if isinstance(k_data, list) and len(k_data) > 0:
+                        klines = k_data
+                        _INTRA_KLINES_CACHE[cache_key] = klines
+                        _INTRA_KLINES_TS[cache_key] = now_t
+                        break
+            except Exception:
+                continue
+
+        # Tier 2: Bybit Spot Fallback if Binance is throttled
+        if not klines:
+            try:
+                tf_bybit = {'1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': 'D'}.get(interval, '60')
+                bybit_url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={raw_sym}&interval={tf_bybit}&limit={limit}"
+                resp = requests.get(bybit_url, timeout=2.5)
+                if resp.status_code == 200:
+                    b_data = resp.json()
+                    if b_data.get("retCode") == 0:
+                        raw_list = b_data.get("result", {}).get("list", [])
+                        if raw_list:
+                            klines = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in raw_list]
+                            _INTRA_KLINES_CACHE[cache_key] = klines
+                            _INTRA_KLINES_TS[cache_key] = now_t
+            except Exception:
+                pass
+
+        # Tier 3: OKX Spot Fallback
+        if not klines:
+            try:
+                base_sym = raw_sym[:-4] if raw_sym.endswith("USDT") else raw_sym
+                tf_okx = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1H', '4h': '4H', '1d': '1D'}.get(interval, '1H')
+                okx_url = f"https://www.okx.com/api/v5/market/candles?instId={base_sym}-USDT&bar={tf_okx}&limit={limit}"
+                resp = requests.get(okx_url, timeout=2.5)
+                if resp.status_code == 200:
+                    o_data = resp.json()
+                    if str(o_data.get("code")) == "0":
+                        raw_list = o_data.get("data", [])
+                        if raw_list:
+                            klines = [[int(k[0]), float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])] for k in raw_list]
+                            _INTRA_KLINES_CACHE[cache_key] = klines
+                            _INTRA_KLINES_TS[cache_key] = now_t
+            except Exception:
+                pass
 
     if not klines:
         return (0.0, 0.0)
@@ -610,8 +866,11 @@ class SignalService:
 
             open_trade_ids = [k for k in open_paper_map.keys() if isinstance(k, str) and k]
             pending_clauses = [
-                SignalAudit.status.in_(["PENDING_EVALUATION", "ACTIVE", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]),
-                SignalAudit.outcome_label.like("%PENDING%")
+                SignalAudit.status.in_(["PENDING_EVALUATION", "ACTIVE", "RESTING_LIMIT", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]),
+                SignalAudit.outcome_label.like("%PENDING%"),
+                SignalAudit.outcome_label.like("%RUNNING%"),
+                SignalAudit.outcome_label.like("%RESTING%"),
+                SignalAudit.outcome_label.like("%AWAIT%")
             ]
             if open_trade_ids:
                 pending_clauses.append(SignalAudit.signal_id.in_(open_trade_ids))
@@ -637,16 +896,49 @@ class SignalService:
                 # Step 1: Check for direct Paper Trading Execution Match in OPEN running trades FIRST!
                 op_match = open_paper_map.get(s.signal_id) or open_paper_map.get((s_sym, norm_hz)) or open_paper_map.get((s_sym.replace("/", "").replace(":USDT", ""), norm_hz))
                 if op_match:
-                    s.status = "ACTIVE"
-                    s.outcome_label = "RUNNING 🚀"
-                    if hasattr(s, "paper_trading_status"):
-                        s.paper_trading_status = "EXECUTED (PAPER WALLET)"
+                    is_resting = bool(op_match.get("is_limit_resting") or op_match.get("status") == "RESTING_LIMIT")
+                    if is_resting:
+                        s.status = "RESTING_LIMIT"
+                        s.outcome_label = "🎯 PENDING LIMIT (AWAIT PULLBACK)" if str(s.direction).upper() == "LONG" else "🎯 PENDING LIMIT (AWAIT BOUNCE)"
+                        if hasattr(s, "paper_trading_status"):
+                            s.paper_trading_status = "RESTING LIMIT (ORDER BOOK)"
+                    elif op_match.get("tp2_hit"):
+                        s.status = "TP2_LOCKED_TRAIL"
+                        s.outcome_label = "🟢 TP2 HIT (TRAILING SL @ TP1)"
+                        if hasattr(s, "paper_trading_status"):
+                            s.paper_trading_status = "EXECUTED (PAPER WALLET)"
+                    elif op_match.get("tp1_hit"):
+                        s.status = "TP1_LOCKED_BREAKEVEN"
+                        s.outcome_label = "🟢 TP1 HIT (SL @ BREAKEVEN)"
+                        if hasattr(s, "paper_trading_status"):
+                            s.paper_trading_status = "EXECUTED (PAPER WALLET)"
+                    elif op_match.get("is_breakeven_locked") or op_match.get("status") == "TIER0_PROTECTED_BREAKEVEN":
+                        s.status = "TIER0_PROTECTED_BREAKEVEN"
+                        s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
+                        if hasattr(s, "paper_trading_status"):
+                            s.paper_trading_status = "EXECUTED (PAPER WALLET)"
+                    else:
+                        s.status = "ACTIVE"
+                        s.outcome_label = "RUNNING 🚀"
+                        if hasattr(s, "paper_trading_status"):
+                            s.paper_trading_status = "EXECUTED (PAPER WALLET)"
+
                     cur_p = safe_float(op_match.get("current_price") or s.entry_price, 0.0)
                     if hasattr(s, "current_price"):
                         s.current_price = cur_p
                     if hasattr(s, "live_pnl_pct"):
                         s.live_pnl_pct = safe_float(op_match.get("unrealized_pnl_pct"), 0.0)
                     s.sl_price = safe_float(op_match.get("sl_price") or s.sl_price, 0.0)
+                    op_peak = safe_float(op_match.get("peak_price_seen"), 0.0)
+                    op_trough = safe_float(op_match.get("trough_price_seen"), 0.0)
+                    op_mfe = safe_float(op_match.get("peak_gain_pct"), 0.0)
+                    if op_peak > 0:
+                        s.peak_price_seen = max(safe_float(s.peak_price_seen, op_peak), op_peak, cur_p)
+                    if op_trough > 0:
+                        prev_tr = safe_float(s.trough_price_seen, 0.0)
+                        s.trough_price_seen = min(prev_tr, op_trough, cur_p) if prev_tr > 0 else min(op_trough, cur_p)
+                    if op_mfe > 0:
+                        s.max_potential_gain_pct = round(max(safe_float(s.max_potential_gain_pct, 0.0), op_mfe), 2)
                     s.exit_price = None
                     s.realized_return_pct = None
                     s.evaluated_at_utc = None
@@ -670,8 +962,22 @@ class SignalService:
                     exit_p = safe_float(pt_match.get("exit_price") or s.entry_price, 0.0)
                     ret_pct = safe_float(pt_match.get("return_pct"), 0.0)
                     closed_at = pt_match.get("closed_at_utc") or pt_match.get("closed_at") or now_str
+                    pt_tp2 = bool(pt_match.get("tp2_hit", False))
+                    pt_tp1 = bool(pt_match.get("tp1_hit", False)) or pt_tp2
 
-                    if "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
+                    if "TAKE_PROFIT_2_TRAIL_SL" in exit_reason or "WON_TP2_TRAIL" in exit_reason:
+                        s.status = "WON_TP2_TRAIL"
+                        s.outcome_label = f"🟢 WON (TP2 + TRAILING RUNNER {ret_pct:+.2f}%)"
+                    elif "TAKE_PROFIT_1_TRAIL_SL" in exit_reason or "WON_TP1_BE" in exit_reason:
+                        s.status = "WON_TP1_BE"
+                        s.outcome_label = f"🟢 WON (TP1 + TRAILING RUNNER {ret_pct:+.2f}%)"
+                    elif "TAKE_PROFIT_2_RUNNER_EXPIRY" in exit_reason or (("HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason) and pt_tp2):
+                        s.status = "WON_TP2_EXP"
+                        s.outcome_label = f"🟢 WON (TP2 + EXP {ret_pct:+.2f}%)"
+                    elif "TAKE_PROFIT_1_RUNNER_EXPIRY" in exit_reason or (("HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason) and pt_tp1):
+                        s.status = "WON_TP1_EXP"
+                        s.outcome_label = f"🟢 WON (TP1 + EXP {ret_pct:+.2f}%)"
+                    elif "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
                         s.status = "BREAKEVEN_GUARD"
                         s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_pct:+.2f}%)"
                     elif "STOP_LOSS" in exit_reason:
@@ -701,6 +1007,21 @@ class SignalService:
                         s.outcome_label = f"CLOSED ({exit_reason})"
 
                     s.exit_price = round(exit_p, 6)
+                    if hasattr(s, "current_price"):
+                        s.current_price = round(exit_p, 6)
+                    pt_sl = safe_float(pt_match.get("sl_price"), 0.0)
+                    if pt_sl > 0:
+                        s.sl_price = round(pt_sl, 6)
+                    pt_peak = safe_float(pt_match.get("peak_price_seen"), 0.0)
+                    pt_trough = safe_float(pt_match.get("trough_price_seen"), 0.0)
+                    pt_mfe = safe_float(pt_match.get("peak_gain_pct"), 0.0)
+                    if pt_peak > 0:
+                        s.peak_price_seen = round(max(safe_float(s.peak_price_seen, 0.0), pt_peak, exit_p), 6)
+                    if pt_trough > 0:
+                        prev_tr = safe_float(s.trough_price_seen, 0.0)
+                        s.trough_price_seen = round(min(prev_tr, pt_trough, exit_p) if prev_tr > 0 else min(pt_trough, exit_p), 6)
+                    if pt_mfe > 0:
+                        s.max_potential_gain_pct = round(max(safe_float(s.max_potential_gain_pct, 0.0), pt_mfe), 2)
                     s.realized_return_pct = round(ret_pct, 2)
                     s.evaluated_at_utc = closed_at
                     updated = True
@@ -721,10 +1042,16 @@ class SignalService:
                 if canc_match:
                     canc_reason = str(canc_match.get("cancellation_reason", "CANCELLED"))
                     canc_at = canc_match.get("cancelled_at_utc") or canc_match.get("cancelled_at") or now_str
+                    live_mkt_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
+                    canc_mkt_p = safe_float(canc_match.get("cancel_market_price"), 0.0)
+                    existing_curr_p = safe_float(getattr(s, "current_price", None), 0.0)
                     limit_p = safe_float(canc_match.get("optimal_entry_limit") or s.entry_price, 0.0)
+                    ref_mkt_p = live_mkt_p if (live_mkt_p and live_mkt_p > 0) else (canc_mkt_p if canc_mkt_p > 0 else (existing_curr_p if existing_curr_p > 0 else limit_p))
                     s.status = "EXPIRED_HORIZON"
                     s.outcome_label = "⏱️ EXPIRED"
-                    s.exit_price = round(limit_p, 6) if limit_p > 0 else s.entry_price
+                    s.exit_price = round(ref_mkt_p, 6) if ref_mkt_p > 0 else s.entry_price
+                    if ref_mkt_p > 0:
+                        s.current_price = round(ref_mkt_p, 6)
                     s.realized_return_pct = 0.0
                     s.evaluated_at_utc = canc_at
                     updated = True
@@ -787,20 +1114,6 @@ class SignalService:
                 high_p = s.peak_price_seen
                 low_p = s.trough_price_seen
 
-                max_gain = ((high_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - low_p) / entry_p) * 100.0
-                s.max_potential_gain_pct = round(max_gain, 2)
-
-                is_hit_tp3 = (direction == "LONG" and high_p >= tp3_p) or (direction == "SHORT" and low_p <= tp3_p)
-                is_hit_tp2 = (direction == "LONG" and high_p >= tp2_p) or (direction == "SHORT" and low_p <= tp2_p)
-                is_hit_tp1 = (direction == "LONG" and high_p >= tp1_p) or (direction == "SHORT" and low_p <= tp1_p)
-
-                # Stop loss check: evaluate against intra-candle extremes and current spot price
-                is_be_locked = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]
-                if is_be_locked:
-                    is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
-                else:
-                    is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
-
                 is_expired = False
                 pred_close = str(s.predicted_close_utc or "").strip()
                 if not pred_close or pred_close == "N/A":
@@ -845,14 +1158,78 @@ class SignalService:
                 except Exception:
                     pass
 
-                # Check if signal has reached canonical expiry age
-                if sig_age_sec is not None and sig_age_sec >= max_sec:
-                    # Dynamic Consolidation Grace Extension (+50% TTL if coiling within flat consolidation)
-                    ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
-                    if ret_now <= 0.60 and sig_age_sec < (max_sec * 1.50) and not is_hit_sl:
-                        is_expired = False
+                # Dynamic Trailing Expiry & Runner Protection Engine:
+                is_runner_sig = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
+                ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
+                is_prof_sig = (direction == "LONG" and curr_p >= entry_p * 1.004) or (direction == "SHORT" and curr_p <= entry_p * 0.996) or (s.status == "TIER0_PROTECTED_BREAKEVEN" and ret_now >= 0.15)
+
+                if is_runner_sig:
+                    # 1. Runner Protection: Risk is hedged by trailed SL; extend TTL up to 4.0x base
+                    eff_max_sec = max_sec * 4.0
+                elif is_prof_sig:
+                    # 2. Profitable Pre-TP1 Trade: Dynamic trailing horizon up to 2.5x base
+                    eff_max_sec = max_sec * 2.5
+                elif ret_now <= 0.60:
+                    # 3. Dynamic Consolidation Grace Extension (+50% TTL if coiled in flat consolidation)
+                    eff_max_sec = max_sec * 1.50
+                else:
+                    # 4. Stagnant or losing trade: strictly enforce canonical base TTL
+                    eff_max_sec = max_sec
+
+                if sig_age_sec is not None and sig_age_sec >= eff_max_sec:
+                    is_expired = True
+                else:
+                    is_expired = False
+
+                # Microstructure Resting Limit Order Lifecycle Check:
+                # Do NOT trigger premature TP/SL before the resting limit order is filled!
+                is_resting_order = (
+                    s.status in ["RESTING_LIMIT", "PENDING_LIMIT"]
+                    or "RESTING LIMIT" in str(getattr(s, "decision", "")).upper()
+                    or "AWAIT PULLBACK" in str(getattr(s, "outcome_label", "")).upper()
+                    or "AWAIT BOUNCE" in str(getattr(s, "outcome_label", "")).upper()
+                    or bool(getattr(s, "is_limit_pending", False))
+                )
+                if is_resting_order:
+                    has_filled = (direction == "LONG" and low_p <= entry_p) or (direction == "SHORT" and high_p >= entry_p)
+                    if not has_filled:
+                        if is_expired:
+                            s.status = "EXPIRED_HORIZON"
+                            s.outcome_label = "⏱️ EXPIRED (UNFILLED)"
+                            s.exit_price = round(curr_p, 6) if (curr_p and curr_p > 0) else entry_p
+                            if curr_p and curr_p > 0:
+                                s.current_price = round(curr_p, 6)
+                            s.realized_return_pct = 0.0
+                            s.evaluated_at_utc = now_str
+                            updated = True
+                            continue
+                        else:
+                            s.status = "RESTING_LIMIT"
+                            s.outcome_label = "🎯 PENDING LIMIT (AWAIT PULLBACK)" if direction == "LONG" else "🎯 PENDING LIMIT (AWAIT BOUNCE)"
+                            if hasattr(s, "paper_trading_status") and not s.paper_trading_status:
+                                s.paper_trading_status = "RESTING LIMIT (ORDER BOOK)"
+                            updated = True
+                            continue
                     else:
-                        is_expired = True
+                        s.status = "ACTIVE"
+                        s.outcome_label = "RUNNING 🚀"
+                        if hasattr(s, "paper_trading_status"):
+                            s.paper_trading_status = "EXECUTED (PAPER WALLET)"
+                        updated = True
+
+                max_gain = ((high_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - low_p) / entry_p) * 100.0
+                s.max_potential_gain_pct = round(max_gain, 2)
+
+                is_hit_tp3 = (direction == "LONG" and high_p >= tp3_p) or (direction == "SHORT" and low_p <= tp3_p)
+                is_hit_tp2 = (direction == "LONG" and high_p >= tp2_p) or (direction == "SHORT" and low_p <= tp2_p)
+                is_hit_tp1 = (direction == "LONG" and high_p >= tp1_p) or (direction == "SHORT" and low_p <= tp1_p)
+
+                # Stop loss check: evaluate against intra-candle extremes and current spot price
+                is_be_locked = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]
+                if is_be_locked:
+                    is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
+                else:
+                    is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
 
                 # 0. Acute Volatile News Shock & Tier-0 Early Breakeven Guard
                 is_news_shock_active = False
@@ -867,21 +1244,33 @@ class SignalService:
                 tp1_dist = abs(tp1_p - entry_p) / max(1e-12, entry_p) * 100.0
 
                 # Phase 4: Dynamic 2-Stage Profit Ratchet (+0.50% Micro-Guard & +0.75% Tier-0 Breakeven)
-                # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by 50% once trade shows favorable expansion)
+                # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by strictly 50% from immutable original anchor)
                 if max_gain >= 0.50 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
-                    orig_sl = safe_float(getattr(s, "initial_sl_price", None) or s.sl_price or entry_p, entry_p)
+                    orig_sl = safe_float(getattr(s, "sl_original", None) or getattr(s, "initial_sl_price", None), 0.0)
+                    if orig_sl <= 0.0 or (direction == "LONG" and orig_sl >= entry_p) or (direction == "SHORT" and orig_sl <= entry_p):
+                        orig_sl = sl_p
+                        if hasattr(s, "sl_original") and getattr(s, "sl_original", None) is None:
+                            s.sl_original = orig_sl
+
+                    spread_bps = safe_float(getattr(s, "spread_bps", None), 5.0)
+                    min_sl_dist = max(entry_p * 0.0035, 2.5 * (spread_bps / 10000.0) * entry_p)
+
                     if direction == "LONG" and orig_sl < entry_p:
-                        half_risk_sl = round(entry_p - (abs(entry_p - orig_sl) * 0.50), 6)
-                        if half_risk_sl > sl_p:
-                            s.sl_price = half_risk_sl
-                            sl_p = half_risk_sl
-                            updated = True
+                        full_risk = entry_p - orig_sl
+                        if full_risk > (min_sl_dist * 1.5):
+                            target_half_sl = round(entry_p - max(min_sl_dist, full_risk * 0.50), 6)
+                            if target_half_sl > sl_p and target_half_sl < entry_p:
+                                s.sl_price = target_half_sl
+                                sl_p = target_half_sl
+                                updated = True
                     elif direction == "SHORT" and orig_sl > entry_p:
-                        half_risk_sl = round(entry_p + (abs(orig_sl - entry_p) * 0.50), 6)
-                        if half_risk_sl < sl_p:
-                            s.sl_price = half_risk_sl
-                            sl_p = half_risk_sl
-                            updated = True
+                        full_risk = orig_sl - entry_p
+                        if full_risk > (min_sl_dist * 1.5):
+                            target_half_sl = round(entry_p + max(min_sl_dist, full_risk * 0.50), 6)
+                            if target_half_sl < sl_p and target_half_sl > entry_p:
+                                s.sl_price = target_half_sl
+                                sl_p = target_half_sl
+                                updated = True
 
                 # Stage 2: Tier-0 Breakeven Ratchet (Lock in fees + small profit at +0.75% or 35% of TP1 distance)
                 effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
@@ -1060,7 +1449,15 @@ class SignalService:
                             s.outcome_label = "🔴 LOST (SL HIT)"
                     else:
                         ret_current = ((curr_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - curr_p) / entry_p) * 100.0
-                        if s.status == "TP1_LOCKED_BREAKEVEN":
+                        if s.status == "TP2_LOCKED_TRAIL":
+                            ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                            ret_tp2 = ((tp2_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp2_p) / entry_p) * 100.0
+                            blended_ret = (0.50 * ret_tp1) + (0.30 * ret_tp2) + (0.20 * max(0.0, ret_current))
+                            s.status = "WON_TP2_EXP"
+                            s.exit_price = round(curr_p, 6)
+                            s.realized_return_pct = round(blended_ret, 2)
+                            s.outcome_label = f"🟢 WON (TP2 + EXP +{blended_ret:.2f}%)"
+                        elif s.status == "TP1_LOCKED_BREAKEVEN":
                             ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
                             blended_ret = (0.50 * ret_tp1) + (0.50 * max(0.0, ret_current))
                             s.status = "WON_TP1_EXP"
@@ -1131,9 +1528,10 @@ class SignalService:
                                     net_return_pct=ret_val,
                                     regime=str(regime_val) if regime_val else None
                                 )
-                except Exception:
-                    pass
-        except Exception:
+                except Exception as e:
+                    logger.warning(f"[SIGNAL SERVICE ⚠️] Failed to record strategy outcome: {e}")
+        except Exception as e:
+            logger.error(f"[SIGNAL SERVICE ❌] Error during evaluate_pending_signals: {e}", exc_info=True)
             db.rollback()
 
     def evaluate_active_signals(
@@ -1210,20 +1608,6 @@ class SignalService:
             high_p = s.peak_price_seen
             low_p = s.trough_price_seen
 
-            max_gain = ((high_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - low_p) / entry_p) * 100.0
-            s.max_potential_gain_pct = round(max_gain, 2)
-
-            is_hit_tp3 = (direction == "LONG" and high_p >= tp3_p) or (direction == "SHORT" and low_p <= tp3_p)
-            is_hit_tp2 = (direction == "LONG" and high_p >= tp2_p) or (direction == "SHORT" and low_p <= tp2_p)
-            is_hit_tp1 = (direction == "LONG" and high_p >= tp1_p) or (direction == "SHORT" and low_p <= tp1_p)
-
-            # Stop loss check: evaluate against intra-candle extremes and current spot price
-            is_be_locked = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]
-            if is_be_locked:
-                is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
-            else:
-                is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
-
             is_expired = False
             # Dynamic Horizon TTL with Anti-Expiry Consolidation Grace
             horizon_max_secs = {
@@ -1249,14 +1633,78 @@ class SignalService:
             except Exception:
                 pass
 
-            # Check if signal has reached canonical expiry age
-            if sig_age_sec is not None and sig_age_sec >= max_sec:
-                # Dynamic Consolidation Grace Extension (+50% TTL if coiling within flat consolidation)
-                ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
-                if ret_now <= 0.60 and sig_age_sec < (max_sec * 1.50) and not is_hit_sl:
-                    is_expired = False
+            # Dynamic Trailing Expiry & Runner Protection Engine:
+            is_runner_sig = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
+            ret_now = abs(curr_p - entry_p) / max(1e-12, entry_p) * 100.0
+            is_prof_sig = (direction == "LONG" and curr_p >= entry_p * 1.004) or (direction == "SHORT" and curr_p <= entry_p * 0.996) or (s.status == "TIER0_PROTECTED_BREAKEVEN" and ret_now >= 0.15)
+
+            if is_runner_sig:
+                # 1. Runner Protection: Risk is hedged by trailed SL; extend TTL up to 4.0x base
+                eff_max_sec = max_sec * 4.0
+            elif is_prof_sig:
+                # 2. Profitable Pre-TP1 Trade: Dynamic trailing horizon up to 2.5x base
+                eff_max_sec = max_sec * 2.5
+            elif ret_now <= 0.60:
+                # 3. Dynamic Consolidation Grace Extension (+50% TTL if coiling within flat consolidation)
+                eff_max_sec = max_sec * 1.50
+            else:
+                # 4. Stagnant or losing trade: strictly enforce canonical base TTL
+                eff_max_sec = max_sec
+
+            if sig_age_sec is not None and sig_age_sec >= eff_max_sec:
+                is_expired = True
+            else:
+                is_expired = False
+
+            # Microstructure Resting Limit Order Lifecycle Check:
+            # Do NOT trigger premature TP/SL before the resting limit order is filled!
+            is_resting_order = (
+                s.status in ["RESTING_LIMIT", "PENDING_LIMIT"]
+                or "RESTING LIMIT" in str(getattr(s, "decision", "")).upper()
+                or "AWAIT PULLBACK" in str(getattr(s, "outcome_label", "")).upper()
+                or "AWAIT BOUNCE" in str(getattr(s, "outcome_label", "")).upper()
+                or bool(getattr(s, "is_limit_pending", False))
+            )
+            if is_resting_order:
+                has_filled = (direction == "LONG" and low_p <= entry_p) or (direction == "SHORT" and high_p >= entry_p)
+                if not has_filled:
+                    if is_expired:
+                        s.status = "EXPIRED_HORIZON"
+                        s.outcome_label = "⏱️ EXPIRED (UNFILLED)"
+                        s.exit_price = round(curr_p, 6) if (curr_p and curr_p > 0) else entry_p
+                        if curr_p and curr_p > 0:
+                            s.current_price = round(curr_p, 6)
+                        s.realized_return_pct = 0.0
+                        s.evaluated_at_utc = now_str
+                        updated = True
+                        continue
+                    else:
+                        s.status = "RESTING_LIMIT"
+                        s.outcome_label = "🎯 PENDING LIMIT (AWAIT PULLBACK)" if direction == "LONG" else "🎯 PENDING LIMIT (AWAIT BOUNCE)"
+                        if hasattr(s, "paper_trading_status") and not s.paper_trading_status:
+                            s.paper_trading_status = "RESTING LIMIT (ORDER BOOK)"
+                        updated = True
+                        continue
                 else:
-                    is_expired = True
+                    s.status = "ACTIVE"
+                    s.outcome_label = "RUNNING 🚀"
+                    if hasattr(s, "paper_trading_status"):
+                        s.paper_trading_status = "EXECUTED (PAPER WALLET)"
+                    updated = True
+
+            max_gain = ((high_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - low_p) / entry_p) * 100.0
+            s.max_potential_gain_pct = round(max_gain, 2)
+
+            is_hit_tp3 = (direction == "LONG" and high_p >= tp3_p) or (direction == "SHORT" and low_p <= tp3_p)
+            is_hit_tp2 = (direction == "LONG" and high_p >= tp2_p) or (direction == "SHORT" and low_p <= tp2_p)
+            is_hit_tp1 = (direction == "LONG" and high_p >= tp1_p) or (direction == "SHORT" and low_p <= tp1_p)
+
+            # Stop loss check: evaluate against intra-candle extremes and current spot price
+            is_be_locked = s.status in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]
+            if is_be_locked:
+                is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
+            else:
+                is_hit_sl = (direction == "LONG" and (low_p <= sl_p or curr_p <= sl_p)) or (direction == "SHORT" and (high_p >= sl_p or curr_p >= sl_p))
 
             # 0. Acute Volatile News Shock & Tier-0 Early Breakeven Guard
             is_news_shock_active = False
@@ -1271,20 +1719,33 @@ class SignalService:
             tp1_dist = abs(tp1_p - entry_p) / max(1e-12, entry_p) * 100.0
 
             # Phase 4: Dynamic 2-Stage Profit Ratchet (+0.50% Micro-Guard & +0.75% Tier-0 Breakeven)
+            # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by strictly 50% from immutable original anchor)
             if max_gain >= 0.50 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
-                orig_sl = safe_float(getattr(s, "initial_sl_price", None) or s.sl_price or entry_p, entry_p)
+                orig_sl = safe_float(getattr(s, "sl_original", None) or getattr(s, "initial_sl_price", None), 0.0)
+                if orig_sl <= 0.0 or (direction == "LONG" and orig_sl >= entry_p) or (direction == "SHORT" and orig_sl <= entry_p):
+                    orig_sl = sl_p
+                    if hasattr(s, "sl_original") and getattr(s, "sl_original", None) is None:
+                        s.sl_original = orig_sl
+
+                spread_bps = safe_float(getattr(s, "spread_bps", None), 5.0)
+                min_sl_dist = max(entry_p * 0.0035, 2.5 * (spread_bps / 10000.0) * entry_p)
+
                 if direction == "LONG" and orig_sl < entry_p:
-                    half_risk_sl = round(entry_p - (abs(entry_p - orig_sl) * 0.50), 6)
-                    if half_risk_sl > sl_p:
-                        s.sl_price = half_risk_sl
-                        sl_p = half_risk_sl
-                        updated = True
+                    full_risk = entry_p - orig_sl
+                    if full_risk > (min_sl_dist * 1.5):
+                        target_half_sl = round(entry_p - max(min_sl_dist, full_risk * 0.50), 6)
+                        if target_half_sl > sl_p and target_half_sl < entry_p:
+                            s.sl_price = target_half_sl
+                            sl_p = target_half_sl
+                            updated = True
                 elif direction == "SHORT" and orig_sl > entry_p:
-                    half_risk_sl = round(entry_p + (abs(orig_sl - entry_p) * 0.50), 6)
-                    if half_risk_sl < sl_p:
-                        s.sl_price = half_risk_sl
-                        sl_p = half_risk_sl
-                        updated = True
+                    full_risk = orig_sl - entry_p
+                    if full_risk > (min_sl_dist * 1.5):
+                        target_half_sl = round(entry_p + max(min_sl_dist, full_risk * 0.50), 6)
+                        if target_half_sl < sl_p and target_half_sl > entry_p:
+                            s.sl_price = target_half_sl
+                            sl_p = target_half_sl
+                            updated = True
 
             effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
             if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
@@ -1461,7 +1922,15 @@ class SignalService:
                         s.outcome_label = "🔴 LOST (SL HIT)"
                 else:
                     ret_current = ((curr_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - curr_p) / entry_p) * 100.0
-                    if s.status == "TP1_LOCKED_BREAKEVEN":
+                    if s.status == "TP2_LOCKED_TRAIL":
+                        ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
+                        ret_tp2 = ((tp2_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp2_p) / entry_p) * 100.0
+                        blended_ret = (0.50 * ret_tp1) + (0.30 * ret_tp2) + (0.20 * max(0.0, ret_current))
+                        s.status = "WON_TP2_EXP"
+                        s.exit_price = round(curr_p, 6)
+                        s.realized_return_pct = round(blended_ret, 2)
+                        s.outcome_label = f"🟢 WON (TP2 + EXP +{blended_ret:.2f}%)"
+                    elif s.status == "TP1_LOCKED_BREAKEVEN":
                         ret_tp1 = ((tp1_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - tp1_p) / entry_p) * 100.0
                         blended_ret = (0.50 * ret_tp1) + (0.50 * max(0.0, ret_current))
                         s.status = "WON_TP1_EXP"
@@ -1552,6 +2021,12 @@ class SignalService:
                                     pass
                             if obj.sl_price is not None:
                                 r["sl_price"] = obj.sl_price
+                            if getattr(obj, "sl_original", None) is not None and not r.get("sl_original"):
+                                r["sl_original"] = obj.sl_original
+                            if "is_tp1_locked" in (fieldnames or []):
+                                r["is_tp1_locked"] = str(any(k in st for k in ["WON_TP", "TP1_LOCKED", "TP2", "TP3"]))
+                            if "is_tp2_locked" in (fieldnames or []):
+                                r["is_tp2_locked"] = str("TP2" in st or "TP3" in st)
                             if obj.exit_price is not None:
                                 r["exit_price"] = obj.exit_price
                             if obj.realized_return_pct is not None:
@@ -1566,6 +2041,8 @@ class SignalService:
                                 r["max_potential_gain_pct"] = obj.max_potential_gain_pct
                             if getattr(obj, "current_price", None) is not None:
                                 r["current_price"] = obj.current_price
+                            elif obj.exit_price is not None:
+                                r["current_price"] = obj.exit_price
                             if getattr(obj, "paper_trading_status", None) is not None:
                                 r["paper_trading_status"] = obj.paper_trading_status
                         rows.append(r)
@@ -1576,8 +2053,8 @@ class SignalService:
                     for r in rows:
                         writer.writerow(r)
                 os.replace(temp, csv_path)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[SIGNAL SERVICE ⚠️] Failed syncing updates to {csv_path}: {e}")
 
         # 2. Also synchronize to v16_dynamic_states.json to guarantee 100% dashboard parity
         try:
@@ -1595,10 +2072,30 @@ class SignalService:
                                 target_k = k
                                 break
                     if target_k and target_k in dyn_data:
+                        st_u = str(s.status or "").upper()
                         dyn_data[target_k]["status"] = s.status
                         dyn_data[target_k]["outcome_label"] = s.outcome_label
-                        if s.exit_price is not None:
+                        curr_attr = safe_float(getattr(s, "current_price", None), 0.0)
+                        if curr_attr > 0:
+                            dyn_data[target_k]["current_price"] = round(curr_attr, 6)
+                        elif s.exit_price is not None:
                             dyn_data[target_k]["current_price"] = s.exit_price
+                        if s.sl_price is not None and s.sl_price > 0:
+                            dyn_data[target_k]["current_sl"] = round(float(s.sl_price), 6)
+                        is_tp1_l = any(k in st_u for k in ["WON_TP", "TP1_LOCKED", "TP2", "TP3"])
+                        is_tp2_l = ("TP2" in st_u) or ("TP3" in st_u)
+                        dyn_data[target_k]["is_tp1_locked"] = bool(dyn_data[target_k].get("is_tp1_locked") or is_tp1_l)
+                        dyn_data[target_k]["is_tp2_locked"] = bool(dyn_data[target_k].get("is_tp2_locked") or is_tp2_l)
+                        if s.max_potential_gain_pct is not None:
+                            dyn_data[target_k]["mfe_pct"] = max(safe_float(dyn_data[target_k].get("mfe_pct"), 0.0), round(float(s.max_potential_gain_pct), 2))
+                        entry_p_s = safe_float(getattr(s, "entry_price", None), 0.0)
+                        if entry_p_s > 0:
+                            dir_s = str(getattr(s, "direction", "LONG")).upper()
+                            adverse_p = safe_float(getattr(s, "trough_price_seen", None), 0.0) if dir_s == "LONG" else safe_float(getattr(s, "peak_price_seen", None), 0.0)
+                            if adverse_p > 0:
+                                mae_calc = max(0.0, ((entry_p_s - adverse_p) / entry_p_s) * 100.0) if dir_s == "LONG" else max(0.0, ((adverse_p - entry_p_s) / entry_p_s) * 100.0)
+                                dyn_data[target_k]["mae_pct"] = max(safe_float(dyn_data[target_k].get("mae_pct"), 0.0), round(mae_calc, 2))
+                        if s.exit_price is not None:
                             dyn_data[target_k]["exit_price"] = s.exit_price
                         if s.realized_return_pct is not None:
                             dyn_data[target_k]["unrealized_net_pnl_pct"] = s.realized_return_pct
@@ -1610,8 +2107,8 @@ class SignalService:
                     with open(tmp_dyn, "w", encoding="utf-8") as df:
                         json.dump(dyn_data, df, indent=2)
                     os.replace(tmp_dyn, dyn_path)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[SIGNAL SERVICE ⚠️] Failed syncing updates to {dyn_path}: {e}")
 
         # 3. Synchronize status transitions to v16_immutable_signals.json
         try:
@@ -1637,8 +2134,8 @@ class SignalService:
                     with open(tmp_imm, "w", encoding="utf-8") as imf:
                         json.dump(immut_data, imf, indent=2)
                     os.replace(tmp_imm, immut_path)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[SIGNAL SERVICE ⚠️] Failed syncing updates to {immut_path}: {e}")
 
     def get_kpi_summary(self, db: Session) -> Dict[str, Any]:
         """Calculates executive KPI metrics in a single optimized pass."""
@@ -1680,8 +2177,17 @@ class SignalService:
             try:
                 calib_path = os.path.join(settings.EXPORT_DIR, "v16_calibration_metrics.json")
                 if not os.path.exists(calib_path):
-                    with open(calib_path, "w", encoding="utf-8") as f:
-                        json.dump(default_calibration, f, indent=2)
+                    tmp_calib = f"{calib_path}.{threading.get_ident()}.{time.time_ns()}.tmp"
+                    try:
+                        with open(tmp_calib, "w", encoding="utf-8") as f:
+                            json.dump(default_calibration, f, indent=2)
+                        os.replace(tmp_calib, calib_path)
+                    finally:
+                        if os.path.exists(tmp_calib):
+                            try:
+                                os.remove(tmp_calib)
+                            except Exception:
+                                pass
             except Exception:
                 pass
 
@@ -1956,6 +2462,20 @@ class SignalService:
                 if op.get("unrealized_pnl_pct") is not None:
                     d["pnl_pct"] = op.get("unrealized_pnl_pct")
                     d["live_pnl_pct"] = op.get("unrealized_pnl_pct")
+                if op.get("is_higher_low_entry") is not None:
+                    d["is_higher_low_entry"] = op.get("is_higher_low_entry")
+                if op.get("is_lower_high_entry") is not None:
+                    d["is_lower_high_entry"] = op.get("is_lower_high_entry")
+                if op.get("entry_anchor_type"):
+                    d["entry_anchor_type"] = op.get("entry_anchor_type")
+                if op.get("entry_anchor_price"):
+                    d["entry_anchor_price"] = op.get("entry_anchor_price")
+                if op.get("execution_mode"):
+                    d["execution_mode"] = op.get("execution_mode")
+                if op.get("is_candlestick_unanimous") is not None:
+                    d["is_candlestick_unanimous"] = op.get("is_candlestick_unanimous")
+                if op.get("candlestick_direction"):
+                    d["candlestick_direction"] = op.get("candlestick_direction")
             results.append(d)
 
         return {
@@ -2293,17 +2813,26 @@ class SignalService:
             "closed_trades_history": [],
             "queued_trades": [],
             "desks": {
-                "scalp": {"allocated_usd": target_start_balance * 0.40, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0},
-                "intraday": {"allocated_usd": target_start_balance * 0.35, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0},
-                "macro": {"allocated_usd": target_start_balance * 0.25, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0}
+                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": target_start_balance * 0.15, "max_slots": 1, "active_slots": 0, "leverage": 2, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0},
+                "day": {"name": "⏳ Day Trading Desk", "allocated_usd": target_start_balance * 0.35, "max_slots": 2, "active_slots": 0, "leverage": 3, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0},
+                "swing": {"name": "🌊 Swing Desk", "allocated_usd": target_start_balance * 0.50, "max_slots": 3, "active_slots": 0, "leverage": 2, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0}
             }
         }
 
         try:
             os.makedirs(settings.EXPORT_DIR, exist_ok=True)
             p_path = os.path.join(settings.EXPORT_DIR, "paper_trading_ledger.json")
-            with open(p_path, "w", encoding="utf-8") as f:
-                json.dump(clean_ledger, f, indent=4)
+            tmp_p = f"{p_path}.{threading.get_ident()}.{time.time_ns()}.tmp"
+            try:
+                with open(tmp_p, "w", encoding="utf-8") as f:
+                    json.dump(clean_ledger, f, indent=4)
+                os.replace(tmp_p, p_path)
+            finally:
+                if os.path.exists(tmp_p):
+                    try:
+                        os.remove(tmp_p)
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"[RESET ERROR] File write: {e}")
 

@@ -940,8 +940,8 @@ class FundamentalIntelligenceService:
                 or "FOMC" in str(nearest_event.get("category", "")).upper()
                 or "POWELL" in str(nearest_event.get("category", "")).upper()
             )
-            pre_release_window = 45.0 if is_critical else 30.0
-            post_release_window = -30.0 if is_critical else -15.0
+            pre_release_window = 20.0 if is_critical else 15.0
+            post_release_window = -15.0 if is_critical else -12.0
             if post_release_window <= nearest_diff_min <= pre_release_window:
                 is_volatility_pause_active = True
                 time_desc = f"{abs(round(nearest_diff_min, 1))}m {'until' if nearest_diff_min > 0 else 'since'} release"
@@ -1741,10 +1741,10 @@ class FundamentalIntelligenceService:
         Enforces Black Swan Sentinel gating for severe negative news (exploits, hacks, lawsuits).
         """
         # Robust symbol extraction: cleans 'BTC/USDT', 'BTC/USDT:USDT', 'BTCUSDT'
+        from app.engine.config import strip_contract_multiplier
         raw_part = symbol.split("/")[0].split(":")[0].strip().upper()
         clean_base = raw_part.replace("USDT", "")
-        if clean_base.startswith("1000") and len(clean_base) > 4:
-            clean_base = clean_base[4:]
+        clean_base, _ = strip_contract_multiplier(clean_base)
 
         # 1. Macro Sentiment (Fear & Greed)
         fg = self.fetch_fear_and_greed()

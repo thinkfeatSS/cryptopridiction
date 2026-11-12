@@ -457,9 +457,9 @@ export default function SignalsTable({ initialDate = "" }: SignalsTableProps) {
           className="rounded-xl bg-dark-900/90 px-3 py-2 text-xs text-slate-300 border border-slate-800 focus:border-cyan-500 focus:outline-none"
         >
           <option value="">⏱️ All Horizons</option>
-          <option value="15M">⚡ Scalp (15M)</option>
-          <option value="1H">⏳ Day Trade (1H)</option>
-          <option value="24H">🌊 Swing Trade (1D)</option>
+          <option value="15M">⚡ Active Execution (15M)</option>
+          <option value="1H">⏳ Historical (1H)</option>
+          <option value="24H">🌊 Historical (1D)</option>
         </select>
 
         {/* Outcome Filter */}

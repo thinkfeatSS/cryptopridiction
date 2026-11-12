@@ -138,7 +138,7 @@ class RectangleStrategyOrchestrator:
         )
 
         # ----------------------------------------------------------------------
-        # STEP 6: Dynamic Rectangle Generation
+        # STEP 6: Dynamic Rectangle Generation & Active Multi-Bar State Recovery
         # ----------------------------------------------------------------------
         rectangle = None
         if weakness_res and weakness_res.is_confirmed:
@@ -148,31 +148,74 @@ class RectangleStrategyOrchestrator:
                 df_m15=df_m15
             )
 
+        # Multi-bar state recovery: If current candle didn't form a rectangle,
+        # check if an active unexpired rectangle is already tracked or formed in recent bars (up to 4 bars = 60m)
+        if rectangle is None:
+            rectangle = self.rectangle_engine.get_active_rectangle(symbol)
+
+        if rectangle is None and target_swing is not None and df_m15 is not None and len(df_m15) >= 5:
+            for prev_offset in range(1, 5):
+                prev_idx = eval_m15_idx - prev_offset
+                if prev_idx >= 0:
+                    prev_weakness = self.weakness_detector.evaluate_m15_confirmation(
+                        df_m15=df_m15,
+                        target_swing=target_swing,
+                        direction=direction,
+                        atr_value=curr_atr,
+                        candle_idx=prev_idx
+                    )
+                    if prev_weakness and prev_weakness.is_confirmed:
+                        weakness_res = prev_weakness
+                        rectangle = self.rectangle_engine.create_rectangle(
+                            symbol=symbol,
+                            weakness=weakness_res,
+                            df_m15=df_m15
+                        )
+                        if rectangle:
+                            break
+
         if rectangle is None:
             rejection_reasons.append("Rectangle could not be generated (Weakness unconfirmed)")
 
         # ----------------------------------------------------------------------
-        # STEP 7: M1 Entry Trigger (Rectangle Flip)
+        # STEP 7: M1 / 15M Entry Trigger (Dual-Trigger Breakout Flip)
         # ----------------------------------------------------------------------
         m1_trigger = None
         entry_price = 0.0
         signal_ts = str(time.time())
 
-        if rectangle is not None and df_m1 is not None and len(df_m1) > 0:
-            m1_trigger = self.m1_entry_engine.evaluate_m1_flip(
-                rectangle=rectangle,
-                df_m1=df_m1,
-                current_m1_idx=m1_bar_idx
-            )
-            if m1_trigger and m1_trigger.is_triggered:
-                entry_price = m1_trigger.trigger_price
-                signal_ts = str(m1_trigger.trigger_timestamp)
-            else:
-                rejection_reasons.append("Awaiting confirmed M1 rectangle flip close outside the box")
-        elif df_m1 is None:
-            rejection_reasons.append("M1 candle stream not provided for entry evaluation")
+        if rectangle is not None:
+            # Trigger Mode 1: Precision M1 Flip if M1 candle stream provided
+            if df_m1 is not None and len(df_m1) > 0:
+                m1_trigger = self.m1_entry_engine.evaluate_m1_flip(
+                    rectangle=rectangle,
+                    df_m1=df_m1,
+                    current_m1_idx=m1_bar_idx
+                )
+                if m1_trigger and m1_trigger.is_triggered:
+                    entry_price = m1_trigger.trigger_price
+                    signal_ts = str(m1_trigger.trigger_timestamp)
 
-        trade_dir = "LONG" if direction == "BULLISH" else "SHORT"
+            # Trigger Mode 2: 15M Candle Breakout Close (Zero-latency institutional scalp trigger)
+            if entry_price <= 0 and df_m15 is not None and len(df_m15) > 0:
+                m15_breakout = self.m1_entry_engine.evaluate_candle_breakout(
+                    rectangle=rectangle,
+                    df=df_m15,
+                    current_idx=eval_m15_idx,
+                    timeframe="15m"
+                )
+                if m15_breakout and m15_breakout.is_triggered:
+                    m1_trigger = m15_breakout
+                    entry_price = m15_breakout.trigger_price
+                    signal_ts = str(m15_breakout.trigger_timestamp)
+
+            if entry_price <= 0:
+                rejection_reasons.append("Awaiting confirmed rectangle flip close outside the box")
+            else:
+                # Clear pre-trigger waiting notices once confirmed breakout occurs
+                rejection_reasons = [r for r in rejection_reasons if not ("No sweep occurred" in r or "Awaiting confirmed" in r or "M1 candle stream not provided" in r)]
+
+        trade_dir = (rectangle.direction if rectangle else ("LONG" if direction == "BULLISH" else "SHORT"))
 
         # ----------------------------------------------------------------------
         # STEP 8: Stop Loss Engine
@@ -263,6 +306,8 @@ class RectangleStrategyOrchestrator:
         # Signal state update
         if is_valid_signal and rectangle:
             rectangle.status = RectangleStatus.TRADE_TRIGGERED
+            self.rectangle_engine.active_rectangles_by_symbol.pop(symbol.upper(), None)
+            self.rectangle_engine.save_state()
 
         # Format output exactly per Section 15 specification
         out = {

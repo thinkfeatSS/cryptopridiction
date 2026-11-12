@@ -4,13 +4,18 @@ import os
 import sys
 import json
 import time
+import logging
 import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
+logger = logging.getLogger("paper_trading_bot")
+
 from app.engine.config import EXPORT_DIR, is_meme_coin
 from app.engine.scanner.filters import UniverseFilter
-from app.quant_v16.entry_confirmation import format_dynamic_precision
+from app.quant_v16.entry_confirmation import format_dynamic_precision, EntryConfirmationEngine
+from app.quant_v16.validation import safe_ratio
+from app.quant_v16.audit import calculate_trailing_stop_evolution
 
 class PaperTradingBot:
     """
@@ -70,22 +75,22 @@ class PaperTradingBot:
                         else:
                             purged_symbols.append(sym)
 
-                    # Resynchronize desk targets to Phase 1 Capital Optimization:
-                    # Swing Desk (12H-30D): $500 (50%), 3 slots, 2x leverage (proven 53%+ WR edge)
-                    # Day Desk (1H-4H): $350 (35%), 2 slots, 3x leverage
-                    # Scalp Desk (5M-30M): $150 (15%), 1 slot, 2x leverage (strictly Grade A+ only)
+                    # Resynchronize desk targets to 5-slot Scalp allocation:
+                    # Scalp Desk (5M-30M): $500 (50%), 5 slots, 2x leverage (strictly Grade A / A+ with EVnet >= 0.25%)
+                    # Day Desk (1H-4H): $250 (25%), 2 slots, 3x leverage
+                    # Swing Desk (12H-30D): $250 (25%), 2 slots, 2x leverage
                     desks = loaded.get("desks", {})
                     if "swing" in desks:
-                        desks["swing"]["allocated_usd"] = 500.0
-                        desks["swing"]["max_slots"] = 3
+                        desks["swing"]["allocated_usd"] = float(os.getenv("SWING_DESK_ALLOCATED_USD", "300.0"))
+                        desks["swing"]["max_slots"] = int(os.getenv("SWING_DESK_MAX_SLOTS", "3"))
                         desks["swing"]["leverage"] = 2
                     if "day" in desks:
-                        desks["day"]["allocated_usd"] = 350.0
-                        desks["day"]["max_slots"] = 2
+                        desks["day"]["allocated_usd"] = float(os.getenv("DAY_DESK_ALLOCATED_USD", "200.0"))
+                        desks["day"]["max_slots"] = int(os.getenv("DAY_DESK_MAX_SLOTS", "2"))
                         desks["day"]["leverage"] = 3
                     if "scalp" in desks:
-                        desks["scalp"]["allocated_usd"] = 150.0
-                        desks["scalp"]["max_slots"] = 1
+                        desks["scalp"]["allocated_usd"] = float(os.getenv("SCALP_DESK_ALLOCATED_USD", "500.0"))
+                        desks["scalp"]["max_slots"] = int(os.getenv("SCALP_DESK_MAX_SLOTS", "5"))
                         desks["scalp"]["leverage"] = 2
                     for d_key, d_val in desks.items():
                         d_val["active_slots"] = sum(1 for p in valid_positions if p.get("desk") == d_key)
@@ -167,8 +172,8 @@ class PaperTradingBot:
                     loaded["closed_trades_history"] = normalized_trades
                     loaded.setdefault("shadow_positions", [])
                     return loaded
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[PAPER BOT ⚠️] Failed to load persistent state from {self.ledger_file}: {e}")
 
         # Initial baseline state
         return {
@@ -182,9 +187,9 @@ class PaperTradingBot:
             "winning_trades_count": 0,
             "losing_trades_count": 0,
             "desks": {
-                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": 150.0, "max_slots": 1, "active_slots": 0, "leverage": 2},
-                "day": {"name": "⏳ Day Trading Desk", "allocated_usd": 350.0, "max_slots": 2, "active_slots": 0, "leverage": 3},
-                "swing": {"name": "🌊 Swing Desk", "allocated_usd": 500.0, "max_slots": 3, "active_slots": 0, "leverage": 2}
+                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": float(os.getenv("SCALP_DESK_ALLOCATED_USD", "500.0")), "max_slots": int(os.getenv("SCALP_DESK_MAX_SLOTS", "5")), "active_slots": 0, "leverage": 2},
+                "day": {"name": "⏳ Day Trading Desk", "allocated_usd": float(os.getenv("DAY_DESK_ALLOCATED_USD", "200.0")), "max_slots": int(os.getenv("DAY_DESK_MAX_SLOTS", "2")), "active_slots": 0, "leverage": 3},
+                "swing": {"name": "🌊 Swing Desk", "allocated_usd": float(os.getenv("SWING_DESK_ALLOCATED_USD", "300.0")), "max_slots": int(os.getenv("SWING_DESK_MAX_SLOTS", "3")), "active_slots": 0, "leverage": 2}
             },
             "open_positions": [],
             "shadow_positions": [],
@@ -213,8 +218,8 @@ class PaperTradingBot:
                 if os.path.exists(temp):
                     try:
                         os.remove(temp)
-                    except Exception:
-                        pass
+                    except Exception as ex:
+                        logger.debug(f"[PAPER BOT] Failed removing temp file {temp}: {ex}")
 
     def resolve_desk(self, timeframe_or_horizon: str) -> str:
         tf = str(timeframe_or_horizon).lower().strip()
@@ -249,6 +254,45 @@ class PaperTradingBot:
             return "intraday"
         return list(desks.keys())[0]
 
+    def calculate_effective_rr(
+        self,
+        entry_p: float,
+        tp1_p: float,
+        sl_p: float,
+        spread_bps: float,
+        volume_24h_usd: float = 0.0,
+        tick_latency_ms: float = 0.0,
+        is_limit: bool = False
+    ) -> Tuple[float, float, float]:
+        """
+        Calculates effective Risk-to-Reward ratio accounting for spread widening,
+        slippage dampening, and execution friction during flash liquidity voids.
+        """
+        if entry_p <= 0 or tp1_p <= 0 or sl_p <= 0 or entry_p == sl_p:
+            return 0.0, 0.0, 0.0
+
+        gross_reward = abs(tp1_p - entry_p)
+        gross_risk = abs(entry_p - sl_p)
+
+        # 1. Spread Drag: Full spread crossed on round-trip (half entry + half exit) or exit-only for limits
+        spread_rate = (float(spread_bps) / 10000.0) if not is_limit else (float(spread_bps) / 20000.0)
+
+        # 2. Dynamic Slippage Dampener scaled by 24h liquidity and network latency
+        low_cap_factor = max(1.0, math.sqrt(15_000_000.0 / max(1_000_000.0, volume_24h_usd))) if volume_24h_usd > 0 else 1.0
+        lat_factor = 1.0 + min(1.5, max(0.0, tick_latency_ms - 300.0) / 1000.0)
+
+        entry_slip_rate = 0.0 if is_limit else (0.0003 * low_cap_factor * lat_factor)
+        exit_slip_rate = 0.0004 * low_cap_factor * lat_factor
+
+        total_friction_rate = spread_rate + entry_slip_rate + exit_slip_rate
+        friction_drag = total_friction_rate * entry_p
+
+        net_reward = max(0.0, gross_reward - friction_drag)
+        net_risk = gross_risk + friction_drag
+        effective_rr = round(net_reward / max(1e-8, net_risk), 2)
+
+        return effective_rr, net_reward, net_risk
+
     def admit_signal(self, signal: Dict[str, Any], btc_shield_state: Optional[Dict[str, Any]] = None) -> bool:
         """
         Executes a paper trade strictly following the Signal Generation System.
@@ -268,21 +312,62 @@ class PaperTradingBot:
                 if btc_shield_state.get("is_partition_stale") or btc_shield_state.get("is_global_outage"):
                     print("[PAPER BOT 🛑 NTZ REJECT] Rejected trade entry: Global multi-exchange outage / partition defense active.")
                     return False
-                if btc_shield_state.get("is_ntz_active"):
-                    print(f"[PAPER BOT 🛑 NTZ REJECT] Rejected trade entry: Macro BTC No Trade Zone is active ({btc_shield_state.get('reason')}).")
-                    return False
-                if btc_shield_state.get("status_code") == "NO_TRADE_ZONE":
-                    print(f"[PAPER BOT 🛑 NTZ REJECT] Rejected trade entry: Macro BTC status is NO_TRADE_ZONE.")
-                    return False
-                if "NO_TRADE_ZONE" in str(btc_shield_state.get("altcoin_posture", "")):
-                    print(f"[PAPER BOT 🛑 NTZ REJECT] Rejected trade entry: Altcoin posture is NO_TRADE_ZONE.")
-                    return False
                 if btc_shield_state.get("regime") == "FLASH_DUMP" or btc_shield_state.get("status_code") == "BEAR_CASCADE_BLACKOUT":
                     print(f"[PAPER BOT 🛑 NTZ REJECT] Rejected trade entry: BTC regime is {btc_shield_state.get('regime')} / {btc_shield_state.get('status_code')}.")
                     return False
+
                 if "DEFENSIVE_CASH_ONLY" in str(btc_shield_state.get("altcoin_posture", "")):
                     print(f"[PAPER BOT 🛑 NTZ REJECT] Rejected trade entry: Altcoin posture is DEFENSIVE_CASH_ONLY.")
                     return False
+
+                is_boundary_harvest = bool(
+                    signal.get("is_range_boundary") or
+                    any(k in str(signal.get("canonical_strategy") or signal.get("strategy") or "").upper() for k in ["RECTANGLE", "RANGE_BOUND", "BOUNDARY", "ORDER_BLOCK_BOUNDARY"])
+                )
+                allow_boundary = bool(btc_shield_state.get("boundary_harvest_allowed", False))
+
+                if btc_shield_state.get("is_ntz_active") or btc_shield_state.get("status_code") == "NO_TRADE_ZONE" or "NO_TRADE_ZONE" in str(btc_shield_state.get("altcoin_posture", "")):
+                    # Fix 1: Authorize boundary mean-reversion setups when boundary_harvest_allowed is True
+                    if is_boundary_harvest and allow_boundary:
+                        print(f"[PAPER BOT ⚖️ BOUNDARY HARVEST] Authorizing boundary harvest setup during chop equilibrium: {signal.get('symbol')} ({signal.get('canonical_strategy')})")
+                    else:
+                        print(f"[PAPER BOT 🛑 NTZ REJECT] Rejected trade entry: Macro BTC No Trade Zone is active ({btc_shield_state.get('reason')}).")
+                        return False
+
+                # 0b. BTC Shield Beta Directional Veto Gate (Strict Market Physics Alignment)
+                dir_check = str(signal.get("direction") or signal.get("dominant_direction") or "").upper() if signal else ""
+                alt_longs_ok = btc_shield_state.get("altcoin_longs_allowed", True)
+                alt_shorts_ok = btc_shield_state.get("altcoin_shorts_allowed", True)
+
+                if dir_check == "LONG" and not alt_longs_ok:
+                    reg_lbl = btc_shield_state.get("regime") or btc_shield_state.get("v16_regime") or "BEAR_TREND"
+                    print(f"[PAPER BOT 🛑 BETA VETO] Blocked LONG entry for {signal.get('symbol')}: BTC Beta Shield ({reg_lbl}) strictly disallows altcoin longs.")
+                    return False
+
+                if dir_check == "SHORT" and not alt_shorts_ok:
+                    reg_lbl = btc_shield_state.get("regime") or btc_shield_state.get("v16_regime") or "BULL_TREND"
+                    print(f"[PAPER BOT 🛑 BETA VETO] Blocked SHORT entry for {signal.get('symbol')}: BTC Beta Shield ({reg_lbl}) strictly disallows altcoin shorts.")
+                    return False
+
+                # 0c. BTC Chop Index Portfolio Defense Gate (Section 35 & Fix 1)
+                chop_val = float(btc_shield_state.get("chop_index") or btc_shield_state.get("metrics", {}).get("chop_index") or 0.0)
+                if chop_val > 61.8:
+                    if is_boundary_harvest and allow_boundary:
+                        # Validate that the boundary mean-reversion trade satisfies strict R:R and EV hurdles
+                        e_p = float(signal.get("entry_price", 0.0) or 0.0)
+                        tp_p = float(signal.get("tp1_price", 0.0) or 0.0)
+                        sl_p = float(signal.get("sl_price", 0.0) or 0.0)
+                        risk = abs(e_p - sl_p)
+                        reward = abs(tp_p - e_p)
+                        cand_rr = (reward / risk) if risk > 1e-8 else 0.0
+                        cand_ev = float(signal.get("ev_net") or 0.0)
+                        if cand_rr < 1.35 or cand_ev < 0.25:
+                            print(f"[PAPER BOT 🛑 CHOP VETO] Blocked boundary setup on {signal.get('symbol')}: Insufficient R:R ({cand_rr:.2f} < 1.35) or EVnet ({cand_ev:.2f}% < 0.25%) during chop (CI={chop_val:.1f}).")
+                            return False
+                        print(f"[PAPER BOT ⚖️ BOUNDARY HARVEST] Authorizing boundary harvest setup during chop congestion (CI={chop_val:.1f}, R:R={cand_rr:.2f}, EV={cand_ev:.2f}%): {signal.get('symbol')}")
+                    else:
+                        print(f"[PAPER BOT 🛑 CHOP VETO] Blocked trade on {signal.get('symbol')}: BTC Chop Index ({chop_val:.1f} > 61.8) indicates market congestion. Cash preservation active.")
+                        return False
 
             if not signal:
                 return False
@@ -308,8 +393,8 @@ class PaperTradingBot:
                     ev_name = inst_cal.get("event_name", "US Macro Event")
                     print(f"[PAPER BOT 🚨 MACRO BLACKOUT REJECT] Blocked entry for {sym}: High-impact macroeconomic release window active ({ev_name}).", flush=True)
                     return False
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[PAPER BOT] Macro calendar check failed: {e}")
 
             fund_matrix = signal.get("fundamental_matrix") or {}
             macro_ev = fund_matrix.get("macro_economic_event") or signal.get("macro_economic_event") or {}
@@ -332,21 +417,27 @@ class PaperTradingBot:
             if not signal.get("is_trade_active", False) or sig_status != "ACTIVE_SIGNAL":
                 return False
 
+            # Phase 4 Microstructure Meta Gate Validation
+            if signal.get("meta_passed") is False:
+                sym = signal.get("symbol", "UNKNOWN")
+                print(f"[PAPER BOT [META GATE]] Signal rejected for {sym}: Failed secondary meta-labeler gate")
+                return False
+
             direction = signal.get("direction") or signal.get("dominant_direction")
             if direction not in ["LONG", "SHORT"]:
                 return False
 
-            # 2. Validate Horizon: Strictly 15M, 1H, or 24H
+            # 2. Validate Horizon: Mapped to 15M (Scalp), 1H (Intraday), or 24H (Daily Swing)
             horizon_raw = str(signal.get("horizon") or signal.get("active_signal_horizon") or signal.get("dominant_timeframe") or "").upper()
-            if not any(h in horizon_raw for h in ["15M", "1H", "24H", "1D"]):
+            if not any(h in horizon_raw for h in ["15M", "5M", "1H", "4H", "12H", "24H", "1D", "SWING", "MACRO"]):
                 return False
 
-            if "15M" in horizon_raw:
+            if "15M" in horizon_raw or "5M" in horizon_raw or "SCALP" in horizon_raw:
                 norm_horizon = "15M"
-            elif "1H" in horizon_raw:
-                norm_horizon = "1H"
-            elif "24H" in horizon_raw or "1D" in horizon_raw:
+            elif "24H" in horizon_raw or "1D" in horizon_raw or "SWING" in horizon_raw or "MACRO" in horizon_raw or "7D" in horizon_raw:
                 norm_horizon = "24H"
+            elif "1H" in horizon_raw or "4H" in horizon_raw or "12H" in horizon_raw or "DAY" in horizon_raw or "INTRADAY" in horizon_raw:
+                norm_horizon = "1H"
             else:
                 return False
 
@@ -360,9 +451,10 @@ class PaperTradingBot:
                 print(f"[PAPER BOT 🛑 REJECT] Rejected trade entry for {symbol}: Token is delisted, inactive, or not an active Binance spot crypto pair.")
                 return False
 
-            # 3. Position Cap: Check if position already open on symbol
+            # 3. Position Cap: Check if position already open on symbol or trade thesis
+            sig_thesis_id = signal.get("trade_thesis_id") or f"THESIS-{symbol.replace('/', '').replace(':', '').replace('-', '')}-{direction.upper()}"
             for pos in self.data.get("open_positions", []):
-                if pos.get("symbol") == symbol:
+                if pos.get("symbol") == symbol or (sig_thesis_id and pos.get("trade_thesis_id") == sig_thesis_id):
                     return False
 
             # 4. Resolve Desk strictly matching the horizon
@@ -373,23 +465,44 @@ class PaperTradingBot:
                 desk_key = list(desks.keys())[0] if desks else "default"
                 desk = desks.get(desk_key, {"name": "Standard Desk", "allocated_usd": 350.0, "max_slots": 2, "leverage": 3})
 
-            # Check desk availability with Dynamic Regime Modulation (Phase 3)
+            # Check desk availability with Dynamic Regime Modulation (Phase 3 & Fix 1)
             max_slots = int(desk.get("max_slots", 2))
+            is_boundary_harvest = bool(
+                signal.get("is_range_boundary") or
+                any(k in str(signal.get("canonical_strategy") or signal.get("strategy") or "").upper() for k in ["RECTANGLE", "RANGE_BOUND", "BOUNDARY", "ORDER_BLOCK_BOUNDARY"])
+            )
+            allow_boundary = bool(btc_shield_state.get("boundary_harvest_allowed", False)) if btc_shield_state else False
+
             if btc_shield_state:
                 regime = str(btc_shield_state.get("regime", "")).upper()
-                if regime in ["RANGE", "CHOPPY", "COMPRESSION", "HIGH_VOLATILITY_CHOP"]:
+                if regime in ["RANGE", "CHOPPY", "COMPRESSION", "HIGH_VOLATILITY_CHOP", "RANGE_SQUEEZE"]:
                     if desk_key == "scalp":
-                        max_slots = 0
-                        print(f"[PAPER BOT [REGIME GATING]] Scalp slots throttled to 0 in {regime} market regime.")
+                        is_smc_or_coiling = bool(
+                            is_boundary_harvest or
+                            signal.get("is_order_block_signal") or
+                            signal.get("order_block_setup") or
+                            signal.get("candle_trigger_confirmed") or
+                            any(k in str(signal.get("canonical_strategy") or signal.get("strategy") or "").upper()
+                                for k in ["COILING", "SQUEEZE", "BREAKOUT", "ORDER_BLOCK", "REVERSAL", "TURTLE_SOUP", "FVG"])
+                        )
+                        if is_boundary_harvest and allow_boundary:
+                            max_slots = int(desk.get("max_slots", 5))
+                            print(f"[PAPER BOT [REGIME GATING]] Scalp boundary harvest slot authorized ({max_slots} slots) in {regime} market regime.")
+                        elif is_smc_or_coiling:
+                            max_slots = int(desk.get("max_slots", 5))
+                            print(f"[PAPER BOT [REGIME GATING]] Scalp institutional trigger authorized ({max_slots} slots) in {regime} market regime.")
+                        else:
+                            max_slots = 0
+                            print(f"[PAPER BOT [REGIME GATING]] Scalp slots throttled to 0 in {regime} market regime.")
                     elif desk_key == "day":
                         max_slots = min(max_slots, 1)
                     elif desk_key == "swing":
                         max_slots = min(max_slots, 2)
                 elif regime in ["BULL_TREND", "BEAR_TREND"]:
-                    if desk_key == "swing":
-                        max_slots = max(max_slots, 3)
-                    elif desk_key == "scalp":
-                        max_slots = min(max_slots, 1)
+                    if desk_key == "scalp":
+                        max_slots = int(desk.get("max_slots", 5))
+                    elif desk_key == "swing":
+                        max_slots = max(max_slots, 2)
 
             # 4b. Desk Quality Admission Gating (Phase 2 Canonical Alignment)
             quality_grade = str(signal.get("quality_grade") or signal.get("grade") or "").upper()
@@ -419,12 +532,35 @@ class PaperTradingBot:
 
             conviction_score = float(signal.get("conviction") or signal.get("conviction_pct") or 80.0)
 
+            # Dynamic Slippage Dampener & Effective R:R Guard (Flash Liquidity Void Defense)
+            spread_bps = float(signal.get("spread_bps") or signal.get("effective_spread_bps") or 5.0)
+            v_24h = float(signal.get("volume_24h_usd") or signal.get("volume_24h") or 0.0)
+            is_limit_pending = bool(signal.get("is_limit_pending", False))
+
+            effective_rr, net_reward, net_risk = self.calculate_effective_rr(
+                entry_p=e_p,
+                tp1_p=tp_p,
+                sl_p=sl_p,
+                spread_bps=spread_bps,
+                volume_24h_usd=v_24h,
+                tick_latency_ms=0.0,
+                is_limit=is_limit_pending
+            )
+
+            # Strict Invariant: Effective R:R must not be degraded below 1:1.20 by spread widening or slippage
+            if effective_rr < 1.20:
+                print(f"[PAPER BOT 🛑 SPREAD DEGRADED R:R] Blocked entry for {sym}: Spread widening ({spread_bps:.1f} bps) degraded effective R:R ({effective_rr:.2f} < 1.20).")
+                return False
+
             # Canonical V16 Market Opportunity Hurdle Gating
             if desk_key == "scalp":
-                # Scalp Desk: EVnet >= 0.25% for A+/A, or >= 0.40% with conviction >= 75 for Grade B
-                min_ev = 0.25 if ("A+" in quality_grade or "GRADE A" in quality_grade or "A" in quality_grade) else 0.40
-                if ev_net < min_ev:
-                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Requires EVnet >= {min_ev:.2f}% (got {ev_net:.2f}%)")
+                # Scalp Desk: Accepts Grade A+, Grade A, and Grade B with EVnet >= 0.25%
+                is_acceptable_grade = any(g in quality_grade for g in ["A+", "GRADE A", "GRADE B", "A", "B"]) and "GRADE C" not in quality_grade
+                if not is_acceptable_grade:
+                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Ineligible grade ({quality_grade})")
+                    return False
+                if ev_net < 0.25:
+                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Requires EVnet >= 0.25% (got {ev_net:.2f}%)")
                     return False
             elif desk_key == "day":
                 # Day Desk: EVnet >= 0.25%
@@ -437,9 +573,31 @@ class PaperTradingBot:
                     print(f"[PAPER BOT [QUALITY GATE]] Swing Desk rejected for {symbol}: Requires EVnet >= 0.20% (got {ev_net:.2f}%)")
                     return False
 
-            active_desk_count = sum(1 for p in self.data.get("open_positions", []) if p.get("desk") == desk_key)
-            if active_desk_count >= max_slots:
-                return False
+            # Desk Allocation & Runner Fractional Slot Accounting (Fix 4)
+            desk_positions = [p for p in self.data.get("open_positions", []) if p.get("desk") == desk_key]
+            active_primary_count = sum(1 for p in desk_positions if not (p.get("tp1_hit") or p.get("tp2_hit")))
+            active_runner_count = sum(1 for p in desk_positions if (p.get("tp1_hit") or p.get("tp2_hit")))
+            effective_desk_slots = active_primary_count + (active_runner_count * 0.25)
+
+            if max_slots <= 0 or active_primary_count >= max_slots or effective_desk_slots >= (max_slots + 0.50):
+                # Check for stagnant runner recycling if incoming signal is Grade A+
+                is_recycled = False
+                if "A+" in quality_grade:
+                    for p_run in desk_positions:
+                        if p_run.get("tp1_hit") or p_run.get("tp2_hit"):
+                            opened_str = p_run.get("opened_at_utc") or p_run.get("opened_at")
+                            if opened_str:
+                                try:
+                                    dt = datetime.fromisoformat(opened_str.replace("Z", "+00:00"))
+                                    if (datetime.now(timezone.utc) - dt).total_seconds() > 7200:
+                                        print(f"[PAPER BOT ♻️ RUNNER RECYCLE] Harvesting stagnant runner {p_run.get('symbol')} to free margin for Grade A+ setup {symbol}")
+                                        self._harvest_stagnant_runner(p_run)
+                                        is_recycled = True
+                                        break
+                                except Exception:
+                                    pass
+                if not is_recycled:
+                    return False
 
             # Cross-Desk Archetype Concentration Guard (Fix 5.1): Max 2 concurrent positions per archetype family
             strat_key = str(signal.get("canonical_strategy") or signal.get("strategy") or "").upper()
@@ -481,6 +639,23 @@ class PaperTradingBot:
             strat_str = str(signal.get("canonical_strategy") or signal.get("strategy") or signal.get("strategy_archetype") or "").upper()
             if "LIQUIDITY_RECLAIM" in strat_str:
                 sizing_mult = max(sizing_mult, 1.25)
+
+            # Pre-admission Liquidity Haircut (Fix 3):
+            # Scale down position size for shallow order books (V_24h < $15M) to eliminate sub-tick gap risk
+            v_24h = float(signal.get("volume_24h_usd") or signal.get("volume_24h") or 0.0)
+            if 0 < v_24h < 15_000_000.0:
+                liq_mult = max(0.20, min(1.0, math.sqrt(v_24h / 15_000_000.0)))
+                sizing_mult = sizing_mult * liq_mult
+                print(f"[PAPER BOT 💧 LIQUIDITY SIZING] {symbol} 24h vol ${v_24h:,.0f} < $15M: Sizing damped to {liq_mult:.2f}x to eliminate sub-tick gap risk.")
+
+            # Phase 4 Cold-Start Universe Maturation & Capital Containment:
+            # If coin is relying on cold-start Laplace prior or has minimal historical trade samples (< 10),
+            # strictly dampen position sizing to max 0.50x to protect portfolio equity.
+            meta_mtype = str(signal.get("meta_model_type", "")).upper()
+            meta_samples = int(signal.get("meta_sample_size", 100) or 100)
+            if "COLD_START" in meta_mtype or meta_samples < 10:
+                sizing_mult = min(sizing_mult, 0.50)
+
             alloc_mult = max(0.20, min(1.30, alloc_mult * sizing_mult))
             alloc_usd = float(desk.get("allocated_usd", 350.0))
             allocated_margin = round((alloc_usd / max(1, max_slots)) * alloc_mult, 2)
@@ -497,6 +672,7 @@ class PaperTradingBot:
             pos_record = {
                 "trade_id": signal.get("signal_id") or signal.get("trade_id") or f"{symbol.replace('/', '_')}_{norm_horizon}_{int(time.time())}",
                 "signal_id": signal.get("signal_id") or signal.get("trade_id"),
+                "trade_thesis_id": sig_thesis_id,
                 "symbol": symbol,
                 "desk": desk_key,
                 "desk_name": desk["name"],
@@ -523,6 +699,7 @@ class PaperTradingBot:
                 "tp3_price": tp3_p if tp3_p > 0 else tp1_p,
                 "sl_price": sl_p,
                 "initial_sl_price": sl_p,
+                "initial_tp1_price": tp1_p,
                 "active_atr": float(signal.get("active_atr") or abs(entry_p - sl_p) / 1.5),
                 "coin_beta": float(signal.get("coin_beta", 1.0)),
                 "sizing_multiplier": sizing_mult,
@@ -555,7 +732,17 @@ class PaperTradingBot:
                 "signal_conviction": float(signal.get("conviction", 0.0)),
                 "predicted_target_price": float(signal.get("predicted_target_price", tp1_p)),
                 "expected_return_pct": float(signal.get("expected_return_pct", 0.0)),
-                "risk_reward_ratio": signal.get("risk_reward_ratio", "1:2.0"),
+                "risk_reward_ratio": signal.get("risk_reward_ratio", f"1:{effective_rr:.1f}"),
+                "structural_risk_reward": signal.get("risk_reward_ratio", f"1:{effective_rr:.1f}"),
+                "is_risk_free": False,
+                "residual_risk_usd": round((abs(entry_p - sl_p) / entry_p) * position_size_usd, 4),
+                "locked_profit_usd": 0.0,
+                "trailing_runner_rr": None,
+                "active_risk_reward_ratio": signal.get("risk_reward_ratio", f"1:{effective_rr:.1f}"),
+                "trailing_risk_reward_ratio": signal.get("risk_reward_ratio", f"1:{effective_rr:.1f}"),
+                "risk_state": "STRUCTURAL_RISK",
+                "effective_rr": effective_rr,
+                "spread_bps": spread_bps,
                 "classifier_votes": signal.get("classifier_votes", ""),
                 "regressor_votes": signal.get("regressor_votes", ""),
                 "aligned_horizons": signal.get("aligned_horizons", []),
@@ -573,6 +760,9 @@ class PaperTradingBot:
                 "zeiierman_rank_label": signal.get("zeiierman_rank_label"),
                 "order_block_setup": signal.get("order_block_setup"),
                 "is_nested_smc": bool(signal.get("is_nested_smc", False)),
+                "htf_poi_tf": signal.get("htf_poi_tf") or (signal.get("order_block_setup") or {}).get("htf_poi_tf"),
+                "order_block_zone": signal.get("order_block_zone") or (signal.get("order_block_setup") or {}).get("order_block_zone"),
+                "ob_invalidation_level": self._resolve_ob_invalidation_level(signal),
                 "path_probabilities": signal.get("path_probabilities", {}),
                 "p_tp1_pct": signal.get("p_tp1_pct"),
                 "p_tp2_pct": signal.get("p_tp2_pct"),
@@ -582,8 +772,50 @@ class PaperTradingBot:
                 "composite_fundamental_score": float(signal.get("composite_fundamental_score", 0.0)),
                 "news_sentiment": signal.get("news_sentiment"),
                 "catalyst_event": signal.get("catalyst_event"),
-                "sizing_multiplier": float(signal.get("sizing_multiplier", 1.0))
+                "sizing_multiplier": float(signal.get("sizing_multiplier", 1.0)),
+                "microstructure_features": signal.get("microstructure_features", {}),
+                "metrics": signal.get("metrics") or {},
+                "is_range_boundary": bool(signal.get("is_range_boundary") or any(k in str(signal.get("canonical_strategy") or signal.get("strategy") or "").upper() for k in ["RECTANGLE", "RANGE_BOUND", "BOUNDARY", "ORDER_BLOCK_BOUNDARY"])),
+                "awaiting_microstructure_inflow": False,
+                "microstructure_deferral_count": 0,
+                "last_microstructure_reason": "",
+                "fill_obi": None,
+                "fill_cvd": None,
+                "fill_bid_depth_usd": None,
+                "fill_ask_depth_usd": None,
+                "fill_confirmation_type": None,
+                # Candlestick Structure & Universal Trend Rule Tracking
+                "is_higher_low_entry": bool(signal.get("is_higher_low_entry", False)),
+                "is_lower_high_entry": bool(signal.get("is_lower_high_entry", False)),
+                "entry_anchor_type": signal.get("entry_anchor_type"),
+                "entry_anchor_price": float(signal.get("entry_anchor_price")) if signal.get("entry_anchor_price") is not None else None,
+                "execution_mode": signal.get("execution_mode", "MARKET"),
+                "is_candlestick_unanimous": bool(signal.get("is_candlestick_unanimous", False)),
+                "candlestick_direction": signal.get("candlestick_direction"),
+                "triad_structure": signal.get("triad_structure"),
             }
+
+            # Limited Live Execution Canary Gate Integration (Fix 6)
+            try:
+                from app.quant_v16.canary_execution import canary_gate
+                spread_bps = float(signal.get("spread_bps") or 2.0)
+                is_canary, canary_reason, canary_telemetry = canary_gate.validate_canary_admission(
+                    signal=signal,
+                    desk_key=desk_key,
+                    btc_shield_state=btc_shield_state,
+                    tick_latency_ms=0.0,
+                    spread_bps=spread_bps
+                )
+                if is_canary:
+                    pos_record["is_canary_eligible"] = True
+                    pos_record["canary_scale"] = 0.10
+                    pos_record["canary_allocated_usd"] = round(position_size_usd * 0.10, 2)
+                    print(f"[CANARY 🐥 ADMISSION APPROVED] {symbol} benchmark Canary active (10% sizing scale: ${pos_record['canary_allocated_usd']:.2f})")
+                else:
+                    pos_record["is_canary_eligible"] = False
+                    pos_record["canary_ineligible_reason"] = canary_reason
+            except Exception as e:
+                pos_record["is_canary_eligible"] = False
 
             if "open_positions" not in self.data:
                 self.data["open_positions"] = []
@@ -592,7 +824,7 @@ class PaperTradingBot:
 
             # Keep desk active slots synchronized
             if desk_key in self.data.get("desks", {}):
-                self.data["desks"][desk_key]["active_slots"] = active_desk_count + 1
+                self.data["desks"][desk_key]["active_slots"] = sum(1 for p in self.data.get("open_positions", []) if p.get("desk") == desk_key)
 
             self.save_ledger()
             if is_limit_pending:
@@ -624,6 +856,66 @@ class PaperTradingBot:
 
             return True
 
+    def _update_position_trailing_evolution(self, pos: Dict[str, Any], curr_p: float):
+        """
+        Updates the position's dynamic trailing evolution metrics.
+        Preserves the initial structural R:R snapshot, while accounting for risk compression
+        to zero (R -> 0) on breakeven / TP1 hit, and evaluating active trailing runner R:R
+        against giveback risk rather than residual capital risk to avoid division-by-zero / inf.
+        """
+        try:
+            entry_p = float(pos.get("entry_price") or curr_p)
+            sl_p = float(pos.get("sl_price") or entry_p)
+            init_sl = float(pos.get("initial_sl_price") or pos.get("sl_original") or sl_p)
+            direction = pos.get("direction", "LONG")
+
+            # Determine next active target
+            if pos.get("tp2_hit"):
+                next_target = float(pos.get("tp3_price") or pos.get("tp2_price") or entry_p)
+            elif pos.get("tp1_hit"):
+                next_target = float(pos.get("tp2_price") or pos.get("tp1_price") or entry_p)
+            else:
+                next_target = float(pos.get("tp1_price") or entry_p)
+
+            initial_target = float(pos.get("initial_tp1_price") or pos.get("tp1_price") or next_target)
+            pos_size = float(pos.get("position_size_usd") or 100.0)
+            rem_size = float(pos.get("remaining_position_size_usd") or pos_size)
+            realized_partial = float(pos.get("total_realized_partial_usd") or 0.0)
+
+            evo = calculate_trailing_stop_evolution(
+                entry_price=entry_p,
+                current_sl=sl_p,
+                current_price=curr_p,
+                next_target=next_target,
+                initial_sl=init_sl,
+                initial_target=initial_target,
+                direction=direction,
+                position_size_usd=pos_size,
+                remaining_size_usd=rem_size,
+                total_realized_partial_usd=realized_partial,
+                is_tp1_locked=bool(pos.get("tp1_hit") or "TP1" in str(pos.get("status", ""))),
+                is_tp2_locked=bool(pos.get("tp2_hit") or "TP2" in str(pos.get("status", ""))),
+                is_breakeven_locked=bool(pos.get("is_breakeven_locked")),
+            )
+
+            pos["is_risk_free"] = evo.is_risk_free
+            pos["residual_risk_usd"] = evo.residual_risk_usd
+            pos["locked_profit_usd"] = evo.locked_profit_usd
+            pos["trailing_runner_rr"] = evo.trailing_runner_rr
+            pos["active_risk_reward_ratio"] = evo.active_rr_ratio
+            pos["trailing_risk_reward_ratio"] = evo.active_rr_ratio
+            pos["risk_state"] = evo.risk_state
+
+            if not pos.get("structural_risk_reward"):
+                pos["structural_risk_reward"] = pos.get("risk_reward_ratio") or f"1:{evo.structural_rr:.1f}"
+
+            # Defensively sanitize risk_reward_ratio so it is never "1:inf", "1:Infinity", or non-finite
+            raw_cur_rr = str(pos.get("risk_reward_ratio") or "")
+            if any(bad in raw_cur_rr.lower() for bad in ["inf", "infinity", "nan", "none", "1:0.0", "1:0"]):
+                pos["risk_reward_ratio"] = pos["structural_risk_reward"]
+        except Exception:
+            pass
+
     def admit_shadow_signal(self, signal: Dict[str, Any], btc_shield_state: Optional[Dict[str, Any]] = None) -> bool:
         """
         Feature 5.1: Admits candidate signal whose strategy was vetoed because the strategy is PAUSED.
@@ -653,12 +945,13 @@ class PaperTradingBot:
                 return False
 
             norm_horizon = "15M" if "15M" in horizon_raw else ("24H" if any(x in horizon_raw for x in ["24H", "1D"]) else "1H")
+            sig_thesis_id = signal.get("trade_thesis_id") or f"THESIS-{symbol.replace('/', '').replace(':', '').replace('-', '')}-{direction.upper()}"
 
             for pos in self.data.get("open_positions", []):
-                if pos.get("symbol") == symbol:
+                if pos.get("symbol") == symbol or (sig_thesis_id and pos.get("trade_thesis_id") == sig_thesis_id):
                     return False
             for pos in self.data.get("shadow_positions", []):
-                if pos.get("symbol") == symbol:
+                if pos.get("symbol") == symbol or (sig_thesis_id and pos.get("trade_thesis_id") == sig_thesis_id):
                     return False
 
             tp1_p = float(signal.get("tp1_price", 0.0))
@@ -680,6 +973,7 @@ class PaperTradingBot:
             shadow_rec = {
                 "trade_id": f"SHADOW_{symbol.replace('/', '_')}_{norm_horizon}_{int(time.time()*1000)}",
                 "signal_id": signal.get("signal_id") or signal.get("trade_id"),
+                "trade_thesis_id": sig_thesis_id,
                 "symbol": symbol,
                 "desk": "shadow",
                 "is_shadow": True,
@@ -709,9 +1003,85 @@ class PaperTradingBot:
                 pass
             return True
 
-    def _create_cancellation_record(self, pos: Dict[str, Any], reason: str, detail: str) -> Dict[str, Any]:
+    def _resolve_ob_invalidation_level(self, item: Dict[str, Any]) -> Optional[float]:
+        """
+        Dynamically derives the authoritative Order Block invalidation level for intrabar whipsaw mitigation.
+        Handles Higher-Timeframe Order Blocks (4H, 24H), Nested SMC setups, and passive POIs.
+        """
+        if not isinstance(item, dict):
+            return None
+
+        # 1. Direct explicit invalidation level
+        if item.get("ob_invalidation_level") is not None:
+            try:
+                val = float(item["ob_invalidation_level"])
+                if val > 0:
+                    return val
+            except (ValueError, TypeError):
+                pass
+
+        if item.get("invalidation_level") is not None:
+            try:
+                val = float(item["invalidation_level"])
+                if val > 0:
+                    return val
+            except (ValueError, TypeError):
+                pass
+
+        # 2. Extract from order_block_setup dictionary
+        ob_setup = item.get("order_block_setup")
+        if isinstance(ob_setup, dict):
+            if ob_setup.get("invalidation_level") is not None:
+                try:
+                    val = float(ob_setup["invalidation_level"])
+                    if val > 0:
+                        return val
+                except (ValueError, TypeError):
+                    pass
+
+            ob_zone = ob_setup.get("order_block_zone")
+            if isinstance(ob_zone, (list, tuple)) and len(ob_zone) >= 2:
+                try:
+                    direction = str(item.get("direction", "LONG")).upper()
+                    if direction == "LONG":
+                        cand_lvl = float(ob_setup.get("sl_price") or ob_zone[0])
+                    else:
+                        cand_lvl = float(ob_setup.get("sl_price") or ob_zone[1])
+                    if cand_lvl > 0:
+                        return cand_lvl
+                except (ValueError, TypeError):
+                    pass
+
+        # 3. Extract from top-level order_block_zone
+        top_zone = item.get("order_block_zone")
+        if isinstance(top_zone, (list, tuple)) and len(top_zone) >= 2:
+            try:
+                direction = str(item.get("direction", "LONG")).upper()
+                if direction == "LONG":
+                    cand_lvl = float(item.get("sl_price") or top_zone[0])
+                else:
+                    cand_lvl = float(item.get("sl_price") or top_zone[1])
+                if cand_lvl > 0:
+                    return cand_lvl
+            except (ValueError, TypeError):
+                pass
+
+        # 4. If it is explicitly an order block strategy, nested SMC, or passive POI, fall back to structural sl_price
+        strat = str(item.get("strategy") or item.get("canonical_strategy") or item.get("strategy_archetype") or "").upper()
+        if "ORDER_BLOCK" in strat or item.get("is_nested_smc") or item.get("is_order_block_signal"):
+            try:
+                sl_val = float(item.get("sl_price") or 0.0)
+                if sl_val > 0:
+                    return sl_val
+            except (ValueError, TypeError):
+                pass
+
+        return None
+
+    def _create_cancellation_record(self, pos: Dict[str, Any], reason: str, detail: str, market_price: Optional[float] = None) -> Dict[str, Any]:
         """Creates a standardized cancellation record for resting limit orders."""
         now_utc = datetime.now(timezone.utc)
+        mkt_p = float(market_price or pos.get("current_price") or 0.0)
         return {
             "trade_id": pos.get("trade_id"),
             "signal_id": pos.get("signal_id"),
@@ -719,6 +1089,7 @@ class PaperTradingBot:
             "direction": pos.get("direction"),
             "horizon": pos.get("signal_horizon") or pos.get("horizon", "1H"),
             "optimal_entry_limit": pos.get("optimal_entry_limit", pos.get("entry_price")),
+            "cancel_market_price": round(mkt_p, 6) if mkt_p > 0 else 0.0,
             "status": "CANCELLED",
             "cancellation_reason": reason,
             "cancellation_detail": detail,
@@ -734,7 +1105,7 @@ class PaperTradingBot:
         print(f"[PAPER BOT [CANCEL] CANCELLED] {rec['symbol']} Resting Limit Cancelled: {rec['cancellation_reason']} ({rec['cancellation_detail']})")
         self.sync_cancelled_order_to_tracker(rec)
 
-    def on_tick(self, live_prices: Dict[str, float], is_market_partition_active: bool = False, btc_shield_state: Optional[Dict[str, Any]] = None, tick_latency_ms: float = 0.0, order_book_voids: Optional[Dict[str, Any]] = None):
+    def on_tick(self, live_prices: Dict[str, float], is_market_partition_active: bool = False, btc_shield_state: Optional[Dict[str, Any]] = None, tick_latency_ms: float = 0.0, order_book_voids: Optional[Dict[str, Any]] = None, order_book_depths: Optional[Dict[str, Any]] = None, cvd_metrics: Optional[Dict[str, Any]] = None):
         """Evaluates live prices against open positions and resting limits with sub-second latency and impulse shields."""
         with self._lock:
             if not self.data["open_positions"]:
@@ -781,7 +1152,7 @@ class PaperTradingBot:
                 sym = pos["symbol"]
                 entry_p = float(pos.get("entry_price", 0.0))
                 # Auto-evict delisted, dead, or ghost pairs immediately
-                if not UniverseFilter.is_valid_crypto_pair(sym, price=entry_p):
+                if not UniverseFilter.is_valid_crypto_pair(sym, price=entry_p, allow_quarantined=True):
                     print(f"[PAPER BOT 🧹 PURGE] Evicted delisted/inactive position on tick: {sym}")
                     continue
 
@@ -795,6 +1166,28 @@ class PaperTradingBot:
                 direction = pos["direction"]
                 leverage = float(pos.get("leverage", 1.0))
                 norm_h = pos.get("signal_horizon") or pos.get("horizon", "1H")
+
+                # Live Top-5 Order Book Bid / Ask Extraction for Microstructure Invalidation
+                sym_depth = None
+                if order_book_depths and isinstance(order_book_depths, dict):
+                    sym_depth = order_book_depths.get(sym) or order_book_depths.get(sym.replace("/", "").replace(":USDT", ""))
+
+                live_bid = None
+                live_ask = None
+                if sym_depth:
+                    try:
+                        depth_info = EntryConfirmationEngine.calculate_top5_obi(sym_depth)
+                        if depth_info.get("best_bid", 0.0) > 0:
+                            live_bid = float(depth_info["best_bid"])
+                        if depth_info.get("best_ask", 0.0) > 0:
+                            live_ask = float(depth_info["best_ask"])
+                    except Exception:
+                        pass
+
+                if not live_bid or live_bid <= 0:
+                    live_bid = float(live_prices.get(f"{sym}:bid") or live_prices.get(f"{sym}_bid") or live_prices.get(f"{sym.replace('/', '')}:bid") or curr_p)
+                if not live_ask or live_ask <= 0:
+                    live_ask = float(live_prices.get(f"{sym}:ask") or live_prices.get(f"{sym}_ask") or live_prices.get(f"{sym.replace('/', '')}:ask") or curr_p)
 
                 # Single-Side Order Book Void Sentinel
                 is_void = False
@@ -893,10 +1286,37 @@ class PaperTradingBot:
                 if pos.get("is_limit_resting") or pos.get("status") == "RESTING_LIMIT":
                     limit_p = float(pos.get("optimal_entry_limit", entry_p))
 
+                    # A0. Macro Economic Blackout / Volatility Pause Guard (CPI/FOMC Event Blackout)
+                    is_macro_pause = False
+                    macro_pause_ev = ""
+                    try:
+                        from app.services.institutional_intelligence_service import institutional_intelligence_service
+                        inst_cal = institutional_intelligence_service.get_macro_economic_calendar()
+                        if inst_cal.get("is_volatility_pause_active"):
+                            is_macro_pause = True
+                            macro_pause_ev = inst_cal.get("event_name") or inst_cal.get("pause_reason", "US Macro Event")
+                    except Exception:
+                        pass
+
+                    fund_matrix = pos.get("fundamental_matrix") or {}
+                    macro_ev = fund_matrix.get("macro_economic_event") or {}
+                    if macro_ev.get("is_volatility_pause_active") or pos.get("is_macro_blackout"):
+                        is_macro_pause = True
+                        macro_pause_ev = macro_ev.get("event_name") or "US Macro Release Window"
+
+                    if is_macro_pause:
+                        canc_rec = self._create_cancellation_record(
+                            pos,
+                            "CANCELLED_MACRO_EVENT_BLACKOUT",
+                            f"Macro volatility blackout active ({macro_pause_ev}): resting limit cancelled to eliminate news spike blowout"
+                        )
+                        self._archive_cancelled_order(canc_rec, pos.get("desk"))
+                        continue
+
                     # A. Extreme Macro Impulse / Adverse Blowout Guard
                     # Base threshold: 1.20% adverse penetration through resting limit.
-                    # Latency-adaptive gate: If feed latency exceeds 800ms (e.g. queueing lag on REST),
-                    # dynamically tighten the blowout gate to cancel earlier and eliminate knife-catch slippage:
+                    # Hyper-Volatile Latency-Adaptive gate (Fix 7): In high-volatility events, network ping is ~150ms.
+                    # If queueing latency exceeds 800ms, dynamically tighten blowout gate from 1.20% down to 0.80%:
                     base_blowout_pct = 1.20
                     if tick_latency_ms > 800.0:
                         lag_penalty = min(0.40, ((tick_latency_ms - 800.0) / 2000.0) * 0.40)
@@ -925,6 +1345,41 @@ class PaperTradingBot:
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
 
+                    # Extreme Network Blackout Sentinel (Fix 7): If latency exceeds 2000ms (unresponsive socket),
+                    # pre-emptively cancel resting limit orders to eliminate blind knife-catch fills:
+                    if tick_latency_ms >= 2000.0:
+                        canc_rec = self._create_cancellation_record(
+                            pos,
+                            "CANCELLED_NETWORK_BLACKOUT_SAFETY",
+                            f"Feed latency ({tick_latency_ms:.0f}ms) exceeded 2000ms blackout safety ceiling"
+                        )
+                        self._archive_cancelled_order(canc_rec, pos.get("desk"))
+                        continue
+
+                    # A2. Intrabar Order Block Invalidation Sentinel (Resting Limit Protection)
+                    # For higher-timeframe order blocks (e.g. 4H or 24H), a live candle may exhibit lower-wick
+                    # absorption mid-candle before subsequently getting crushed by closing time.
+                    # The PaperTradingBot tick-watcher mitigates this by evaluating the actual live bid/ask price
+                    # against the Order Block invalidation level on each tick.
+                    ob_inval_lvl = self._resolve_ob_invalidation_level(pos)
+                    if ob_inval_lvl is not None and ob_inval_lvl > 0:
+                        is_ob_inval_breached = False
+                        if direction == "LONG" and live_bid <= ob_inval_lvl:
+                            is_ob_inval_breached = True
+                            inval_detail = f"Live bid (${live_bid:,.4f}) breached HTF Order Block invalidation level (${ob_inval_lvl:,.4f}) mid-candle"
+                        elif direction == "SHORT" and live_ask >= ob_inval_lvl:
+                            is_ob_inval_breached = True
+                            inval_detail = f"Live ask (${live_ask:,.4f}) breached HTF Order Block invalidation level (${ob_inval_lvl:,.4f}) mid-candle"
+
+                        if is_ob_inval_breached:
+                            canc_rec = self._create_cancellation_record(
+                                pos,
+                                "CANCELLED_ORDER_BLOCK_INVALIDATED",
+                                f"HTF Order Block Invalidation: {inval_detail}"
+                            )
+                            self._archive_cancelled_order(canc_rec, pos.get("desk"))
+                            continue
+
                     # B. Chase Buffer Exceeded / Structure Invalidated
                     # Cancel if price rallies/drops away from admission point without pulling back to fill the resting limit
                     admission_p = float(pos.get("admission_price", pos.get("current_price", limit_p)))
@@ -940,9 +1395,14 @@ class PaperTradingBot:
                         self._archive_cancelled_order(canc_rec, pos.get("desk"))
                         continue
 
-                    # C. Macro Regime / NTZ Shift Invalidation
+                    # C. Macro Regime / NTZ Shift Invalidation (Fix 1)
                     if btc_shield_state:
-                        if btc_shield_state.get("is_ntz_active") or btc_shield_state.get("status_code") == "NO_TRADE_ZONE" or btc_shield_state.get("regime") in ["RANGE_SQUEEZE", "FLASH_DUMP"]:
+                        is_flash_dump = btc_shield_state.get("regime") in ["FLASH_DUMP"] or btc_shield_state.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "FLASH_DUMP"]
+                        is_ntz = btc_shield_state.get("is_ntz_active") or btc_shield_state.get("status_code") == "NO_TRADE_ZONE" or btc_shield_state.get("regime") in ["RANGE_SQUEEZE"]
+                        is_pos_boundary = bool(pos.get("is_range_boundary") or any(k in str(pos.get("strategy") or "").upper() for k in ["RECTANGLE", "RANGE_BOUND", "BOUNDARY"]))
+                        boundary_ok = bool(btc_shield_state.get("boundary_harvest_allowed", False))
+
+                        if is_flash_dump or (is_ntz and not (is_pos_boundary and boundary_ok)):
                             canc_rec = self._create_cancellation_record(pos, "CANCELLED_MACRO_NTZ_ACTIVATED", f"Macro BTC NTZ engaged ({btc_shield_state.get('reason', 'Market Shield')})")
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
@@ -982,13 +1442,75 @@ class PaperTradingBot:
                         continue
 
                     if (direction == "LONG" and curr_p <= limit_p) or (direction == "SHORT" and curr_p >= limit_p):
+                        # Live Spread Widening & Effective R:R Guard (Flash Liquidity Void Defense)
+                        live_spread_bps = 0.0
+                        if live_ask and live_bid and live_ask > live_bid and curr_p > 0:
+                            live_spread_bps = ((live_ask - live_bid) / curr_p) * 10000.0
+                        else:
+                            live_spread_bps = float(pos.get("spread_bps", 4.0))
+
+                        eff_rr, _, _ = self.calculate_effective_rr(
+                            entry_p=limit_p,
+                            tp1_p=float(pos.get("tp1_price", 0.0)),
+                            sl_p=float(pos.get("sl_price", 0.0)),
+                            spread_bps=live_spread_bps,
+                            volume_24h_usd=float(pos.get("volume_24h_usd", 0.0)),
+                            tick_latency_ms=tick_latency_ms,
+                            is_limit=True
+                        )
+
+                        if eff_rr < 1.20:
+                            canc_rec = self._create_cancellation_record(
+                                pos,
+                                "CANCELLED_SPREAD_BLOWOUT_RR_DEGRADED",
+                                f"Spread blowout ({live_spread_bps:.1f} bps) degraded effective R:R ({eff_rr:.2f} < 1:1.20)"
+                            )
+                            self._archive_cancelled_order(canc_rec, pos.get("desk"))
+                            continue
+
+                        # Live OBI / CVD Inflow Confirmation Gate
+                        sym_depth = None
+                        if order_book_depths and isinstance(order_book_depths, dict):
+                            sym_depth = order_book_depths.get(sym) or order_book_depths.get(sym.replace("/", "").replace(":USDT", ""))
+
+                        sym_cvd = None
+                        if cvd_metrics and isinstance(cvd_metrics, dict):
+                            sym_cvd = cvd_metrics.get(sym) or cvd_metrics.get(sym.replace("/", "").replace(":USDT", ""))
+
+                        is_confirmed, fill_reason, fill_telemetry = EntryConfirmationEngine.validate_resting_limit_fill(
+                            direction=direction,
+                            limit_price=limit_p,
+                            current_price=curr_p,
+                            depth_data=sym_depth,
+                            cvd_metrics=sym_cvd,
+                            candle_metrics=pos.get("metrics") or pos.get("microstructure_features") or {},
+                            obi_threshold=0.25,
+                            cvd_threshold=0.20
+                        )
+
+                        if not is_confirmed:
+                            # Microstructure inflow deferral: adverse depth wall or heavy aggressive market pressure
+                            pos["awaiting_microstructure_inflow"] = True
+                            pos["microstructure_deferral_count"] = int(pos.get("microstructure_deferral_count", 0)) + 1
+                            pos["last_microstructure_reason"] = fill_reason
+                            pos["microstructure_telemetry"] = fill_telemetry
+                            remaining_positions.append(pos)
+                            continue
+
+                        # Confirmed fill: Buyer absorption on Long / Seller resistance on Short
                         pos["status"] = "OPEN"
                         pos["is_limit_resting"] = False
                         pos["entry_price"] = limit_p
                         pos["current_price"] = limit_p
                         pos["opened_at"] = now_utc.isoformat()
                         pos["opened_at_utc"] = now_utc.isoformat()
-                        print(f"[PAPER BOT [FILL] RESTING LIMIT FILLED] {sym} ({direction} {norm_h}) limit filled at ${limit_p:,.4f}!")
+                        pos["awaiting_microstructure_inflow"] = False
+                        pos["fill_obi"] = fill_telemetry.get("obi_5", 0.0)
+                        pos["fill_cvd"] = fill_telemetry.get("cvd_surge", 0.0)
+                        pos["fill_bid_depth_usd"] = fill_telemetry.get("bid_depth_usd", 0.0)
+                        pos["fill_ask_depth_usd"] = fill_telemetry.get("ask_depth_usd", 0.0)
+                        pos["fill_confirmation_type"] = fill_telemetry.get("fill_confirmation_type", "LIVE_OBI_CVD_CONFIRMED")
+                        print(f"[PAPER BOT [FILL] RESTING LIMIT FILLED ({pos['fill_confirmation_type']})] {sym} ({direction} {norm_h}) limit filled at ${limit_p:,.4f}! Reason: {fill_reason}")
                         remaining_positions.append(pos)
                         continue
 
@@ -1016,8 +1538,9 @@ class PaperTradingBot:
                     is_tp2 = curr_p >= tp2_p if tp2_p > 0 else False
                     is_tp3 = curr_p >= tp3_p if tp3_p > 0 else False
                     pos["peak_price_seen"] = max(float(pos.get("peak_price_seen") or curr_p), curr_p)
+                    pos["trough_price_seen"] = min(float(pos.get("trough_price_seen") or curr_p), curr_p)
 
-                    # EXT-01: Parabolic Trailing Ratchet for Runners (Section 20 & 24)
+                    # EXT-01: Parabolic & Dynamic Trailing Ratchet for Runners (Section 20 & 24)
                     if pos.get("tp2_hit"):
                         active_atr = float(pos.get("active_atr") or abs(entry_p - float(pos.get("initial_sl_price") or (entry_p * 0.98))) / 1.5)
                         risk_r = max(1e-6, abs(entry_p - float(pos.get("initial_sl_price") or (entry_p * 0.98))))
@@ -1030,6 +1553,18 @@ class PaperTradingBot:
                         if new_sl > float(pos["sl_price"]) and new_sl < curr_p:
                             pos["sl_price"] = format_dynamic_precision(new_sl)
                             pos["is_parabolic_trail_active"] = is_parabolic
+                    elif pos.get("tp1_hit"):
+                        # Dynamic ATR Trailing Stop for TP1 -> TP2 Runner (30% remaining position)
+                        active_atr = float(pos.get("active_atr") or abs(entry_p - float(pos.get("initial_sl_price") or (entry_p * 0.98))) / 1.5)
+                        peak_p = pos["peak_price_seen"]
+                        if peak_p > tp1_p and tp1_p > 0:
+                            trail_dist = max(1.20 * active_atr, 0.40 * abs(tp2_p - tp1_p) if tp2_p > tp1_p else 1.20 * active_atr)
+                            cand_sl = peak_p - trail_dist
+                            profit_buffer_sl = entry_p + (tp1_p - entry_p) * 0.25
+                            new_sl = max(float(pos.get("sl_price", profit_buffer_sl)), profit_buffer_sl, cand_sl)
+                            if new_sl > float(pos["sl_price"]) and new_sl < curr_p:
+                                pos["sl_price"] = format_dynamic_precision(new_sl)
+                                pos["is_tp1_trail_active"] = True
 
                     hit_sl = curr_p <= pos["sl_price"]
                 else:
@@ -1037,9 +1572,10 @@ class PaperTradingBot:
                     is_tp1 = curr_p <= tp1_p if tp1_p > 0 else False
                     is_tp2 = curr_p <= tp2_p if tp2_p > 0 else False
                     is_tp3 = curr_p <= tp3_p if tp3_p > 0 else False
+                    pos["peak_price_seen"] = max(float(pos.get("peak_price_seen") or curr_p), curr_p)
                     pos["trough_price_seen"] = min(float(pos.get("trough_price_seen") or curr_p), curr_p)
 
-                    # EXT-01: Parabolic Trailing Ratchet for Runners (Section 20 & 24)
+                    # EXT-01: Parabolic & Dynamic Trailing Ratchet for Runners (Section 20 & 24)
                     if pos.get("tp2_hit"):
                         active_atr = float(pos.get("active_atr") or abs(float(pos.get("initial_sl_price") or (entry_p * 1.02)) - entry_p) / 1.5)
                         risk_r = max(1e-6, abs(float(pos.get("initial_sl_price") or (entry_p * 1.02)) - entry_p))
@@ -1052,12 +1588,38 @@ class PaperTradingBot:
                         if new_sl < float(pos["sl_price"]) and new_sl > curr_p:
                             pos["sl_price"] = format_dynamic_precision(new_sl)
                             pos["is_parabolic_trail_active"] = is_parabolic
+                    elif pos.get("tp1_hit"):
+                        # Dynamic ATR Trailing Stop for SHORT TP1 -> TP2 Runner (30% remaining position)
+                        active_atr = float(pos.get("active_atr") or abs(float(pos.get("initial_sl_price") or (entry_p * 1.02)) - entry_p) / 1.5)
+                        trough_p = pos["trough_price_seen"]
+                        if trough_p < tp1_p and tp1_p > 0:
+                            trail_dist = max(1.20 * active_atr, 0.40 * abs(tp1_p - tp2_p) if (tp2_p > 0 and tp1_p > tp2_p) else 1.20 * active_atr)
+                            cand_sl = trough_p + trail_dist
+                            profit_buffer_sl = entry_p - (entry_p - tp1_p) * 0.25
+                            new_sl = min(float(pos.get("sl_price", profit_buffer_sl)), profit_buffer_sl, cand_sl)
+                            if new_sl < float(pos["sl_price"]) and new_sl > curr_p:
+                                pos["sl_price"] = format_dynamic_precision(new_sl)
+                                pos["is_tp1_trail_active"] = True
 
                     hit_sl = curr_p >= pos["sl_price"]
 
                 pos["unrealized_pnl_pct"] = gain_pct * leverage
                 pos["unrealized_pnl_usd"] = (gain_pct / 100.0) * remaining_size_usd
                 pos["peak_gain_pct"] = max(float(pos.get("peak_gain_pct") or 0.0), gain_pct)
+                pos["max_drawdown_pct"] = max(float(pos.get("max_drawdown_pct") or 0.0), max(0.0, -gain_pct))
+
+                # Intrabar Mid-Candle Order Block Invalidation Sentinel for Open Positions
+                # For higher-timeframe order blocks (e.g., 4H or 24H), a live candle may exhibit lower-wick
+                # absorption mid-candle before subsequently getting crushed by closing time.
+                # The PaperTradingBot tick-watcher mitigates this by evaluating the actual live bid/ask price
+                # against the Order Block invalidation level on each tick.
+                hit_ob_invalidation = False
+                ob_inval_lvl = self._resolve_ob_invalidation_level(pos)
+                if ob_inval_lvl is not None and ob_inval_lvl > 0:
+                    if direction == "LONG" and live_bid <= ob_inval_lvl:
+                        hit_ob_invalidation = True
+                    elif direction == "SHORT" and live_ask >= ob_inval_lvl:
+                        hit_ob_invalidation = True
 
                 # Emergency News Volatility Shock & Macro Impulse Sentinel for Open Positions:
                 is_macro_severe = bool(btc_shield_state and (
@@ -1116,26 +1678,63 @@ class PaperTradingBot:
                 else:
                     dur_str = f"{dur_s}s"
 
-                norm_h = pos.get("signal_horizon") or pos.get("horizon", "1H")
+                norm_h = str(pos.get("signal_horizon") or pos.get("horizon", "1H")).upper()
                 # Canonical hold time: 15M → 2h, 1H → 6h, 4H → 12h, 24H stays 48h
-                max_hold_secs = 7200 if "15M" in norm_h else (172800 if any(x in norm_h for x in ["24H", "1D", "SWING", "MACRO"]) else (43200 if "4H" in norm_h else 21600))
+                base_hold_secs = 7200 if any(x in norm_h for x in ["15M", "5M", "30M", "SCALP"]) else (172800 if any(x in norm_h for x in ["24H", "1D", "SWING", "MACRO", "DAILY", "7D", "15D", "30D"]) else (43200 if "4H" in norm_h else 21600))
+                max_hold_secs = base_hold_secs
                 
-                # Dynamic Consolidation Grace Extension (+50% TTL if coiled in flat consolidation)
-                if elapsed_secs >= max_hold_secs:
-                    if abs(gain_pct) <= 0.60 and elapsed_secs < (max_hold_secs * 1.50) and not pos.get("tp1_hit"):
-                        hit_expiry = False
-                        pos["is_consolidation_grace_active"] = True
-                    else:
-                        hit_expiry = True
-                else:
+                # Dynamic Trailing Expiry & Runner Protection Engine:
+                is_runner_active = bool(pos.get("tp1_hit") or pos.get("tp2_hit"))
+                is_be_or_t0_locked = bool(pos.get("is_breakeven_locked") or pos.get("status") in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"])
+                is_profitable = (gain_pct >= 0.40) or (is_be_or_t0_locked and gain_pct >= 0.15)
+
+                if elapsed_secs < base_hold_secs:
                     hit_expiry = False
+                else:
+                    # Elapsed time has exceeded canonical base hold time
+                    if is_runner_active:
+                        # 1. Runner Protection: Risk is strictly ring-fenced by trailed Stop-Loss.
+                        # Never liquidate an active runner via hard clock stops; allow them to trail to TP2/TP3
+                        # up to a generous 4.0x safety ceiling (e.g. 8h for 15M, 24h for 1H, 8 days for 24H).
+                        runner_ceiling_secs = base_hold_secs * 4.0
+                        if elapsed_secs < runner_ceiling_secs:
+                            hit_expiry = False
+                            pos["is_runner_protected"] = True
+                            pos["trailing_expiry_mode"] = "RUNNER_PROTECTED"
+                        else:
+                            hit_expiry = True
+                    elif is_profitable and not hit_sl:
+                        # 2. Dynamic Trailing Expiry for Profitable Pre-TP1 Trades:
+                        # Winner in expansion with protected downside (Tier-0 BE / half-risk SL).
+                        # Extend TTL up to 2.5x base hold time to allow the trade to achieve structural TP1.
+                        profit_ceiling_secs = base_hold_secs * 2.5
+                        if elapsed_secs < profit_ceiling_secs:
+                            hit_expiry = False
+                            pos["is_trailing_expiry_active"] = True
+                            pos["trailing_expiry_mode"] = "PROFIT_MOMENTUM_EXTENSION"
+                        else:
+                            hit_expiry = True
+                    elif abs(gain_pct) <= 0.60:
+                        # 3. Dynamic Consolidation Grace Extension (+50% TTL if coiled in flat consolidation)
+                        consol_ceiling_secs = base_hold_secs * 1.50
+                        if elapsed_secs < consol_ceiling_secs:
+                            hit_expiry = False
+                            pos["is_consolidation_grace_active"] = True
+                            pos["trailing_expiry_mode"] = "CONSOLIDATION_GRACE"
+                        else:
+                            hit_expiry = True
+                    else:
+                        # 4. Stagnant or losing trade: strictly enforce canonical base hold time
+                        hit_expiry = True
+                        pos["trailing_expiry_mode"] = "CANONICAL_TTL"
 
                 # -------------------------------------------------------------
                 # Feature 5.2: Dynamic Time-Decay TP Compaction (Section 20 & Phase 5)
                 # -------------------------------------------------------------
-                if elapsed_secs >= (0.80 * max_hold_secs) and not pos.get("tp1_hit") and tp1_p > 0:
-                    final_window = max(1.0, 0.20 * max_hold_secs)
-                    elapsed_in_window = min(final_window, max(0.0, elapsed_secs - (0.80 * max_hold_secs)))
+                compaction_base = (base_hold_secs * 2.5) if pos.get("is_trailing_expiry_active") else base_hold_secs
+                if elapsed_secs >= (0.80 * compaction_base) and not pos.get("tp1_hit") and tp1_p > 0:
+                    final_window = max(1.0, 0.20 * compaction_base)
+                    elapsed_in_window = min(final_window, max(0.0, elapsed_secs - (0.80 * compaction_base)))
                     decay_lambda = math.exp(-2.5 * (elapsed_in_window / final_window))
 
                     if "original_tp1_price" not in pos:
@@ -1182,23 +1781,36 @@ class PaperTradingBot:
                     tp1_proximity_reached = (tp1_p_pos < entry_p and curr_p <= (entry_p - (entry_p - tp1_p_pos) * 0.50))
 
                 # Phase 4: Dynamic 2-Stage Profit Ratchet (+0.50% Micro-Guard & +0.75% Tier-0 Breakeven)
-                # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by 50% once favorable expansion begins)
+                # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by strictly 50% from immutable original anchor)
                 if pos["peak_gain_pct"] >= 0.50 and not pos.get("is_breakeven_locked") and not pos.get("tp1_hit"):
-                    orig_sl = float(pos.get("initial_sl_price") or pos.get("sl_price") or entry_p)
+                    orig_sl = float(pos.get("initial_sl_price") or pos.get("sl_original") or entry_p)
+                    if orig_sl <= 0.0 or (direction == "LONG" and orig_sl >= entry_p) or (direction == "SHORT" and orig_sl <= entry_p):
+                        orig_sl = float(pos.get("sl_price") or entry_p)
+                        if not pos.get("initial_sl_price"):
+                            pos["initial_sl_price"] = orig_sl
+
+                    spread_bps = float(pos.get("spread_bps") or 5.0)
+                    min_sl_dist = max(entry_p * 0.0035, 2.5 * (spread_bps / 10000.0) * entry_p)
+
                     if direction == "LONG" and orig_sl < entry_p:
-                        half_risk_sl = entry_p - (abs(entry_p - orig_sl) * 0.50)
-                        if half_risk_sl > float(pos.get("sl_price", 0.0)):
-                            pos["sl_price"] = format_dynamic_precision(half_risk_sl)
+                        full_risk = entry_p - orig_sl
+                        if full_risk > (min_sl_dist * 1.5):
+                            target_half_sl = entry_p - max(min_sl_dist, full_risk * 0.50)
+                            if target_half_sl > float(pos.get("sl_price", 0.0)) and target_half_sl < entry_p:
+                                pos["sl_price"] = format_dynamic_precision(target_half_sl)
                     elif direction == "SHORT" and orig_sl > entry_p:
-                        half_risk_sl = entry_p + (abs(orig_sl - entry_p) * 0.50)
-                        if half_risk_sl < float(pos.get("sl_price", 1e9)):
-                            pos["sl_price"] = format_dynamic_precision(half_risk_sl)
+                        full_risk = orig_sl - entry_p
+                        if full_risk > (min_sl_dist * 1.5):
+                            target_half_sl = entry_p + max(min_sl_dist, full_risk * 0.50)
+                            if target_half_sl < float(pos.get("sl_price", 1e9)) and target_half_sl > entry_p:
+                                pos["sl_price"] = format_dynamic_precision(target_half_sl)
 
                 effective_t0_thresh = min(float(pos.get("tier0_threshold_pct", 0.75)), max(0.50, 0.35 * tp1_dist))
 
                 if not pos.get("is_breakeven_locked") and not pos.get("tp1_hit") and not pos.get("tp2_hit") and (tp1_proximity_reached or pos["peak_gain_pct"] >= effective_t0_thresh):
                     pos["is_breakeven_locked"] = True
                     pos["sl_price"] = format_dynamic_precision(entry_p * (1.0005 if direction == "LONG" else 0.9995))
+                    self._update_position_trailing_evolution(pos, curr_p)
                     try:
                         print(f"[PAPER BOT 🛡️] Tier-0 Breakeven Ratchet Activated for {sym}! Stop-loss locked at Entry.")
                     except Exception:
@@ -1212,6 +1824,100 @@ class PaperTradingBot:
                         whatsapp_service.emit_signal_outcome(sig_dict, "BE_LOCKED", curr_p, gain_now)
                     except Exception:
                         pass
+
+                # Phase 2: Dynamic Order Flow Exhaustion Harvester (Near-Target Profit Harvester)
+                # Evaluates whether the position has reached >= 75% proximity to TP1 and order flow exhibits aggressive exhaustion/absorption.
+                if not pos.get("tp1_hit") and tp1_p > 0 and entry_p > 0:
+                    tp1_total_span = abs(tp1_p - entry_p)
+                    current_progress = (curr_p - entry_p) if direction == "LONG" else (entry_p - curr_p)
+                    proximity_ratio = current_progress / max(1e-12, tp1_total_span)
+
+                    if proximity_ratio >= 0.75:
+                        # Extract order flow / CVD metrics for exhaustion detection
+                        sym_cvd = None
+                        if cvd_metrics and isinstance(cvd_metrics, dict):
+                            sym_cvd = cvd_metrics.get(sym) or cvd_metrics.get(sym.replace("/", "").replace(":USDT", ""))
+                        cvd_val = float(sym_cvd.get("cvd_surge") or sym_cvd.get("cvd_surge_5") or 0.0) if isinstance(sym_cvd, dict) else float(pos.get("metrics", {}).get("cvd_surge_5") or 0.0)
+
+                        sym_depth = None
+                        if order_book_depths and isinstance(order_book_depths, dict):
+                            sym_depth = order_book_depths.get(sym) or order_book_depths.get(sym.replace("/", "").replace(":USDT", ""))
+                        depth_info = EntryConfirmationEngine.calculate_top5_obi(sym_depth) if sym_depth else {}
+                        obi_val = float(depth_info.get("obi_5", 0.0))
+                        tb_ratio = float(pos.get("metrics", {}).get("taker_buy_ratio", 0.50))
+
+                        # Multi-Factor Order Flow Exhaustion Evaluation (CVD + OBI + TBR Confluence)
+                        # Avoid single-metric false positives on low-volume / micro-cap pairs
+                        vol_24h = float(pos.get("volume_24h_usd") or pos.get("volume_24h") or 50_000_000.0)
+                        is_low_volume_pair = (vol_24h < 5_000_000.0)
+
+                        is_exhaustion = False
+                        exhaustion_reason = ""
+                        headwinds = []
+
+                        if direction == "LONG":
+                            cvd_adverse = (cvd_val <= -0.15)
+                            obi_adverse = (obi_val <= -0.30)
+                            tbr_adverse = (tb_ratio < 0.40)
+                            cvd_extreme = (cvd_val <= -0.40)
+                            obi_extreme = (obi_val <= -0.65)
+
+                            if cvd_adverse:
+                                headwinds.append(f"CVD: {cvd_val:+.2f} <= -0.15")
+                            if obi_adverse:
+                                headwinds.append(f"OBI: {obi_val:+.2f} <= -0.30")
+                            if tbr_adverse:
+                                headwinds.append(f"TBR: {tb_ratio:.2f} < 0.40")
+
+                            confluence_count = len(headwinds)
+                            if is_low_volume_pair:
+                                # Low-volume pairs require multi-factor confluence (>= 2 factors) or extreme blowout
+                                if confluence_count >= 2 or cvd_extreme or obi_extreme:
+                                    is_exhaustion = True
+                                    exhaustion_reason = f"Confluent taker exhaustion near TP1 on low-vol asset ({confluence_count}/3 factors: {', '.join(headwinds)})"
+                                else:
+                                    pos["transient_order_flow_spike_deferred"] = True
+                            else:
+                                if confluence_count >= 1:
+                                    is_exhaustion = True
+                                    detail_prefix = f"Multi-factor taker exhaustion ({confluence_count}/3 factors)" if confluence_count >= 2 else "Aggressive institutional headwind"
+                                    exhaustion_reason = f"{detail_prefix} near TP1 ({', '.join(headwinds)})"
+                        else:  # SHORT
+                            cvd_adverse = (cvd_val >= 0.15)
+                            obi_adverse = (obi_val >= 0.30)
+                            tbr_adverse = (tb_ratio > 0.60)
+                            cvd_extreme = (cvd_val >= 0.40)
+                            obi_extreme = (obi_val >= 0.65)
+
+                            if cvd_adverse:
+                                headwinds.append(f"CVD: {cvd_val:+.2f} >= +0.15")
+                            if obi_adverse:
+                                headwinds.append(f"OBI: {obi_val:+.2f} >= +0.30")
+                            if tbr_adverse:
+                                headwinds.append(f"TBR: {tb_ratio:.2f} > 0.60")
+
+                            confluence_count = len(headwinds)
+                            if is_low_volume_pair:
+                                if confluence_count >= 2 or cvd_extreme or obi_extreme:
+                                    is_exhaustion = True
+                                    exhaustion_reason = f"Confluent taker exhaustion near TP1 on low-vol asset ({confluence_count}/3 factors: {', '.join(headwinds)})"
+                                else:
+                                    pos["transient_order_flow_spike_deferred"] = True
+                            else:
+                                if confluence_count >= 1:
+                                    is_exhaustion = True
+                                    detail_prefix = f"Multi-factor taker exhaustion ({confluence_count}/3 factors)" if confluence_count >= 2 else "Aggressive institutional headwind"
+                                    exhaustion_reason = f"{detail_prefix} near TP1 ({', '.join(headwinds)})"
+
+                        if is_exhaustion:
+                            # Compact TP1 directly to current market price to bank profits immediately!
+                            pos["tp1_price"] = curr_p
+                            pos["is_tp_harvested_early"] = True
+                            pos["tp_harvest_reason"] = "TAKE_PROFIT_1_HARVEST_EXHAUSTION"
+                            pos["tp_harvest_detail"] = exhaustion_reason
+                            tp1_p = curr_p
+                            is_tp1 = True
+                            print(f"[PAPER BOT 🌾 MICRO-HARVEST] {sym} Near-target exhaustion at {proximity_ratio*100:.1f}% progress: {exhaustion_reason}. Compacting TP1 to ${curr_p:,.4f} to bank profits!", flush=True)
 
                 # Multi-Tranche Scale Check 1: TP1 Hit (Realize 70%, lock Profit Buffer, hold 30% for TP2)
                 if policy == "MULTI_TRANCHE_SCALE" and has_multi_tp and is_tp1 and not pos.get("tp1_hit"):
@@ -1235,6 +1941,7 @@ class PaperTradingBot:
                     lock_buffer = max(0.0035 * entry_p, abs(tp1_p - entry_p) * 0.25)
                     pos["sl_price"] = format_dynamic_precision(entry_p + lock_buffer if direction == "LONG" else entry_p - lock_buffer)
                     pos["status"] = "OPEN_TP1_LOCKED_BREAKEVEN"
+                    self._update_position_trailing_evolution(pos, curr_p)
 
                     try:
                         print(f"[PAPER BOT 🎯 TP1 SCALED] {sym} TP1 Hit at ${tp1_p:,.4f}! 70% locked (${t1_net:+,.2f}). SL ratcheted to Profit Buffer (${pos['sl_price']:,.4f}). Holding 30% for TP2.", flush=True)
@@ -1273,6 +1980,7 @@ class PaperTradingBot:
                     pos["remaining_position_size_usd"] = initial_size_usd * 0.10
                     pos["sl_price"] = tp1_p
                     pos["status"] = "OPEN_TP2_LOCKED_TRAIL"
+                    self._update_position_trailing_evolution(pos, curr_p)
 
                     try:
                         print(f"[PAPER BOT 🎯 TP2 SCALED] {sym} TP2 Hit at ${tp2_p:,.4f}! 20% locked (${t2_net:+,.2f}). SL ratcheted to TP1 (${tp1_p:,.4f}). Holding 10% runner for TP3.", flush=True)
@@ -1300,8 +2008,8 @@ class PaperTradingBot:
 
                 hit_order_book_void_exit = is_void and is_emergency_liq
 
-                # Check Exit Triggers (TP, SL, Horizon Expiry, Emergency Macro Impulse, or Order Book Void Emergency Liquidation)
-                if hit_tp or hit_sl or hit_expiry or hit_emergency_exit or hit_order_book_void_exit:
+                # Check Exit Triggers (TP, SL, OB Invalidation, Horizon Expiry, Emergency Macro Impulse, or Order Book Void Emergency Liquidation)
+                if hit_tp or hit_sl or hit_ob_invalidation or hit_expiry or hit_emergency_exit or hit_order_book_void_exit:
                     if hit_order_book_void_exit:
                         if pos.get("is_auto_abandoned_liq"):
                             exit_reason = "CLOSED_ORDER_BOOK_VOID_ABANDONED_AUTO_LIQUIDATION"
@@ -1314,9 +2022,6 @@ class PaperTradingBot:
                             exit_p = base_p * (1.0 - haircut_pct / 100.0)
                         else:
                             exit_p = base_p * (1.0 + haircut_pct / 100.0)
-                    elif hit_emergency_exit:
-                        exit_reason = "EMERGENCY_NEWS_SHOCK_EXIT" if hit_news_shock_cut else "EMERGENCY_MACRO_IMPULSE_EXIT"
-                        exit_p = curr_p
                     elif hit_tp3:
                         exit_reason = "TAKE_PROFIT_3"
                         exit_p = tp3_p
@@ -1326,21 +2031,47 @@ class PaperTradingBot:
                     elif hit_tp1_final:
                         exit_reason = "TAKE_PROFIT_1"
                         exit_p = tp1_p
-                    elif hit_sl:
+                    elif hit_sl or hit_ob_invalidation:
                         if pos.get("tp2_hit"):
                             exit_reason = "TAKE_PROFIT_2_TRAIL_SL"
                         elif pos.get("tp1_hit"):
+                            exit_reason = "TAKE_PROFIT_1_TRAIL_SL"
+                        elif pos.get("is_breakeven_locked"):
                             exit_reason = "STOP_LOSS_BREAKEVEN"
+                        elif hit_ob_invalidation:
+                            exit_reason = "CLOSED_ORDER_BLOCK_INTRABAR_INVALIDATION"
                         else:
-                            exit_reason = "STOP_LOSS_BREAKEVEN" if pos.get("is_breakeven_locked") else "STOP_LOSS"
-                        # Account for physical candle gap penetration / gap slippage:
-                        sl_target = float(pos["sl_price"])
+                            exit_reason = "STOP_LOSS"
+                        # Account for physical candle gap penetration / gap slippage (Fix 3):
+                        sl_target = float(ob_inval_lvl if (hit_ob_invalidation and not pos.get("is_breakeven_locked") and not pos.get("tp1_hit")) else pos["sl_price"])
+                        v_24h = float(pos.get("volume_24h_usd") or pos.get("volume_24h") or 0.0)
+                        low_cap_fac = max(1.0, math.sqrt(15_000_000.0 / max(1_000_000.0, v_24h))) if v_24h > 0 else 1.0
+
+                        eval_price = live_bid if direction == "LONG" else live_ask
                         if direction == "LONG":
-                            exit_p = min(sl_target, float(curr_p))
+                            exit_p = min(sl_target, float(eval_price))
+                            if float(eval_price) < sl_target:
+                                gap_pct = ((sl_target - float(eval_price)) / max(1e-8, sl_target)) * 100.0
+                                if gap_pct > 0.15 and low_cap_fac > 1.0:
+                                    extra_slip = exit_p * (gap_pct / 100.0) * 0.15 * (low_cap_fac - 1.0)
+                                    exit_p = max(0.0001, exit_p - extra_slip)
                         else:
-                            exit_p = max(sl_target, float(curr_p))
+                            exit_p = max(sl_target, float(eval_price))
+                            if float(eval_price) > sl_target:
+                                gap_pct = ((float(eval_price) - sl_target) / max(1e-8, sl_target)) * 100.0
+                                if gap_pct > 0.15 and low_cap_fac > 1.0:
+                                    extra_slip = exit_p * (gap_pct / 100.0) * 0.15 * (low_cap_fac - 1.0)
+                                    exit_p = exit_p + extra_slip
+                    elif hit_emergency_exit:
+                        exit_reason = "EMERGENCY_NEWS_SHOCK_EXIT" if hit_news_shock_cut else "EMERGENCY_MACRO_IMPULSE_EXIT"
+                        exit_p = curr_p
                     else:
-                        exit_reason = f"HORIZON_EXPIRY ({dur_str})"
+                        if pos.get("tp2_hit"):
+                            exit_reason = f"TAKE_PROFIT_2_RUNNER_EXPIRY ({dur_str})"
+                        elif pos.get("tp1_hit"):
+                            exit_reason = f"TAKE_PROFIT_1_RUNNER_EXPIRY ({dur_str})"
+                        else:
+                            exit_reason = f"HORIZON_EXPIRY ({dur_str})"
                         exit_p = curr_p
 
                     # Runner exit accounting on remaining position notional
@@ -1396,6 +2127,7 @@ class PaperTradingBot:
 
                     closed_record = {
                         "trade_id": pos.get("trade_id") or pos.get("signal_id") or f"TRADE_{int(time.time()*1000)}",
+                        "trade_thesis_id": pos.get("trade_thesis_id") or f"THESIS-{sym.replace('/', '').replace(':', '').replace('-', '')}-{direction.upper()}",
                         "symbol": sym,
                         "horizon": norm_h,
                         "desk": pos.get("desk", "default"),
@@ -1407,6 +2139,16 @@ class PaperTradingBot:
                         "exit_price": round(exit_p, 6),
                         "exit_reason": exit_reason,
                         "outcome": outcome,
+                        "tp1_hit": bool(pos.get("tp1_hit", False)),
+                        "tp2_hit": bool(pos.get("tp2_hit", False)),
+                        "tp3_hit": bool(pos.get("tp3_hit", False)),
+                        "is_breakeven_locked": bool(pos.get("is_breakeven_locked", False)),
+                        "sl_price": round(float(pos.get("sl_price") or 0.0), 6),
+                        "initial_sl_price": round(float(pos.get("initial_sl_price") or pos.get("sl_price") or 0.0), 6),
+                        "peak_price_seen": round(float(pos.get("peak_price_seen") or exit_p), 6),
+                        "trough_price_seen": round(float(pos.get("trough_price_seen") or exit_p), 6),
+                        "peak_gain_pct": round(float(pos.get("peak_gain_pct") or 0.0), 2),
+                        "max_drawdown_pct": round(float(pos.get("max_drawdown_pct") or 0.0), 2),
                         "gross_pnl_usd": round(gross_pnl, 2),
                         "net_pnl_usd": round(net_pnl, 2),
                         "realized_pnl_usd": round(net_pnl, 2),
@@ -1429,7 +2171,10 @@ class PaperTradingBot:
                         "canonical_strategy": pos.get("canonical_strategy") or pos.get("strategy"),
                         "strategy_archetype": pos.get("strategy_archetype") or pos.get("canonical_strategy") or pos.get("strategy"),
                         "regime": pos.get("market_regime") or pos.get("regime"),
-                        "market_regime": pos.get("market_regime") or pos.get("regime")
+                        "market_regime": pos.get("market_regime") or pos.get("regime"),
+                        "meta_win_probability": pos.get("meta_win_probability"),
+                        "meta_model_type": pos.get("meta_model_type"),
+                        "microstructure_features": pos.get("microstructure_features", {})
                     }
 
                     if "closed_trades" not in self.data:
@@ -1472,7 +2217,24 @@ class PaperTradingBot:
                     except Exception:
                         pass
                     self._sync_paper_exit_to_audit(closed_record)
+                    # Canary execution outcome tracking (Fix 6)
+                    if pos.get("is_canary_eligible"):
+                        try:
+                            from app.quant_v16.canary_execution import canary_gate
+                            canary_gate.record_canary_trade_outcome(
+                                trade_id=closed_record["trade_id"],
+                                symbol=closed_record["symbol"],
+                                direction=closed_record["direction"],
+                                allocated_usd=float(pos.get("canary_allocated_usd", 10.0)),
+                                net_pnl_usd=round(net_pnl * 0.10, 2),
+                                return_pct=realized_ret_pct,
+                                is_win=(outcome == "WON"),
+                                exit_reason=exit_reason
+                            )
+                        except Exception:
+                            pass
                 else:
+                    self._update_position_trailing_evolution(pos, curr_p)
                     remaining_positions.append(pos)
 
             self.data["open_positions"] = remaining_positions
@@ -1500,20 +2262,33 @@ class PaperTradingBot:
                     spos["current_price"] = curr_p
                     e_p = spos["entry_price"]
                     s_dir = spos["direction"]
-                    s_hz = spos.get("signal_horizon") or spos.get("horizon", "1H")
+                    s_hz = str(spos.get("signal_horizon") or spos.get("horizon", "1H")).upper()
 
                     s_opened = datetime.fromisoformat(spos["opened_at_utc"].replace("Z", "+00:00")) if spos.get("opened_at_utc") else datetime.now(timezone.utc)
                     s_elapsed = (datetime.now(timezone.utc) - s_opened).total_seconds()
-                    s_max_hold = 7200 if "15M" in s_hz else (172800 if any(x in s_hz for x in ["24H", "1D", "SWING", "MACRO"]) else 21600)
+                    s_base_hold = 7200 if any(x in s_hz for x in ["15M", "5M", "30M", "SCALP"]) else (172800 if any(x in s_hz for x in ["24H", "1D", "SWING", "MACRO", "DAILY", "7D", "15D", "30D"]) else 21600)
 
                     s_gain = ((curr_p - e_p) / e_p) * 100.0 if s_dir == "LONG" else ((e_p - curr_p) / e_p) * 100.0
                     spos["peak_gain_pct"] = max(spos.get("peak_gain_pct", 0.0), s_gain)
 
+                    # Dynamic Trailing Expiry for Shadow Trades
+                    s_is_runner = bool(spos.get("tp1_hit"))
+                    s_is_profitable = (s_gain >= 0.40)
+                    if s_is_runner:
+                        s_eff_hold = s_base_hold * 4.0
+                    elif s_is_profitable:
+                        s_eff_hold = s_base_hold * 2.5
+                    elif abs(s_gain) <= 0.60:
+                        s_eff_hold = s_base_hold * 1.5
+                    else:
+                        s_eff_hold = s_base_hold
+
                     # Dynamic time decay on shadow TP1 if >80% TTL elapsed
                     s_tp1 = spos["tp1_price"]
-                    if s_elapsed >= 0.80 * s_max_hold and not spos.get("tp1_hit"):
-                        decay_w = max(1.0, 0.20 * s_max_hold)
-                        decay_t = min(decay_w, max(0.0, s_elapsed - 0.80 * s_max_hold))
+                    s_compaction_base = (s_base_hold * 2.5) if (s_is_profitable and not s_is_runner) else s_base_hold
+                    if s_elapsed >= 0.80 * s_compaction_base and not spos.get("tp1_hit"):
+                        decay_w = max(1.0, 0.20 * s_compaction_base)
+                        decay_t = min(decay_w, max(0.0, s_elapsed - 0.80 * s_compaction_base))
                         decay_l = math.exp(-2.5 * (decay_t / decay_w))
                         s_orig_tp1 = float(spos.get("original_tp1_price", s_tp1))
                         spos["original_tp1_price"] = s_orig_tp1
@@ -1528,7 +2303,7 @@ class PaperTradingBot:
 
                     s_hit_tp1 = (curr_p >= s_tp1) if s_dir == "LONG" else (curr_p <= s_tp1)
                     s_hit_sl = (curr_p <= spos["sl_price"]) if s_dir == "LONG" else (curr_p >= spos["sl_price"])
-                    s_hit_expiry = s_elapsed >= s_max_hold
+                    s_hit_expiry = s_elapsed >= s_eff_hold
 
                     if s_hit_tp1 or s_hit_sl or s_hit_expiry:
                         is_win = s_hit_tp1 or (s_hit_expiry and s_gain > 0.05)
@@ -1548,17 +2323,69 @@ class PaperTradingBot:
 
             self.save_ledger()
 
+    def _harvest_stagnant_runner(self, pos: Dict[str, Any], reason: str = "CLOSED_RUNNER_STAGNATION_HARVEST"):
+        """Gracefully harvests a stagnant runner to liberate margin for fresh Grade A+ setups."""
+        with self._lock:
+            curr_p = float(pos.get("current_price", pos.get("entry_price", 0.0)))
+            entry_p = float(pos.get("entry_price", 0.0))
+            direction = pos.get("direction", "LONG")
+            initial_size_usd = float(pos.get("initial_position_size_usd", pos.get("position_size_usd", 100.0)))
+            rem_notional = float(pos.get("remaining_position_size_usd", initial_size_usd))
+
+            if direction == "LONG":
+                gain_pct = ((curr_p - entry_p) / entry_p) * 100.0 if entry_p > 0 else 0.0
+            else:
+                gain_pct = ((entry_p - curr_p) / entry_p) * 100.0 if entry_p > 0 else 0.0
+
+            runner_gross = (gain_pct / 100.0) * rem_notional
+            fees = rem_notional * self.taker_fee_rate * 2.0
+            net_pnl = round(float(pos.get("total_gross_partial_usd", 0.0)) + runner_gross - fees, 2)
+            ret_pct = round((net_pnl / max(1.0, initial_size_usd)) * 100.0, 2)
+
+            closed_rec = {
+                "trade_id": pos.get("trade_id"),
+                "trade_thesis_id": pos.get("trade_thesis_id") or f"THESIS-{str(pos.get('symbol', '')).replace('/', '').replace(':', '').replace('-', '')}-{direction.upper()}",
+                "symbol": pos.get("symbol"),
+                "direction": direction,
+                "desk": pos.get("desk"),
+                "entry_price": entry_p,
+                "exit_price": curr_p,
+                "exit_reason": reason,
+                "outcome": "WON" if net_pnl > 0.05 else ("BREAKEVEN" if abs(net_pnl) <= 0.05 else "LOST"),
+                "tp1_hit": bool(pos.get("tp1_hit", False)),
+                "tp2_hit": bool(pos.get("tp2_hit", False)),
+                "tp3_hit": bool(pos.get("tp3_hit", False)),
+                "is_breakeven_locked": bool(pos.get("is_breakeven_locked", False)),
+                "sl_price": round(float(pos.get("sl_price") or 0.0), 6),
+                "initial_sl_price": round(float(pos.get("initial_sl_price") or pos.get("sl_price") or 0.0), 6),
+                "peak_price_seen": round(float(pos.get("peak_price_seen") or curr_p), 6),
+                "trough_price_seen": round(float(pos.get("trough_price_seen") or curr_p), 6),
+                "peak_gain_pct": round(float(pos.get("peak_gain_pct") or 0.0), 2),
+                "max_drawdown_pct": round(float(pos.get("max_drawdown_pct") or 0.0), 2),
+                "realized_return_pct": ret_pct,
+                "net_pnl_usd": net_pnl,
+                "frictions_usd": fees,
+                "closed_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            if "closed_trades" not in self.data:
+                self.data["closed_trades"] = []
+            self.data["closed_trades"].append(closed_rec)
+            self.data["open_positions"] = [p for p in self.data.get("open_positions", []) if p.get("trade_id") != pos.get("trade_id")]
+            self._sync_paper_exit_to_audit(closed_rec)
+            self.save_ledger()
+
     def _sync_paper_partial_tp_to_audit(self, pos: Dict[str, Any], tp_stage: str, tp_price: float, gain_pct: float):
         """
         Real-Time Execution Bridge for Partial Scale-Out:
         Instantly synchronizes sub-second paper trade partial TP events (TP1 / TP2) into:
-        1. trader_signals_tracker.csv & today_trader_signals_tracker.csv
+        1. trader_signals_tracker.csv
         2. MySQL signals_tracker (SignalAudit)
         3. v16_dynamic_states.json & v16_immutable_signals.json
         Maintains lockstep consistency across terminal, audit ledger, and paper trading.
         """
         try:
             sym = str(pos.get("symbol", "")).strip().upper()
+            pos_sid = str(pos.get("trade_id") or pos.get("signal_id") or "").strip()
             hz = str(pos.get("horizon", "15M")).strip().upper()
             norm_hz = "15M" if "15" in hz else ("24H" if ("24" in hz or "1D" in hz) else "1H")
             now_utc = datetime.now(timezone.utc)
@@ -1574,43 +2401,64 @@ class PaperTradingBot:
                 audit_status = "PARTIAL_TP_HIT"
                 outcome_label = f"🎯 PARTIAL TP ({gain_pct:+.2f}%)"
 
-            # 1. Update CSV files: trader_signals_tracker.csv and today_trader_signals_tracker.csv
-            for fname in ["trader_signals_tracker.csv", "today_trader_signals_tracker.csv"]:
-                csv_path = os.path.join(EXPORT_DIR, fname)
-                if os.path.exists(csv_path):
-                    import csv
-                    updated_rows = []
-                    csv_changed = False
-                    with open(csv_path, "r", encoding="utf-8") as f:
-                        reader = csv.DictReader(f)
-                        fieldnames = reader.fieldnames
-                        for row in reader:
-                            r_sym = str(row.get("symbol", "")).strip().upper()
-                            r_hz = str(row.get("horizon", "")).strip().upper()
-                            r_norm_hz = "15M" if "15" in r_hz else ("24H" if ("24" in r_hz or "1D" in r_hz) else "1H")
-                            r_st = str(row.get("status", "")).strip().upper()
+            is_tp1_locked_flag = bool(pos.get("tp1_hit") or tp_stage in ("TP1_HIT", "TP2_HIT"))
+            is_tp2_locked_flag = bool(pos.get("tp2_hit") or tp_stage == "TP2_HIT")
+            pos_sl = float(pos.get("sl_price") or 0.0)
+            pos_peak = float(pos.get("peak_price_seen") or tp_price)
+            pos_trough = float(pos.get("trough_price_seen") or tp_price)
+            pos_mfe = round(float(pos.get("peak_gain_pct") or max(0.0, gain_pct)), 2)
+            pos_mae = round(float(pos.get("max_drawdown_pct") or 0.0), 2)
 
-                            is_match = (
-                                (r_sym == sym or r_sym.replace("/", "") == sym.replace("/", ""))
-                                and (r_norm_hz == norm_hz)
-                                and r_st in ["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN"]
-                            )
-                            if is_match and not csv_changed:
-                                row["status"] = audit_status
-                                row["outcome_label"] = outcome_label
-                                row["current_price"] = str(round(tp_price, 6))
-                                if "updated_at_utc" in (fieldnames or []):
-                                    row["updated_at_utc"] = updated_at
-                                csv_changed = True
-                            updated_rows.append(row)
+            # 1. Update authoritative CSV: trader_signals_tracker.csv
+            csv_path = os.path.join(EXPORT_DIR, "trader_signals_tracker.csv")
+            if os.path.exists(csv_path):
+                import csv
+                updated_rows = []
+                csv_changed = False
+                with open(csv_path, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    fieldnames = reader.fieldnames
+                    for row in reader:
+                        r_sid = str(row.get("signal_id", "")).strip()
+                        r_sym = str(row.get("symbol", "")).strip().upper()
+                        r_hz = str(row.get("horizon", "")).strip().upper()
+                        r_norm_hz = "15M" if "15" in r_hz else ("24H" if ("24" in r_hz or "1D" in r_hz) else "1H")
+                        r_st = str(row.get("status", "")).strip().upper()
 
-                    if csv_changed and fieldnames:
-                        tmp_f = f"{csv_path}.tmp.{time.time_ns()}"
-                        with open(tmp_f, "w", newline="", encoding="utf-8") as f:
-                            writer = csv.DictWriter(f, fieldnames=fieldnames)
-                            writer.writeheader()
-                            writer.writerows(updated_rows)
-                        os.replace(tmp_f, csv_path)
+                        is_id_match = bool(pos_sid and r_sid == pos_sid)
+                        is_match = is_id_match or (
+                            (r_sym == sym or r_sym.replace("/", "") == sym.replace("/", ""))
+                            and (r_norm_hz == norm_hz)
+                            and r_st in ["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN"]
+                        )
+                        if is_match and not csv_changed:
+                            row["status"] = audit_status
+                            row["outcome_label"] = outcome_label
+                            row["current_price"] = str(round(tp_price, 6))
+                            if pos_sl > 0 and "sl_price" in (fieldnames or []):
+                                row["sl_price"] = str(round(pos_sl, 6))
+                            if "is_tp1_locked" in (fieldnames or []):
+                                row["is_tp1_locked"] = str(is_tp1_locked_flag)
+                            if "is_tp2_locked" in (fieldnames or []):
+                                row["is_tp2_locked"] = str(is_tp2_locked_flag)
+                            if "peak_price_seen" in (fieldnames or []):
+                                row["peak_price_seen"] = str(round(pos_peak, 6))
+                            if "trough_price_seen" in (fieldnames or []):
+                                row["trough_price_seen"] = str(round(pos_trough, 6))
+                            if "max_potential_gain_pct" in (fieldnames or []):
+                                row["max_potential_gain_pct"] = str(pos_mfe)
+                            if "updated_at_utc" in (fieldnames or []):
+                                row["updated_at_utc"] = updated_at
+                            csv_changed = True
+                        updated_rows.append(row)
+
+                if csv_changed and fieldnames:
+                    tmp_f = f"{csv_path}.tmp.{time.time_ns()}"
+                    with open(tmp_f, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=fieldnames)
+                        writer.writeheader()
+                        writer.writerows(updated_rows)
+                    os.replace(tmp_f, csv_path)
 
             # 2. Update MySQL Database directly
             try:
@@ -1620,16 +2468,24 @@ class PaperTradingBot:
 
                 db = SessionLocal()
                 try:
-                    db_sig = db.query(SignalAudit).filter(
-                        or_(SignalAudit.symbol == sym, SignalAudit.symbol == sym.replace("/", "")),
-                        SignalAudit.status.in_(["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN"])
-                    ).order_by(SignalAudit.id.desc()).first()
+                    db_sig = None
+                    if pos_sid:
+                        db_sig = db.query(SignalAudit).filter(SignalAudit.signal_id == pos_sid).first()
+                    if not db_sig:
+                        db_sig = db.query(SignalAudit).filter(
+                            or_(SignalAudit.symbol == sym, SignalAudit.symbol == sym.replace("/", "")),
+                            SignalAudit.status.in_(["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN"])
+                        ).order_by(SignalAudit.id.desc()).first()
 
                     if db_sig:
                         db_sig.status = audit_status
                         db_sig.outcome_label = outcome_label
-                        db_sig.current_price = round(tp_price, 6)
-                        db_sig.updated_at_utc = updated_at
+                        if pos_sl > 0:
+                            db_sig.sl_price = round(pos_sl, 6)
+                        db_sig.peak_price_seen = round(pos_peak, 6)
+                        db_sig.trough_price_seen = round(pos_trough, 6)
+                        db_sig.max_potential_gain_pct = pos_mfe
+                        db_sig.evaluated_at_utc = updated_at
                         db.commit()
                         print(f"[PAPER-AUDIT BRIDGE 🔗] Successfully synced partial TP to MySQL for {sym} ({norm_hz}): {audit_status}")
                 finally:
@@ -1644,10 +2500,13 @@ class PaperTradingBot:
                 if os.path.exists(dyn_path):
                     with open(dyn_path, "r", encoding="utf-8") as df:
                         dyn_data = json.load(df)
-                    for k, v in dyn_data.items():
-                        if (sym in k or sym.replace("/", "") in k) and (norm_hz in k or v.get("horizon") == norm_hz):
-                            target_k = k
-                            break
+                    if pos_sid and pos_sid in dyn_data:
+                        target_k = pos_sid
+                    if not target_k:
+                        for k, v in dyn_data.items():
+                            if (sym in k or sym.replace("/", "") in k) and (norm_hz in k or v.get("horizon") == norm_hz):
+                                target_k = k
+                                break
                     if not target_k:
                         for k in dyn_data.keys():
                             if sym in k or sym.replace("/", "") in k:
@@ -1657,7 +2516,21 @@ class PaperTradingBot:
                         dyn_data[target_k]["status"] = audit_status
                         dyn_data[target_k]["outcome_label"] = outcome_label
                         dyn_data[target_k]["current_price"] = round(tp_price, 6)
+                        if pos_sl > 0:
+                            dyn_data[target_k]["current_sl"] = round(pos_sl, 6)
+                            dyn_data[target_k]["locked_sl"] = round(pos_sl, 6)
+                            dyn_data[target_k]["trailing_sl"] = round(pos_sl, 6)
+                        dyn_data[target_k]["is_tp1_locked"] = is_tp1_locked_flag
+                        dyn_data[target_k]["is_tp2_locked"] = is_tp2_locked_flag
+                        dyn_data[target_k]["mfe_pct"] = max(float(dyn_data[target_k].get("mfe_pct") or 0.0), pos_mfe)
+                        dyn_data[target_k]["mae_pct"] = max(float(dyn_data[target_k].get("mae_pct") or 0.0), pos_mae)
                         dyn_data[target_k]["is_breakeven_active"] = True
+                        dyn_data[target_k]["is_risk_free"] = True
+                        dyn_data[target_k]["residual_risk_usd"] = 0.0
+                        dyn_data[target_k]["locked_profit_usd"] = float(pos.get("locked_profit_usd") or pos.get("total_realized_partial_usd") or 0.0)
+                        dyn_data[target_k]["trailing_runner_rr"] = pos.get("trailing_runner_rr")
+                        dyn_data[target_k]["trailing_rr_ratio"] = pos.get("active_risk_reward_ratio") or "RISK_FREE (LOCKED)"
+                        dyn_data[target_k]["structural_risk_reward"] = pos.get("structural_risk_reward")
                         dyn_data[target_k]["updated_at_utc"] = updated_at
                         tmp_dp = f"{dyn_path}.tmp.{time.time_ns()}"
                         with open(tmp_dp, "w", encoding="utf-8") as df:
@@ -1695,22 +2568,61 @@ class PaperTradingBot:
         """
         try:
             sym = str(closed_record.get("symbol", "")).strip().upper()
+            rec_sid = str(closed_record.get("trade_id") or closed_record.get("signal_id") or "").strip()
             hz = str(closed_record.get("horizon", "15M")).strip().upper()
             norm_hz = "15M" if "15" in hz else ("24H" if ("24" in hz or "1D" in hz) else "1H")
             exit_reason = str(closed_record.get("exit_reason", ""))
             exit_p = float(closed_record.get("exit_price", 0.0))
             ret_pct = float(closed_record.get("return_pct", 0.0))
+            tp2_hit = bool(closed_record.get("tp2_hit", False))
+            tp1_hit = bool(closed_record.get("tp1_hit", False)) or tp2_hit
+            tp3_hit = bool(closed_record.get("tp3_hit", False))
+            rec_sl = float(closed_record.get("sl_price") or 0.0)
+            rec_peak = float(closed_record.get("peak_price_seen") or exit_p)
+            rec_trough = float(closed_record.get("trough_price_seen") or exit_p)
+            rec_mfe = round(float(closed_record.get("peak_gain_pct") or 0.0), 2)
+            rec_mae = round(float(closed_record.get("max_drawdown_pct") or 0.0), 2)
             now_utc = datetime.now(timezone.utc)
             closed_at = closed_record.get("closed_at_utc") or closed_record.get("closed_at") or now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
 
             # Map paper exit reason to authoritative SignalAudit status and outcome label
-            if "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
+            if "TAKE_PROFIT_2_TRAIL_SL" in exit_reason or "WON_TP2_TRAIL" in exit_reason:
+                audit_status = "WON_TP2_TRAIL"
+                outcome_label = f"🟢 WON (TP2 + TRAILING RUNNER {ret_pct:+.2f}%)"
+                wa_event = "TRAIL_SL_HIT"
+                tp2_hit = True
+                tp1_hit = True
+            elif "TAKE_PROFIT_1_TRAIL_SL" in exit_reason or "WON_TP1_BE" in exit_reason:
+                audit_status = "WON_TP1_BE"
+                outcome_label = f"🟢 WON (TP1 + TRAILING RUNNER {ret_pct:+.2f}%)"
+                wa_event = "TRAIL_SL_HIT"
+                tp1_hit = True
+            elif "TAKE_PROFIT_2_RUNNER_EXPIRY" in exit_reason or (("HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason) and tp2_hit):
+                audit_status = "WON_TP2_EXP"
+                outcome_label = f"🟢 WON (TP2 + EXP {ret_pct:+.2f}%)"
+                wa_event = "TP2_HIT"
+                tp2_hit = True
+                tp1_hit = True
+            elif "TAKE_PROFIT_1_RUNNER_EXPIRY" in exit_reason or (("HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason) and tp1_hit):
+                audit_status = "WON_TP1_EXP"
+                outcome_label = f"🟢 WON (TP1 + EXP {ret_pct:+.2f}%)"
+                wa_event = "TP1_HIT"
+                tp1_hit = True
+            elif "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
                 audit_status = "BREAKEVEN_GUARD"
                 outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_pct:+.2f}%)"
                 wa_event = "BE_HIT"
-            elif "STOP_LOSS" in exit_reason or "EMERGENCY" in exit_reason:
+            elif "STOP_LOSS" in exit_reason or "EMERGENCY" in exit_reason or "INVALIDATION" in exit_reason or "ORDER_BLOCK" in exit_reason:
                 if "EMERGENCY" in exit_reason:
-                    if ret_pct >= 0.05:
+                    if tp2_hit and ret_pct >= 0.0:
+                        audit_status = "WON_TP2_EXP"
+                        outcome_label = f"🟢 WON (TP2 + EMERGENCY EXIT {ret_pct:+.2f}%)"
+                        wa_event = "TP2_HIT"
+                    elif tp1_hit and ret_pct >= 0.0:
+                        audit_status = "WON_TP1_EXP"
+                        outcome_label = f"🟢 WON (TP1 + EMERGENCY EXIT {ret_pct:+.2f}%)"
+                        wa_event = "TP1_HIT"
+                    elif ret_pct >= 0.05:
                         audit_status = "WON_EXP_PROFIT"
                         outcome_label = f"🟢 WON (EMERGENCY EXIT {ret_pct:+.2f}%)"
                         wa_event = "EXPIRED"
@@ -1722,6 +2634,10 @@ class PaperTradingBot:
                         audit_status = "BREAKEVEN_GUARD"
                         outcome_label = f"🛡️ BREAKEVEN (EMERGENCY SHOCK {ret_pct:+.2f}%)"
                         wa_event = "BE_HIT"
+                elif "INVALIDATION" in exit_reason or "ORDER_BLOCK" in exit_reason:
+                    audit_status = "LOST_SL"
+                    outcome_label = f"🔴 LOST (OB INTRABAR INVALIDATION {ret_pct:+.2f}%)"
+                    wa_event = "SL_HIT"
                 else:
                     audit_status = "LOST_SL"
                     outcome_label = "🔴 LOST (SL HIT)"
@@ -1730,14 +2646,20 @@ class PaperTradingBot:
                 audit_status = "WON_TP3"
                 outcome_label = "🟢 WON (TP3 HIT)"
                 wa_event = "TP3_HIT"
+                tp1_hit = True
+                tp2_hit = True
+                tp3_hit = True
             elif "TAKE_PROFIT_2" in exit_reason or "TP2" in exit_reason:
                 audit_status = "WON_TP2"
                 outcome_label = "🟢 WON (TP2 HIT)"
                 wa_event = "TP2_HIT"
+                tp1_hit = True
+                tp2_hit = True
             elif "TAKE_PROFIT_1" in exit_reason or "TP1" in exit_reason or "TAKE_PROFIT" in exit_reason:
                 audit_status = "WON_TP1"
                 outcome_label = "🟢 WON (TP1 HIT)"
                 wa_event = "TP1_HIT"
+                tp1_hit = True
             elif "HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason:
                 if ret_pct >= 0.10:
                     audit_status = "WON_EXP_PROFIT"
@@ -1777,12 +2699,14 @@ class PaperTradingBot:
                     reader = csv.DictReader(f)
                     fieldnames = reader.fieldnames
                     for row in reader:
+                        r_sid = str(row.get("signal_id", "")).strip()
                         r_sym = str(row.get("symbol", "")).strip().upper()
                         r_hz = str(row.get("horizon", "")).strip().upper()
                         r_norm_hz = "15M" if "15" in r_hz else ("24H" if ("24" in r_hz or "1D" in r_hz) else "1H")
                         r_st = str(row.get("status", "")).strip().upper()
-                        
-                        is_match = (
+
+                        is_id_match = bool(rec_sid and r_sid == rec_sid)
+                        is_match = is_id_match or (
                             (r_sym == sym or r_sym.replace("/", "") == sym.replace("/", ""))
                             and (r_norm_hz == norm_hz)
                             and r_st in ["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]
@@ -1791,8 +2715,24 @@ class PaperTradingBot:
                             row["status"] = audit_status
                             row["outcome_label"] = outcome_label
                             row["exit_price"] = str(round(exit_p, 6))
+                            row["current_price"] = str(round(exit_p, 6))
                             row["realized_return_pct"] = f"{ret_pct:+.2f}%"
                             row["evaluated_at_utc"] = closed_at
+                            if rec_sl > 0 and "sl_price" in (fieldnames or []):
+                                row["sl_price"] = str(round(rec_sl, 6))
+                            if "is_tp1_locked" in (fieldnames or []):
+                                row["is_tp1_locked"] = str(bool(tp1_hit))
+                            if "is_tp2_locked" in (fieldnames or []):
+                                row["is_tp2_locked"] = str(bool(tp2_hit))
+                            if "peak_price_seen" in (fieldnames or []) and rec_peak > 0:
+                                prev_pk = float(row.get("peak_price_seen") or 0.0) if str(row.get("peak_price_seen") or "").strip() not in ("", "None") else 0.0
+                                row["peak_price_seen"] = str(round(max(prev_pk, rec_peak, exit_p), 6))
+                            if "trough_price_seen" in (fieldnames or []) and rec_trough > 0:
+                                prev_tr = float(row.get("trough_price_seen") or 0.0) if str(row.get("trough_price_seen") or "").strip() not in ("", "None") else 0.0
+                                row["trough_price_seen"] = str(round(min(prev_tr, rec_trough, exit_p) if prev_tr > 0 else min(rec_trough, exit_p), 6))
+                            if "max_potential_gain_pct" in (fieldnames or []):
+                                prev_mfe = float(row.get("max_potential_gain_pct") or 0.0) if str(row.get("max_potential_gain_pct") or "").strip() not in ("", "None") else 0.0
+                                row["max_potential_gain_pct"] = str(round(max(prev_mfe, rec_mfe), 2))
                             csv_changed = True
                         updated_rows.append(row)
 
@@ -1812,10 +2752,14 @@ class PaperTradingBot:
 
                 db = SessionLocal()
                 try:
-                    db_sig = db.query(SignalAudit).filter(
-                        or_(SignalAudit.symbol == sym, SignalAudit.symbol == sym.replace("/", "")),
-                        SignalAudit.status.in_(["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"])
-                    ).order_by(SignalAudit.id.desc()).first()
+                    db_sig = None
+                    if rec_sid:
+                        db_sig = db.query(SignalAudit).filter(SignalAudit.signal_id == rec_sid).first()
+                    if not db_sig:
+                        db_sig = db.query(SignalAudit).filter(
+                            or_(SignalAudit.symbol == sym, SignalAudit.symbol == sym.replace("/", "")),
+                            SignalAudit.status.in_(["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"])
+                        ).order_by(SignalAudit.id.desc()).first()
 
                     if db_sig:
                         db_sig.status = audit_status
@@ -1823,6 +2767,14 @@ class PaperTradingBot:
                         db_sig.exit_price = round(exit_p, 6)
                         db_sig.realized_return_pct = round(ret_pct, 2)
                         db_sig.evaluated_at_utc = closed_at
+                        if rec_sl > 0:
+                            db_sig.sl_price = round(rec_sl, 6)
+                        if rec_peak > 0:
+                            db_sig.peak_price_seen = round(max(float(db_sig.peak_price_seen or 0.0), rec_peak, exit_p), 6)
+                        if rec_trough > 0:
+                            prev_tr = float(db_sig.trough_price_seen or 0.0)
+                            db_sig.trough_price_seen = round(min(prev_tr, rec_trough, exit_p) if prev_tr > 0 else min(rec_trough, exit_p), 6)
+                        db_sig.max_potential_gain_pct = round(max(float(db_sig.max_potential_gain_pct or 0.0), rec_mfe), 2)
                         db.commit()
                         print(f"[PAPER-AUDIT BRIDGE 🔗] Successfully synced tick exit to MySQL for {sym} ({norm_hz}): {outcome_label}")
                 finally:
@@ -1837,10 +2789,13 @@ class PaperTradingBot:
                 if os.path.exists(dyn_path):
                     with open(dyn_path, "r", encoding="utf-8") as df:
                         dyn_data = json.load(df)
-                    for k, v in dyn_data.items():
-                        if (sym in k or sym.replace("/", "") in k) and (norm_hz in k or v.get("horizon") == norm_hz):
-                            target_k = k
-                            break
+                    if rec_sid and rec_sid in dyn_data:
+                        target_k = rec_sid
+                    if not target_k:
+                        for k, v in dyn_data.items():
+                            if (sym in k or sym.replace("/", "") in k) and (norm_hz in k or v.get("horizon") == norm_hz):
+                                target_k = k
+                                break
                     if not target_k:
                         for k in dyn_data.keys():
                             if sym in k or sym.replace("/", "") in k:
@@ -1851,6 +2806,16 @@ class PaperTradingBot:
                         dyn_data[target_k]["outcome_label"] = outcome_label
                         dyn_data[target_k]["exit_price"] = round(exit_p, 6)
                         dyn_data[target_k]["current_price"] = round(exit_p, 6)
+                        if rec_sl > 0:
+                            dyn_data[target_k]["current_sl"] = round(rec_sl, 6)
+                            if tp1_hit or closed_record.get("is_breakeven_locked"):
+                                dyn_data[target_k]["locked_sl"] = round(rec_sl, 6)
+                                dyn_data[target_k]["trailing_sl"] = round(rec_sl, 6)
+                        dyn_data[target_k]["is_tp1_locked"] = bool(tp1_hit)
+                        dyn_data[target_k]["is_tp2_locked"] = bool(tp2_hit)
+                        dyn_data[target_k]["is_risk_free"] = bool(tp1_hit or closed_record.get("is_breakeven_locked"))
+                        dyn_data[target_k]["mfe_pct"] = max(float(dyn_data[target_k].get("mfe_pct") or 0.0), rec_mfe)
+                        dyn_data[target_k]["mae_pct"] = max(float(dyn_data[target_k].get("mae_pct") or 0.0), rec_mae)
                         dyn_data[target_k]["realized_return_pct"] = round(ret_pct, 2)
                         dyn_data[target_k]["unrealized_net_pnl_pct"] = round(ret_pct, 2)
                         dyn_data[target_k]["updated_at_utc"] = closed_at
@@ -1915,12 +2880,21 @@ class PaperTradingBot:
             norm_hz = "15M" if "15" in hz else ("24H" if any(x in hz for x in ["24", "1D", "SWING", "MACRO"]) else "1H")
             reason = str(rec.get("cancellation_reason", "CANCELLED"))
             detail = str(rec.get("cancellation_detail", ""))
-            limit_p = float(rec.get("optimal_entry_limit", 0.0))
+            limit_p = float(rec.get("optimal_entry_limit", 0.0) or 0.0)
+            market_p = float(rec.get("cancel_market_price", 0.0) or 0.0)
+            live_exit_p = market_p if market_p > 0 else limit_p
             now_utc = datetime.now(timezone.utc)
             cancelled_at = rec.get("cancelled_at_utc") or now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-            audit_status = "EXPIRED_HORIZON"
-            outcome_label = "⏱️ EXPIRED"
+            if "ORDER_BLOCK_INVALIDATED" in reason:
+                audit_status = "CANCELLED_OB_INVALIDATED"
+                outcome_label = "🛑 CANCELLED (OB INVALIDATED)"
+            elif "SPREAD_BLOWOUT" in reason or "MACRO_EVENT_BLACKOUT" in reason or "MACRO_BLOWOUT" in reason:
+                audit_status = "CANCELLED_VOLATILITY_BLOWOUT"
+                outcome_label = "🛑 CANCELLED (VOLATILITY BLOWOUT)"
+            else:
+                audit_status = "EXPIRED_HORIZON"
+                outcome_label = "⏱️ EXPIRED"
 
             # 1. Update CSV: trader_signals_tracker.csv
             csv_path = os.path.join(EXPORT_DIR, "trader_signals_tracker.csv")
@@ -1949,8 +2923,10 @@ class PaperTradingBot:
                         if is_match and not csv_changed:
                             row["status"] = audit_status
                             row["outcome_label"] = outcome_label
-                            if limit_p > 0:
-                                row["exit_price"] = str(round(limit_p, 6))
+                            if live_exit_p > 0:
+                                row["exit_price"] = str(round(live_exit_p, 6))
+                                if "current_price" in row:
+                                    row["current_price"] = str(round(live_exit_p, 6))
                             row["realized_return_pct"] = "0.00%"
                             row["evaluated_at_utc"] = cancelled_at
                             csv_changed = True
@@ -1984,8 +2960,10 @@ class PaperTradingBot:
                     if db_sig:
                         db_sig.status = audit_status
                         db_sig.outcome_label = outcome_label
-                        if limit_p > 0:
-                            db_sig.exit_price = round(limit_p, 6)
+                        if live_exit_p > 0:
+                            db_sig.exit_price = round(live_exit_p, 6)
+                            if hasattr(db_sig, "current_price"):
+                                db_sig.current_price = round(live_exit_p, 6)
                         db_sig.realized_return_pct = 0.0
                         db_sig.evaluated_at_utc = cancelled_at
                         db.commit()
@@ -2008,9 +2986,11 @@ class PaperTradingBot:
                                 target_k = k
                                 break
                     if target_k and target_k in dyn_data:
+                        existing_curr_p = float(dyn_data[target_k].get("current_price") or 0.0)
+                        best_curr_p = market_p if market_p > 0 else (existing_curr_p if existing_curr_p > 0 else limit_p)
                         dyn_data[target_k]["status"] = audit_status
                         dyn_data[target_k]["outcome_label"] = outcome_label
-                        dyn_data[target_k]["exit_price"] = round(limit_p, 6) if limit_p > 0 else dyn_data[target_k].get("current_price", 0.0)
+                        dyn_data[target_k]["exit_price"] = round(best_curr_p, 6) if best_curr_p > 0 else existing_curr_p
                         dyn_data[target_k]["current_price"] = dyn_data[target_k]["exit_price"]
                         dyn_data[target_k]["realized_return_pct"] = 0.0
                         dyn_data[target_k]["unrealized_net_pnl_pct"] = 0.0
@@ -2081,8 +3061,8 @@ class PaperTradingBot:
                     d_val["active_slots"] = sum(1 for p in valid_positions if p.get("desk") == d_key)
                 self.save_ledger()
 
-    def start_tick_daemon(self, ticker_fetch_fn, interval_seconds: float = 0.5, partition_check_fn = None, latency_fetch_fn = None, order_book_voids_fn = None):
-        """Starts the decoupled 24/7 high-speed sub-second position monitoring thread with latency and outage awareness."""
+    def start_tick_daemon(self, ticker_fetch_fn, interval_seconds: float = 0.5, partition_check_fn = None, latency_fetch_fn = None, order_book_voids_fn = None, depth_fetch_fn = None, cvd_fetch_fn = None):
+        """Starts the decoupled 24/7 high-speed sub-second position monitoring thread with latency, depth, and outage awareness."""
         if self._running:
             return
         self._running = True
@@ -2110,7 +3090,41 @@ class PaperTradingBot:
                             current_interval = interval_seconds
                             prices = ticker_fetch_fn()
                             if prices:
-                                self.on_tick(prices, is_market_partition_active=False, tick_latency_ms=latency_ms, order_book_voids=voids)
+                                # Microstructure depth and inflow evaluation for active resting limit orders
+                                depths = {}
+                                cvds = {}
+                                resting_syms = set()
+                                with self._lock:
+                                    for p in self.data.get("open_positions", []):
+                                        if p.get("is_limit_resting") or p.get("status") == "RESTING_LIMIT":
+                                            resting_syms.add(p.get("symbol"))
+
+                                if depth_fetch_fn and resting_syms:
+                                    for s in resting_syms:
+                                        try:
+                                            d = depth_fetch_fn(s)
+                                            if d:
+                                                depths[s] = d
+                                        except Exception:
+                                            pass
+
+                                if cvd_fetch_fn and resting_syms:
+                                    for s in resting_syms:
+                                        try:
+                                            c = cvd_fetch_fn(s)
+                                            if c:
+                                                cvds[s] = c
+                                        except Exception:
+                                            pass
+
+                                self.on_tick(
+                                    prices,
+                                    is_market_partition_active=False,
+                                    tick_latency_ms=latency_ms,
+                                    order_book_voids=voids,
+                                    order_book_depths=depths if depths else None,
+                                    cvd_metrics=cvds if cvds else None
+                                )
                 except Exception as e:
                     pass
                 time.sleep(max(0.1, current_interval))

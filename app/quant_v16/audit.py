@@ -85,6 +85,129 @@ class DynamicTradeState:
     updated_at_utc: str = ""
     exit_price: Optional[float] = None
     realized_return_pct: Optional[float] = None
+    # Trailing Stop Evolution & Risk-Free Accounting
+    is_risk_free: bool = False
+    residual_risk_usd: float = 0.0
+    locked_profit_usd: float = 0.0
+    trailing_runner_rr: Optional[float] = None
+    trailing_rr_ratio: str = ""
+    structural_risk_reward: float = 2.0
+
+
+@dataclass
+class TrailingEvolutionMetrics:
+    is_risk_free: bool
+    residual_risk_distance: float
+    residual_risk_usd: float
+    locked_profit_usd: float
+    structural_rr: float
+    trailing_runner_rr: Optional[float]
+    active_rr_ratio: str
+    risk_state: str  # "STRUCTURAL_RISK", "MICRO_GUARDED", "BREAKEVEN_LOCKED", "PROFIT_BUFFER_LOCKED", "TRAILING_RUNNER"
+
+
+def calculate_trailing_stop_evolution(
+    entry_price: float,
+    current_sl: float,
+    current_price: float,
+    next_target: float,
+    initial_sl: float,
+    initial_target: float,
+    direction: str = "LONG",
+    position_size_usd: float = 100.0,
+    remaining_size_usd: Optional[float] = None,
+    total_realized_partial_usd: float = 0.0,
+    is_tp1_locked: bool = False,
+    is_tp2_locked: bool = False,
+    is_breakeven_locked: bool = False,
+) -> TrailingEvolutionMetrics:
+    """
+    Quant Edge V16 Trailing Stop Evolution & Residual Risk Calculator.
+    
+    Invariants:
+    1. Initial entry snapshot preserves immutable structural R:R (e.g. 1:2.0).
+    2. Subsequent Breakeven ratchets on TP1 hit dynamically compress residual capital risk
+       to zero (R -> 0).
+    3. Active Trailing R:R in the terminal phase is evaluated from giveback risk vs
+       remaining runner upside to prevent division-by-zero or infinite representations.
+    """
+    entry_p = max(1e-8, float(entry_price or 0.0))
+    sl_p = float(current_sl or entry_p)
+    curr_p = float(current_price or entry_p)
+    target_p = float(next_target or entry_p)
+    init_sl = float(initial_sl or sl_p)
+    init_target = float(initial_target or target_p)
+    is_long = str(direction).upper() in ["LONG", "BUY", "BULLISH"]
+    rem_size = float(remaining_size_usd if remaining_size_usd is not None else position_size_usd)
+
+    # 1. Immutable structural risk & reward geometry
+    init_risk_dist = max(1e-8, abs(entry_p - init_sl))
+    init_reward_dist = abs(init_target - entry_p)
+    structural_rr = round(init_reward_dist / init_risk_dist, 2)
+
+    # 2. Dynamic residual capital risk distance
+    if is_long:
+        # Residual capital risk is strictly distance from entry down to SL (0 if SL >= entry)
+        residual_risk_dist = max(0.0, entry_p - sl_p)
+        is_rf = (sl_p >= (entry_p * 0.9999)) or is_breakeven_locked or is_tp1_locked or is_tp2_locked
+        locked_buffer = max(0.0, sl_p - entry_p)
+    else:
+        # Short residual risk is distance from entry up to SL (0 if SL <= entry)
+        residual_risk_dist = max(0.0, sl_p - entry_p)
+        is_rf = (sl_p <= (entry_p * 1.0001)) or is_breakeven_locked or is_tp1_locked or is_tp2_locked
+        locked_buffer = max(0.0, entry_p - sl_p)
+
+    if is_rf:
+        residual_risk_dist = 0.0
+
+    residual_risk_usd = round((residual_risk_dist / entry_p) * rem_size, 4)
+    locked_profit_usd = round(((locked_buffer / entry_p) * rem_size) + float(total_realized_partial_usd or 0.0), 4)
+
+    # 3. Dynamic operational risk state
+    if not is_rf:
+        if residual_risk_dist <= (0.55 * init_risk_dist):
+            risk_state = "MICRO_GUARDED"
+        else:
+            risk_state = "STRUCTURAL_RISK"
+    else:
+        if is_tp2_locked or (is_tp1_locked and locked_buffer > (0.005 * entry_p)):
+            risk_state = "TRAILING_RUNNER"
+        elif is_tp1_locked or locked_buffer >= (0.0025 * entry_p):
+            risk_state = "PROFIT_BUFFER_LOCKED"
+        else:
+            risk_state = "BREAKEVEN_LOCKED"
+
+    # 4. Trailing Runner R:R in Terminal Phase (Giveback Risk vs Remaining Upside)
+    giveback_risk = max(1e-6, abs(curr_p - sl_p))
+    remaining_upside = max(0.0, (target_p - curr_p) if is_long else (curr_p - target_p))
+
+    trailing_runner_rr: Optional[float] = None
+    if target_p > 0 and remaining_upside > 0:
+        trailing_runner_rr = round(remaining_upside / giveback_risk, 2)
+
+    # 5. Active R:R String Format (Zero inf or ZeroDivisionError)
+    if is_rf:
+        if trailing_runner_rr is not None and trailing_runner_rr > 0:
+            active_rr_ratio = f"1:FREE (Runner 1:{trailing_runner_rr:.1f})"
+        else:
+            active_rr_ratio = "RISK_FREE (LOCKED)"
+    else:
+        if residual_risk_dist > 0:
+            current_active_rr = round(init_reward_dist / residual_risk_dist, 2)
+            active_rr_ratio = f"1:{current_active_rr:.1f}"
+        else:
+            active_rr_ratio = "RISK_FREE (LOCKED)"
+
+    return TrailingEvolutionMetrics(
+        is_risk_free=is_rf,
+        residual_risk_distance=residual_risk_dist,
+        residual_risk_usd=residual_risk_usd,
+        locked_profit_usd=locked_profit_usd,
+        structural_rr=structural_rr,
+        trailing_runner_rr=trailing_runner_rr,
+        active_rr_ratio=active_rr_ratio,
+        risk_state=risk_state
+    )
 
 import math
 
@@ -123,28 +246,34 @@ def classify_signal_outcome(
 
     # 1. Pending / Active trades (Strict Gate: must be evaluated first)
     pending_statuses = {
-        "PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT",
+        "PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "RESTING_LIMIT",
         "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"
     }
-    if st in pending_statuses or "PENDING" in out or "AWAIT PULLBACK" in out or "ACTIVE" in out:
+    if st in pending_statuses or "PENDING" in out or "AWAIT PULLBACK" in out or "AWAIT BOUNCE" in out or "RESTING" in out or "ACTIVE" in out:
         return "PENDING"
 
     # 2. Breakeven outcomes
     be_statuses = {
         "WON_TIER0_BE", "WON_TP1_BE", "EXPIRED_BREAKEVEN",
-        "BREAKEVEN_EXP", "TIER0_BE_HIT", "BREAKEVEN"
+        "BREAKEVEN_EXP", "TIER0_BE_HIT", "BREAKEVEN", "BREAKEVEN_GUARD",
+        "STOP_LOSS_BREAKEVEN", "TIER0_GUARD"
     }
     if (
         st in be_statuses
         or "BREAKEVEN" in out
         or "TIER-0" in out
+        or "BREAKEVEN" in st
+        or "GUARD" in st
         or "TP1 + BE RUNNER" in out
         or "EXPIRED (BE" in out
     ):
         return "BREAKEVEN"
 
     # 3. Won outcomes
-    won_statuses = {"WON_TP3", "WON_TP2_TRAIL", "WON_EXP_PROFIT", "WON_PROFIT_EXPIRED", "WON"}
+    won_statuses = {
+        "WON_TP3", "WON_TP2_TRAIL", "WON_TP2", "WON_TP1",
+        "WON_TP2_EXP", "WON_TP1_EXP", "WON_EXP_PROFIT", "WON_PROFIT_EXPIRED", "WON"
+    }
     if st in won_statuses or ("WON" in out and "LOST" not in out):
         return "WON"
 

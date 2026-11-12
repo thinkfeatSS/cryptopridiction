@@ -426,7 +426,7 @@ export default function V16SignalsAuditLedger() {
                   : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              <span>TP HIT (WON)</span>
+              <span>WON (TP / PROFIT)</span>
               <span className="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] text-emerald-300">
                 {counts.won}
               </span>
@@ -709,13 +709,21 @@ export default function V16SignalsAuditLedger() {
 
                       {/* Stop Loss */}
                       <td className="py-3 px-4">
-                        <div className="flex items-center gap-1 font-bold text-rose-400">
-                          {isBeLocked && <Lock className="w-3 h-3 text-amber-300" />}
-                          <span>{formatPrice(slP)}</span>
-                        </div>
-                        <div className="text-[10px] text-slate-400">
-                          -{entryP > 0 ? ((Math.abs(entryP - slP) / entryP) * 100).toFixed(1) : 0}%
-                        </div>
+                        {(() => {
+                          const slSignedPct = entryP > 0 ? ((isLong ? (slP - entryP) : (entryP - slP)) / entryP) * 100 : 0;
+                          const isSlInProfit = entryP > 0 && slP > 0 && (isLong ? slP >= entryP : slP <= entryP);
+                          return (
+                            <>
+                              <div className={`flex items-center gap-1 font-bold ${isSlInProfit ? "text-emerald-400" : "text-rose-400"}`}>
+                                {(isBeLocked || isSlInProfit) && <Lock className="w-3 h-3 text-amber-300" />}
+                                <span>{formatPrice(slP)}</span>
+                              </div>
+                              <div className={`text-[10px] ${isSlInProfit ? "text-emerald-400/90" : "text-slate-400"}`}>
+                                {isSlInProfit ? "+" : "-"}{Math.abs(slSignedPct).toFixed(1)}%
+                              </div>
+                            </>
+                          );
+                        })()}
                       </td>
 
                       {/* Target TP1 */}

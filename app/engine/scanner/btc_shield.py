@@ -351,6 +351,8 @@ class BtcPredictiveMarketShield:
             "altcoin_longs_allowed": alt_longs,
             "altcoin_shorts_allowed": locals().get("alt_shorts", True),
             "is_ntz_active": is_ntz_active,
+            "chop_index": round(btc_chop_15m, 1),
+            "boundary_harvest_allowed": not is_dump_cascade and (is_prolonged_micro_vol or is_dead_flatline or is_squeeze or (regime_v16 in ["RANGE", "SQUEEZE"])),
             "btc_price": c_now,
             "btc_15m_change_pct": round(ret_15m * 100.0, 2),
             "btc_1h_change_pct": round(ret_1h * 100.0, 2),
@@ -384,3 +386,7 @@ class BtcPredictiveMarketShield:
             from app.quant_v16.regime import reconcile_btc_shield
             self.state = reconcile_btc_shield(self.state, eval_res)
         return self.state
+
+# Module-level singleton instance for system-wide access
+btc_shield = BtcPredictiveMarketShield()
+

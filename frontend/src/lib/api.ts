@@ -32,6 +32,13 @@ export interface SignalItem {
   realized_return_num?: number;
   evaluated_at_utc?: string;
   card?: string;
+  is_higher_low_entry?: boolean;
+  is_lower_high_entry?: boolean;
+  entry_anchor_type?: string;
+  entry_anchor_price?: number;
+  execution_mode?: string;
+  is_candlestick_unanimous?: boolean;
+  candlestick_direction?: string;
 }
 
 export interface KpiSummary {

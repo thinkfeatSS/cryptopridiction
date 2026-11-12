@@ -105,11 +105,20 @@ class NoTradeZoneEngine:
             return 1.0
         try:
             vol = df['volume']
-            vol_now = float(vol.iloc[-1])
-            vol_ma = float(vol.rolling(period, min_periods=3).mean().iloc[-1])
-            if vol_ma <= 0.0:
-                return 1.0
-            return round(vol_now / vol_ma, 2)
+            if len(vol) >= 2:
+                hist_vols = vol.iloc[:-1]
+                vol_ma = float(hist_vols.rolling(period, min_periods=3).mean().iloc[-1])
+                if vol_ma <= 0.0:
+                    return 1.0
+                rvol_closed = float(vol.iloc[-2]) / vol_ma
+                rvol_live = float(vol.iloc[-1]) / vol_ma
+                return round(max(rvol_closed, rvol_live), 2)
+            else:
+                vol_now = float(vol.iloc[-1])
+                vol_ma = float(vol.rolling(period, min_periods=3).mean().iloc[-1])
+                if vol_ma <= 0.0:
+                    return 1.0
+                return round(vol_now / vol_ma, 2)
         except Exception:
             return 1.0
 
@@ -159,7 +168,9 @@ class NoTradeZoneEngine:
         alignment_score: float = 0.0,
         meta_win_prob: float = 0.50,
         direction: str = "LONG",
-        decision: str = ""
+        decision: str = "",
+        spread_bps: Optional[float] = None,
+        effective_rr: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Comprehensive multi-factor NTZ check.
@@ -263,13 +274,14 @@ class NoTradeZoneEngine:
             "BREAKOUT", "EXPANSION", "ORDER_BLOCK", "BREAKER",
             "RANGE_BOUNCE", "RANGE_ROTATION", "RANGE_SUPPORT", "RANGE_RESISTANCE",
             "SUB_RANGE", "MEAN_REVERSION", "SWEEP", "RECLAIM", "FVG", "VWAP",
-            "DIP_BUY", "RALLY_FADE", "COILING", "TURTLE_SOUP", "INSIDE_BAR", "SQUEEZE"
+            "DIP_BUY", "RALLY_FADE", "COILING", "TURTLE_SOUP", "INSIDE_BAR", "SQUEEZE",
+            "DECOUPLED", "IDIOSYNCRATIC"
         ]
         decision_str = str(decision).upper() if decision else ""
         is_exempt_strategy = has_fresh_ob or any(k in decision_str for k in exempt_strategies)
 
         # Severe Flatline Stagnation: Extreme dead market (ADX < 12 and BBW < 1.20% or CHOP >= 65 and ADX < 14)
-        is_dead_flatline = (adx < 12.0 and bbw < 1.20) or (chop >= 65.0 and adx < 14.0)
+        is_dead_flatline = (not is_exempt_strategy) and ((adx < 12.0 and bbw < 1.20) or (chop >= 65.0 and adx < 14.0))
         if is_dead_flatline and rvol < 1.25:
             reasons.append(f"Dead Flatline Stagnation on {tf_label} (ADX: {adx:.1f} < 12, BBW: {bbw:.2f}%, RVOL: {rvol:.2f}). No volatility to reach target.")
             if primary_code == NoTradeZoneReason.CLEAR:
@@ -355,20 +367,43 @@ class NoTradeZoneEngine:
         flash_drain_detail = ""
         if df is not None and "volume" in df.columns and len(df) >= 10:
             try:
-                hist_v = df["volume"].iloc[:-1] if len(df) >= 2 else df["volume"]
-                mean_vol_20 = float(hist_v.iloc[-20:].mean()) if len(hist_v) >= 5 else 0.0
-                curr_bar_vol = float(df["volume"].iloc[-1])
-                curr_to = curr_bar_vol * current_price
-                if mean_vol_20 > 0 and (curr_bar_vol / mean_vol_20 < 0.12):
+                # In live market streaming, df.iloc[-1] is the actively developing candle.
+                # Authoritative candlestick pattern and trigger volume confirmation is evaluated on the last completed candle (df.iloc[-2]).
+                # Evaluating df.iloc[-1] turnover at candle open (<5s) causes catastrophic false-positive lockouts.
+                cand_idx = -2 if len(df) >= 2 else -1
+                hist_slice = df["volume"].iloc[:cand_idx] if len(df) >= 3 else df["volume"].iloc[:-1]
+                mean_vol_20 = float(hist_slice.iloc[-20:].mean()) if len(hist_slice) >= 5 else 0.0
+                eval_bar_vol = float(df["volume"].iloc[cand_idx])
+                eval_to = eval_bar_vol * current_price
+                if mean_vol_20 > 0 and (eval_bar_vol / mean_vol_20 < 0.12):
                     is_flash_drain = True
-                    flash_drain_detail = f"RVOL {curr_bar_vol/mean_vol_20:.2f}x < 0.12x"
-                elif 0 < curr_to < 5000.0:
+                    flash_drain_detail = f"RVOL {eval_bar_vol/mean_vol_20:.2f}x < 0.12x"
+                elif 0 < eval_to < 5000.0:
                     is_flash_drain = True
-                    flash_drain_detail = f"turnover ${curr_to:,.0f} < $5,000"
+                    flash_drain_detail = f"turnover ${eval_to:,.0f} < $5,000"
             except Exception:
                 is_flash_drain = False
 
-        if is_sub_liquidity:
+        # Flash Liquidity Void & Spread Blowout Gating (Effective R:R Protection)
+        is_spread_blowout = False
+        spread_blowout_detail = ""
+        if effective_rr is not None and effective_rr < 1.20:
+            is_spread_blowout = True
+            spr_val = spread_bps if spread_bps is not None else 0.0
+            spread_blowout_detail = f"Spread widening ({spr_val:.1f} bps) degraded effective R:R ({effective_rr:.2f} < 1:1.20)"
+        elif spread_bps is not None:
+            max_spr = 25.0 if anchor_tf in ["5m", "15m"] else (35.0 if anchor_tf in ["1h", "4h"] else 50.0)
+            if spread_bps > max_spr:
+                is_spread_blowout = True
+                spread_blowout_detail = f"Flash spread blowout ({spread_bps:.1f} bps > {max_spr:.1f} bps limit)"
+
+        if is_spread_blowout:
+            reasons.append(f"Flash Liquidity Void / Spread Blowout ({spread_blowout_detail}). Trading halted to protect capital and effective R:R.")
+            if primary_code in [NoTradeZoneReason.CLEAR, NoTradeZoneReason.CHOP_CONSOLIDATION, NoTradeZoneReason.MID_RANGE_CHOP]:
+                primary_code = NoTradeZoneReason.DRY_VOLUME_ILLIQUID
+                primary_label = f"🛑 NO TRADE ZONE (SPREAD BLOWOUT / LIQUIDITY VOID - {tf_label})"
+                badge = f"SPREAD-BLOWOUT-{tf_label}"
+        elif is_sub_liquidity:
             reasons.append(f"Sub-Threshold Illiquidity (${vol_24h_quote/1e6:.2f}M < ${effective_min_vol/1e6:.1f}M USDT). Trading halted to eliminate slippage traps on thin books.")
             if primary_code == NoTradeZoneReason.CLEAR:
                 primary_code = NoTradeZoneReason.DRY_VOLUME_ILLIQUID
@@ -504,6 +539,11 @@ class NoTradeZoneEngine:
                 "DEFENSIVE_CASH_ONLY" in str(btc_shield_info.get("altcoin_posture", ""))
             )
 
+            is_acute_cascade = (
+                btc_shield_info.get("status_code") in ["ALERT_DUMP", "FLASH_DUMP", "BEAR_CASCADE_BLACKOUT"] or
+                btc_shield_info.get("regime") == "FLASH_DUMP"
+            )
+
             if is_btc_ntz:
                 reason_str = btc_shield_info.get("reason", "BTC Volatility Squeeze / Coiling Consolidation")
                 if not is_exempt_strategy:
@@ -512,23 +552,46 @@ class NoTradeZoneEngine:
                         primary_code = NoTradeZoneReason.CHOP_CONSOLIDATION
                         primary_label = f"🛑 NO TRADE ZONE (BTC Macro Volatility Squeeze: {reason_str})"
                         badge = "MACRO NTZ"
-            elif is_btc_dump and direction.upper() in ["LONG", "BULLISH"]:
+            elif is_btc_dump and (is_acute_cascade or direction.upper() in ["LONG", "BULLISH"]):
                 reason_str = btc_shield_info.get("reason", "BTC Flash Dump Active")
                 reasons.append(f"BTC Shield Active: {reason_str}")
-                if primary_code == NoTradeZoneReason.CLEAR:
+                if primary_code in [NoTradeZoneReason.CLEAR, NoTradeZoneReason.CHOP_CONSOLIDATION, NoTradeZoneReason.MID_RANGE_CHOP, NoTradeZoneReason.PROLONGED_MICRO_VOLATILITY]:
                     primary_code = NoTradeZoneReason.MACRO_BTC_CASCADE
                     primary_label = f"🛑 NO TRADE ZONE (BTC Market Cascade: {reason_str})"
                     badge = "BTC DUMP CASCADE"
 
-        # 2. Pre-Event News Blackout Window (<45 mins to high-impact catalyst)
+        # 2. Macro News Blackout Circuit Breakers (CPI, FOMC, NFP & Catalyst Releases)
+        is_event_blackout = False
+        event_blackout_reason = ""
         if fund_matrix:
             cat_ev = fund_matrix.get("catalyst_event", {})
+            macro_ev = fund_matrix.get("macro_economic_event", {})
             if cat_ev and cat_ev.get("is_sell_the_news_danger_zone"):
-                reasons.append("High-Impact Event Blackout Window Active (<12h to Major Catalyst)")
-                if primary_code == NoTradeZoneReason.CLEAR:
-                    primary_code = NoTradeZoneReason.PRE_EVENT_BLACKOUT
-                    primary_label = "🛑 NO TRADE ZONE (Pre-Event Catalyst Blackout)"
-                    badge = "EVENT BLACKOUT"
+                is_event_blackout = True
+                event_blackout_reason = "High-Impact Event Blackout Window Active (<12h to Major Catalyst)"
+            elif macro_ev and macro_ev.get("is_volatility_pause_active"):
+                is_event_blackout = True
+                event_blackout_reason = str(macro_ev.get("pause_reason") or "US Macro Economic Volatility Blackout Active")
+            elif fund_matrix.get("is_macro_blackout") or fund_matrix.get("is_volatility_pause_active"):
+                is_event_blackout = True
+                event_blackout_reason = str(fund_matrix.get("pause_reason") or "High-Impact Macro Economic Release Window Active")
+
+        if not is_event_blackout:
+            try:
+                from app.services.institutional_intelligence_service import institutional_intelligence_service
+                inst_cal = institutional_intelligence_service.get_macro_economic_calendar()
+                if inst_cal and inst_cal.get("is_volatility_pause_active"):
+                    is_event_blackout = True
+                    event_blackout_reason = str(inst_cal.get("pause_reason") or "US Macro Volatility Blackout Active")
+            except Exception:
+                pass
+
+        if is_event_blackout:
+            reasons.append(event_blackout_reason)
+            if primary_code in [NoTradeZoneReason.CLEAR, NoTradeZoneReason.CHOP_CONSOLIDATION, NoTradeZoneReason.MID_RANGE_CHOP, NoTradeZoneReason.PROLONGED_MICRO_VOLATILITY]:
+                primary_code = NoTradeZoneReason.PRE_EVENT_BLACKOUT
+                primary_label = f"🛑 NO TRADE ZONE (Pre-Event Catalyst Blackout: {event_blackout_reason})"
+                badge = "EVENT BLACKOUT"
 
         # 3. Extreme Funding Rate Crowding
         if funding_info:

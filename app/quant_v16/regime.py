@@ -504,6 +504,8 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
     shield["confidence"] = v16_regime.get("confidence", 0.85)
     shield["sizing_multiplier"] = v16_regime.get("sizing_multiplier", 1.0)
     shield["is_squeeze_transition"] = bool(v16_regime.get("is_squeeze_transition") or shield.get("is_squeeze_transition"))
+    if "chop_index" not in shield:
+        shield["chop_index"] = round(float(metrics.get("chop_index") or 50.0), 1)
 
     if v16_reg == "BEAR_TREND":
         shield["regime_label"] = "🔴 BEAR TREND (SHORT ALPHA AUTHORIZED)"

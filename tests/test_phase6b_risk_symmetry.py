@@ -53,7 +53,7 @@ class TestPhase6BRiskSymmetry(unittest.TestCase):
             self.assertFalse(res.get("altcoin_shorts_allowed"))
 
     def test_fundamental_1000x_symbol_normalization(self):
-        """Fix 6.1: Verify 1000x perpetual contracts strip '1000' to match news items."""
+        """Fix 6.1 & Section 13: Verify perpetual contracts across all multipliers (1000x, 10000x, 1000000x, 1Mx) strip multipliers dynamically to match news items."""
         fund = FundamentalIntelligenceService()
         mat = fund.get_asset_fundamental_matrix("1000PEPE/USDT")
         self.assertEqual(mat["base_coin"], "PEPE")
@@ -63,6 +63,21 @@ class TestPhase6BRiskSymmetry(unittest.TestCase):
 
         mat_floki = fund.get_asset_fundamental_matrix("1000FLOKI/USDT")
         self.assertEqual(mat_floki["base_coin"], "FLOKI")
+
+        mat_mog = fund.get_asset_fundamental_matrix("1000000MOG/USDT")
+        self.assertEqual(mat_mog["base_coin"], "MOG", "1000000x multiplier must resolve to MOG")
+
+        mat_ladys = fund.get_asset_fundamental_matrix("10000LADYS/USDT")
+        self.assertEqual(mat_ladys["base_coin"], "LADYS", "10000x multiplier must resolve to LADYS")
+
+        mat_baby = fund.get_asset_fundamental_matrix("1MBABYDOGE/USDT")
+        self.assertEqual(mat_baby["base_coin"], "BABYDOGE", "1Mx metric multiplier must resolve to BABYDOGE")
+
+        mat_1inch = fund.get_asset_fundamental_matrix("1INCH/USDT")
+        self.assertEqual(mat_1inch["base_coin"], "1INCH", "Native token 1INCH must NOT be falsely stripped")
+
+        mat_0g = fund.get_asset_fundamental_matrix("0G/USDT")
+        self.assertEqual(mat_0g["base_coin"], "0G", "Native token 0G must NOT be falsely stripped")
 
     def test_dynamic_anti_chase_continuous_scaling(self):
         """Fix 8.1: Verify dynamic chase tolerance scales down below 0.40% on ultra-low volatility assets."""

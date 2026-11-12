@@ -1,8 +1,10 @@
+import os
 import time
 import json
 import logging
 from typing import Any, Optional, Dict
 from app.config import settings
+from app.database import is_test_environment
 
 logger = logging.getLogger("cache_service")
 
@@ -24,7 +26,26 @@ class CacheService:
             return
         self._last_connect_attempt = now
 
+        if is_test_environment() and os.environ.get("REDIS_TEST_CONNECT") != "1":
+            self._redis = None
+            self._is_redis_available = False
+            return
+
         try:
+            import socket
+            import urllib.parse
+            parsed = urllib.parse.urlparse(self.redis_url)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or 6379
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.25)
+            res = sock.connect_ex((host, port))
+            sock.close()
+            if res != 0:
+                self._redis = None
+                self._is_redis_available = False
+                return
+
             import redis
             client = redis.from_url(
                 self.redis_url,

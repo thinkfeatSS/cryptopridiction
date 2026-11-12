@@ -40,8 +40,14 @@ export default function V16SignalCard({ signal, onSelect, isSelected = false }: 
     const st = (dyn?.status || imm?.status || "").toUpperCase();
     const out = (dyn?.outcome_label || "").toUpperCase();
 
-    if (st.includes("WON") || out.includes("WON") || out.includes("TP1") || out.includes("TP2") || out.includes("TP3") || st.includes("PROFIT")) {
+    if (st.includes("TP") || out.includes("TP1") || out.includes("TP2") || out.includes("TP3")) {
       return { label: "TP HIT (WON)", color: "text-emerald-400 bg-emerald-950/70 border-emerald-500/50", isWon: true };
+    }
+    if (st.includes("EXP_PROFIT") || st.includes("PROFIT_EXPIRED") || out.includes("EXP PROFIT") || out.includes("PROFIT EXPIRE")) {
+      return { label: "PROFIT (EXPIRY)", color: "text-teal-400 bg-teal-950/70 border-teal-500/50", isWon: true };
+    }
+    if (st.includes("WON") || out.includes("WON") || st.includes("PROFIT")) {
+      return { label: "CLOSED IN PROFIT", color: "text-emerald-400 bg-emerald-950/70 border-emerald-500/50", isWon: true };
     }
     if (st.includes("LOST") || out.includes("LOST") || st.includes("STOP") || out.includes("STOP")) {
       return { label: "STOPPED (LOST)", color: "text-rose-400 bg-rose-950/70 border-rose-500/50", isLost: true };
@@ -231,13 +237,22 @@ export default function V16SignalCard({ signal, onSelect, isSelected = false }: 
               <span>Stop Loss (SL):</span>
             </span>
             <div className="flex items-center gap-1.5">
-              {isBeLocked && (
+              {(isBeLocked || (entryPrice > 0 && effectiveSl > 0 && (isLong ? effectiveSl >= entryPrice : effectiveSl <= entryPrice))) && (
                 <span className="text-[9px] px-1 py-0.2 rounded bg-amber-950/80 border border-amber-500/40 text-amber-300 font-bold flex items-center gap-1">
                   <Lock className="w-2.5 h-2.5" /> BE LOCK
                 </span>
               )}
-              <span className="font-bold text-rose-400">{formatPrice(effectiveSl)}</span>
-              <span className="text-[10px] text-rose-400/80">(-{slDistPct.toFixed(1)}%)</span>
+              {(() => {
+                const isSlInProfit = entryPrice > 0 && effectiveSl > 0 && (isLong ? effectiveSl >= entryPrice : effectiveSl <= entryPrice);
+                return (
+                  <>
+                    <span className={`font-bold ${isSlInProfit ? "text-emerald-400" : "text-rose-400"}`}>{formatPrice(effectiveSl)}</span>
+                    <span className={`text-[10px] ${isSlInProfit ? "text-emerald-400/80" : "text-rose-400/80"}`}>
+                      ({isSlInProfit ? "+" : "-"}{slDistPct.toFixed(1)}%)
+                    </span>
+                  </>
+                );
+              })()}
             </div>
           </div>
 

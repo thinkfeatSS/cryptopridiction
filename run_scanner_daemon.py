@@ -44,10 +44,11 @@ except ImportError:
     HAS_DB_SYNC = False
 
 try:
-    from app.services.model_retrainer import check_and_trigger_async
+    from app.services.model_retrainer import check_and_trigger_async, purge_legacy_meta_models
     HAS_MODEL_RETRAINER = True
 except ImportError:
     HAS_MODEL_RETRAINER = False
+    purge_legacy_meta_models = lambda: {}
 
 
 def get_seconds_until_next_candle(horizon: str = "15m", buffer_seconds: int = 2) -> tuple[float, datetime]:
@@ -70,12 +71,12 @@ def get_seconds_until_next_candle(horizon: str = "15m", buffer_seconds: int = 2)
                 target_dt = (now + timedelta(hours=1)).replace(minute=0, second=buffer_seconds, microsecond=0)
             else:
                 target_dt = now.replace(minute=next_minute, second=buffer_seconds, microsecond=0)
-    elif h in ("1h", "swing"):
+    elif h in ("1h", "day", "intraday"):
         if now.minute == 0 and now.second < buffer_seconds:
             target_dt = now.replace(second=buffer_seconds, microsecond=0)
         else:
             target_dt = (now + timedelta(hours=1)).replace(minute=0, second=buffer_seconds, microsecond=0)
-    elif h in ("1d", "24h", "macro"):
+    elif h in ("1d", "24h", "swing", "macro"):
         if now.hour == 0 and now.minute == 0 and now.second < buffer_seconds:
             target_dt = now.replace(second=buffer_seconds, microsecond=0)
         else:
@@ -169,7 +170,7 @@ def start_heartbeat_worker(engine, heartbeat_secs: int = 4, stop_event: threadin
 
 
 def run_daemon():
-    top_n = int(os.getenv("TOP_N_UNIVERSE", os.getenv("SCANNER_TOP_N", "40")))
+    top_n = int(os.getenv("TOP_N_UNIVERSE", os.getenv("SCANNER_TOP_N", "100")))
     use_modular = os.getenv("USE_MODULAR_ENGINE", "true").lower() in ("true", "1", "yes")
     if use_modular:
         print(f"[SCANNER DAEMON 🚀] Launching Modular Multi-Horizon V16.1 Engine (Top {top_n} Assets x 9 Charts)...")
@@ -187,7 +188,7 @@ def run_daemon():
         interval_seconds = int(os.getenv("SCAN_INTERVAL_MINUTES")) * 60
 
     run_once = os.getenv("RUN_ONCE", "false").lower() in ("true", "1", "yes")
-    scan_top_n = int(os.getenv("SCANNER_TOP_N", str(CONFIG.get("scanner_top_n", 40))))
+    scan_top_n = int(os.getenv("SCANNER_TOP_N", str(CONFIG.get("scanner_top_n", 100))))
     max_workers = int(os.getenv("MAX_SCAN_WORKERS", str(CONFIG.get("max_scan_workers", 16))))
     heartbeat_secs = int(os.getenv("HEARTBEAT_SECONDS", str(CONFIG.get("heartbeat_interval_seconds", 4))))
 
@@ -214,6 +215,12 @@ def run_daemon():
     print("[SCANNER DAEMON 🧠] Initializing HybridQuantEngine...")
     engine = HybridQuantEngine(CONFIG)
 
+    # Disk Cleanliness Guard: Automatically purge any retired legacy meta-models from disk
+    try:
+        purge_legacy_meta_models()
+    except Exception as e_purge:
+        print(f"[SCANNER DAEMON ⚠️] Disk cleanup notice: {e_purge}")
+
     # Seed StrategyRegistry from authoritative trader signals tracker
     try:
         from app.quant_v16.strategies import StrategyRegistry
@@ -223,6 +230,19 @@ def run_daemon():
             print("[SCANNER DAEMON 📊] Successfully seeded StrategyRegistry priors & kill switches from trader_signals_tracker.csv.")
     except Exception as seed_err:
         print(f"[SCANNER DAEMON ⚠️] Could not seed StrategyRegistry: {seed_err}")
+
+    # In production, Docker Compose brings up active exchange WebSocket feeds concurrently
+    try:
+        from app.database import is_test_environment
+        ws_enabled = os.getenv("WEBSOCKET_FEED_ENABLED", "true").lower() in ("true", "1", "yes")
+        if ws_enabled and (not is_test_environment() or os.environ.get("WS_TEST_CONNECT") == "1"):
+            from app.engine.scanner.websocket_feed import ws_feed_manager
+            ws_feed_manager.start()
+            print("[SCANNER DAEMON ⚡] Concurrent Active Exchange WebSocket Feed Manager started.", flush=True)
+        else:
+            print("[SCANNER DAEMON ℹ️] Local test environment: Exchange WebSocket feed deferred (falling back to conservative taker-buy volume estimates).", flush=True)
+    except Exception as ws_err:
+        print(f"[SCANNER DAEMON ⚠️] WebSocket Feed Manager startup notice: {ws_err}", flush=True)
 
     # Start Decoupled 24/7 Position Heartbeat Thread
     stop_heartbeat_event = threading.Event()
@@ -299,6 +319,11 @@ def run_daemon():
 
     finally:
         stop_heartbeat_event.set()
+        try:
+            from app.engine.scanner.websocket_feed import ws_feed_manager
+            ws_feed_manager.stop()
+        except Exception:
+            pass
         print("[SCANNER DAEMON] Shutdown complete. Heartbeat worker stopped.", flush=True)
 
 

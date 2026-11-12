@@ -39,15 +39,29 @@ def safe_float(val: Any, default: float = 0.0) -> float:
 def safe_ratio(val: Any, default: float = 2.0) -> float:
     """
     Defensively parses Risk:Reward ratios like '1:2.5', '2.5', 2.5 into a clean float.
+    Defensively guards against 'inf', 'Infinity', 'nan', zero, or negative ratios.
+    Handles terminal risk-free runner formats such as '1:FREE (Runner 1:2.5)' or 'RISK_FREE (LOCKED)'.
     """
     if val is None:
         return default
     if isinstance(val, (int, float)):
-        return float(val) if val > 0 else default
+        if math.isnan(val) or math.isinf(val) or val <= 0:
+            return default
+        return float(val)
     s = str(val).strip()
     if "1:" in s:
         s = s.replace("1:", "").strip()
-    return safe_float(s, default=default)
+    if "(" in s:
+        import re
+        m = re.search(r'(\d+(?:\.\d+)?)', s)
+        if m:
+            s = m.group(1)
+    if any(k in s.lower() for k in ("inf", "infinity", "nan", "free", "locked", "none", "null")):
+        return default
+    res = safe_float(s, default=default)
+    if math.isnan(res) or math.isinf(res) or res <= 0:
+        return default
+    return res
 
 @dataclass
 class ValidationResult:

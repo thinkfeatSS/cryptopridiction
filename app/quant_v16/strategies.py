@@ -183,6 +183,15 @@ class StrategyRegistry:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 loaded_strats = data.get("strategies", {})
+                # Safeguard against loading corrupted priors where strategies collapsed to <= 0.40 PF or were erroneously mass-disabled
+                disabled_count = sum(1 for v in loaded_strats.values() if v.get("status") == "DISABLED" or float(v.get("rolling_50_pf", 1.0) or 1.0) <= 0.40)
+                if len(loaded_strats) > 10 and (disabled_count / len(loaded_strats)) > 0.40:
+                    import logging
+                    logging.getLogger("strategies").warning(f"[STRATEGY REGISTRY ⚠️] Detected corrupted strategy priors on disk ({disabled_count}/{len(loaded_strats)} disabled/collapsed). Restoring clean baseline defaults.")
+                    self._init_defaults()
+                    self.save_to_disk()
+                    return True
+
                 for k, v_dict in loaded_strats.items():
                     self.strategies[k] = StrategyPerformance.from_dict(v_dict)
                 return True
@@ -219,21 +228,21 @@ class StrategyRegistry:
             actual_wins = (perf.win_rate * (n - 1)) + (1.0 if is_win else 0.0)
             perf.win_rate = round(float((actual_wins + (prior_wr * prior_weight)) / (n + prior_weight)), 4)
 
-            # Rolling profit factor update
+            # Rolling profit factor update using proportional update
             ret_factor = max(0.1, 1.0 + (net_return_pct / 100.0)) if is_win else max(0.1, 1.0 - (abs(net_return_pct) / 100.0))
             if is_win:
-                perf.rolling_50_pf = round(min(3.0, (perf.rolling_50_pf * 0.96) + (ret_factor * 0.04)), 4)
+                perf.rolling_50_pf = round(min(3.0, (perf.rolling_50_pf * 0.98) + (ret_factor * 0.02 * 1.25)), 4)
             else:
-                perf.rolling_50_pf = round(max(0.4, (perf.rolling_50_pf * 0.96) - ((1.0 / ret_factor) * 0.04)), 4)
+                perf.rolling_50_pf = round(max(0.4, (perf.rolling_50_pf * 0.98) - (0.02 * (1.0 / ret_factor))), 4)
 
             # Update rolling net expectancy
             perf.expectancy_net_pct = round(float((perf.expectancy_net_pct * 0.95) + (net_return_pct * 0.05)), 4)
             perf.last_updated_ts = time.time()
 
-            # Section 31 Automated Kill Switch Gating:
-            if perf.expectancy_net_pct < -0.20 or perf.rolling_50_pf < 0.70:
+            # Section 31 Automated Kill Switch Gating: only disable with statistical confidence (>= 20 trades)
+            if n >= 20 and perf.expectancy_net_pct < -0.20:
                 perf.status = StrategyStatus.DISABLED
-            elif perf.rolling_50_pf < 0.85:
+            elif n >= 15 and perf.rolling_50_pf < 0.80:
                 perf.status = StrategyStatus.PAUSED
             elif perf.rolling_50_pf < 1.00:
                 perf.status = StrategyStatus.WARNING
@@ -387,13 +396,13 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.VWAP_BOUNCE_LONG.value,
                 sample_count=100, resolved_count=94, win_rate=0.59, profit_factor=1.30,
                 rolling_50_pf=1.25, expectancy_net_pct=0.55,
-                regime_status={"BEAR_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED}
+                regime_status={"BEAR_TREND": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.VWAP_BOUNCE_SHORT.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.VWAP_BOUNCE_SHORT.value,
                 sample_count=105, resolved_count=98, win_rate=0.60, profit_factor=1.32,
                 rolling_50_pf=1.28, expectancy_net_pct=0.58,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.LIQUIDITY_RECLAIM_LONG.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.LIQUIDITY_RECLAIM_LONG.value,
@@ -487,10 +496,10 @@ class StrategyRegistry:
                     rolling_50_pf=1.12, expectancy_net_pct=0.35, status=StrategyStatus.ACTIVE
                 )
 
-    def is_strategy_allowed(self, strategy_id: str, current_regime: str) -> Tuple[bool, str]:
+    def is_strategy_allowed(self, strategy_id: str, current_regime: str, is_decoupled_trend: bool = False, asset_regime: Optional[str] = None) -> Tuple[bool, str]:
         """
         Evaluates Section 31 Strategy Kill Switch & Section 32 Regime Kill Switch.
-        Supports fuzzy regime normalization and alias matching.
+        Supports fuzzy regime normalization, alias matching, and altcoin idiosyncratic decoupling.
         """
         norm_regime = normalize_regime_key(current_regime)
         raw_regime = str(getattr(current_regime, "value", current_regime)).strip().upper() if current_regime else "RANGE"
@@ -505,12 +514,16 @@ class StrategyRegistry:
         # Phase 2: Section 32 Strict Fail-Closed Veto for Trend-Following & Breakout Strategies in Range / Chop
         if norm_regime in ["RANGE", "CONSOLIDATION", "CHOP"]:
             if any(k in strat_upper for k in ["TREND", "MOMENTUM", "BREAKOUT", "EXPANSION", "COILING", "MULTI_HORIZON"]):
+                if is_decoupled_trend:
+                    return True, f"Eligible: Decoupled independent {strategy_id} active during macro consolidation"
                 return False, f"Section 32: Trend continuation strategy {strategy_id} strictly PAUSED in {norm_regime} regime"
 
         if not perf:
             # Dynamic Safeguard: Unregistered continuation shorts must NOT bypass regime kill switches
             if "SHORT" in strat_upper and norm_regime in ["RANGE", "BEAR_TREND"]:
                 if any(k in strat_upper for k in ["BREAKOUT", "BREAKDOWN", "MOMENTUM", "TREND", "COILING", "EXPANSION"]):
+                    if is_decoupled_trend:
+                        return True, f"Eligible: Decoupled independent {strategy_id} active during macro consolidation"
                     return False, f"Strategy {strategy_id} is PAUSED specifically in {norm_regime} regime (Unregistered Continuation Short)"
             return True, "Active (Unregistered Strategy)"
 
@@ -530,22 +543,20 @@ class StrategyRegistry:
     def is_strategy_shadow_eligible(self, strategy_id: str, current_regime: str) -> Tuple[bool, str]:
         """
         Feature 5.1: Evaluates whether a strategy vetoed by Section 31/32 kill switch
-        is eligible for shadow tracking simulation (i.e. is PAUSED, not DISABLED).
+        is eligible for shadow tracking simulation and pre-signal radar monitoring.
         """
         strat_key = strategy_id.upper().strip() if strategy_id else ""
         perf = self.strategies.get(strat_key)
         if not perf:
             return False, "Strategy not registered"
-        if perf.status == StrategyStatus.DISABLED:
-            return False, f"Strategy {strategy_id} is permanently DISABLED (Expectancy < -0.20)"
-        if perf.status == StrategyStatus.PAUSED:
-            return True, f"Strategy {strategy_id} is globally PAUSED - eligible for shadow simulation"
+        if perf.status in [StrategyStatus.PAUSED, StrategyStatus.DISABLED, StrategyStatus.WARNING]:
+            return True, f"Strategy {strategy_id} is {perf.status.value} - eligible for shadow simulation & pre-signal radar"
         norm_regime = normalize_regime_key(current_regime)
         raw_regime = str(getattr(current_regime, "value", current_regime)).strip().upper() if current_regime else "RANGE"
         regime_st = perf.regime_status.get(norm_regime) or perf.regime_status.get(raw_regime)
-        if regime_st == StrategyStatus.PAUSED:
-            return True, f"Strategy {strategy_id} is PAUSED in {norm_regime} - eligible for shadow simulation"
-        return False, f"Strategy {strategy_id} is not in paused state"
+        if regime_st in [StrategyStatus.PAUSED, StrategyStatus.DISABLED]:
+            return True, f"Strategy {strategy_id} is {regime_st.value} in {norm_regime} - eligible for shadow simulation & pre-signal radar"
+        return False, f"Strategy {strategy_id} is active (not paused)"
 
     def record_shadow_outcome(
         self,
@@ -623,7 +634,7 @@ class StrategyRegistry:
     def seed_from_tracker_csv(self, csv_path: Optional[str] = None) -> bool:
         """
         Dynamically synchronizes historical strategy priors and regime statuses
-        from the authoritative trader_signals_tracker.csv.
+        from the authoritative trader_signals_tracker.csv using true empirical rolling metrics.
         """
         export_dir = os.getenv("EXPORT_DIR", "./export_app_data")
         path = csv_path or os.path.join(export_dir, "trader_signals_tracker.csv")
@@ -637,6 +648,7 @@ class StrategyRegistry:
                 return False
 
             with self._lock:
+                strat_groups: Dict[str, list] = {}
                 for _, row in df.iterrows():
                     raw_strat = str(row.get("strategy_archetype") or "").strip()
                     if not raw_strat or raw_strat == "nan":
@@ -646,7 +658,9 @@ class StrategyRegistry:
                         continue
 
                     outcome = str(row.get("outcome_label") or "")
-                    if "WON" in outcome:
+                    if "BREAKEVEN" in outcome or "TIER0_BE" in outcome:
+                        continue
+                    elif "WON" in outcome:
                         is_win = True
                     elif "LOST" in outcome or "SL HIT" in outcome:
                         is_win = False
@@ -660,37 +674,75 @@ class StrategyRegistry:
                         ret_pct = 1.5 if is_win else -1.0
 
                     regime = str(row.get("market_shield") or "RANGE")
+                    if strat_id not in strat_groups:
+                        strat_groups[strat_id] = []
+                    strat_groups[strat_id].append({
+                        "is_win": is_win,
+                        "ret_pct": ret_pct,
+                        "regime": regime
+                    })
+
+                for strat_id, trades in strat_groups.items():
                     perf = self.strategies[strat_id]
-                    perf.sample_count += 1
-                    perf.resolved_count += 1
-                    n = max(1, perf.resolved_count)
+                    perf.sample_count = max(perf.sample_count, len(trades))
+                    perf.resolved_count = len(trades)
 
-                    actual_wins = (perf.win_rate * (n - 1)) + (1.0 if is_win else 0.0)
-                    perf.win_rate = round(float((actual_wins + 5.0) / (n + 10.0)), 4)
+                    # Last 50 resolved trades for rolling window
+                    recent_50 = trades[-50:]
+                    wins_50 = [t for t in recent_50 if t["is_win"]]
+                    losses_50 = [t for t in recent_50 if not t["is_win"]]
 
-                    ret_factor = max(0.1, 1.0 + (ret_pct / 100.0)) if is_win else max(0.1, 1.0 - (abs(ret_pct) / 100.0))
-                    if is_win:
-                        perf.rolling_50_pf = round(min(3.0, (perf.rolling_50_pf * 0.96) + (ret_factor * 0.04)), 4)
+                    gross_wins = sum(t["ret_pct"] for t in wins_50 if t["ret_pct"] > 0)
+                    gross_losses = sum(abs(t["ret_pct"]) for t in losses_50 if t["ret_pct"] < 0)
+
+                    prior_wr = 0.55
+                    prior_pf = 1.25
+                    prior_exp = 0.45
+
+                    actual_wins_total = sum(1 for t in trades if t["is_win"])
+                    n_total = len(trades)
+                    perf.win_rate = round(float((actual_wins_total + prior_wr * 10.0) / (n_total + 10.0)), 4)
+
+                    # Robust empirical Rolling 50 Profit Factor
+                    if gross_losses > 0:
+                        perf.rolling_50_pf = round(float((gross_wins + prior_pf * 5.0) / (gross_losses + 5.0)), 4)
+                    elif gross_wins > 0:
+                        perf.rolling_50_pf = 2.50
                     else:
-                        perf.rolling_50_pf = round(max(0.4, (perf.rolling_50_pf * 0.96) - ((1.0 / ret_factor) * 0.04)), 4)
+                        perf.rolling_50_pf = 1.00
 
-                    perf.expectancy_net_pct = round(float((perf.expectancy_net_pct * 0.95) + (ret_pct * 0.05)), 4)
+                    # Robust empirical Net Expectancy
+                    sum_ret_50 = sum(t["ret_pct"] for t in recent_50)
+                    perf.expectancy_net_pct = round(float((sum_ret_50 + prior_exp * 5.0) / (len(recent_50) + 5.0)), 4)
                     perf.last_updated_ts = time.time()
 
-                    if perf.expectancy_net_pct < -0.20 or perf.rolling_50_pf < 0.70:
+                    # Automated Kill Switch Gating: only disable with statistical confidence (>= 30 trades and severe negative expectancy < -0.35%)
+                    if n_total >= 30 and perf.expectancy_net_pct < -0.35:
                         perf.status = StrategyStatus.DISABLED
-                    elif perf.rolling_50_pf < 0.85:
+                    elif n_total >= 15 and (perf.expectancy_net_pct < -0.15 or perf.rolling_50_pf < 0.80):
                         perf.status = StrategyStatus.PAUSED
                     elif perf.rolling_50_pf < 1.00:
                         perf.status = StrategyStatus.WARNING
                     else:
                         perf.status = StrategyStatus.ACTIVE
 
-                    norm_r = normalize_regime_key(regime)
-                    if not is_win and perf.rolling_50_pf < 0.90:
-                        perf.regime_status[norm_r] = StrategyStatus.PAUSED
-                    elif is_win and perf.rolling_50_pf >= 1.05:
-                        perf.regime_status.pop(norm_r, None)
+                    # Regime-specific gating: requires minimum 8 resolved trades in regime before pausing
+                    regime_trades: Dict[str, list] = {}
+                    for t in recent_50:
+                        norm_r = normalize_regime_key(t["regime"])
+                        if norm_r not in regime_trades:
+                            regime_trades[norm_r] = []
+                        regime_trades[norm_r].append(t)
+
+                    for norm_r, r_trades in regime_trades.items():
+                        if len(r_trades) >= 8:
+                            r_wins = sum(t["ret_pct"] for t in r_trades if t["is_win"] and t["ret_pct"] > 0)
+                            r_loss = sum(abs(t["ret_pct"]) for t in r_trades if not t["is_win"] and t["ret_pct"] < 0)
+                            r_pf = (r_wins + prior_pf * 3.0) / max(0.01, r_loss + 3.0)
+                            if r_pf < 0.85:
+                                perf.regime_status[norm_r] = StrategyStatus.PAUSED
+                            elif r_pf >= 1.05:
+                                perf.regime_status.pop(norm_r, None)
 
             self.save_to_disk()
             return True

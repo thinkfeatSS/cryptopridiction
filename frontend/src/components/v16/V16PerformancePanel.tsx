@@ -59,6 +59,8 @@ interface ValidationReport {
   realized_profit_factor: number | null;
   realized_max_drawdown_pct: number | null;
   raw_max_drawdown_pct?: number | null;
+  raw_expected_calibration_error?: number | null;
+  raw_brier_score?: number | null;
   brier_score: number | null;
   expected_calibration_error: number | null;
   calibration_curve: CalibrationBucket[];
@@ -66,7 +68,7 @@ interface ValidationReport {
   promotion_gates: {
     gate_1_technical_validation?: { status: string; detail?: string };
     gate_2_sample_size?: { status: string; current_resolved: number; target_resolved: number; milestone?: string };
-    gate_3_calibration_hurdle?: { status: string; ece?: number; max_allowed_ece?: number };
+    gate_3_calibration_hurdle?: { status: string; ece?: number; raw_ece?: number; max_allowed_ece?: number; active_bins?: number };
     gate_4_economic_edge?: { status: string; profit_factor?: number; min_profit_factor?: number };
     gate_5_risk_drawdown?: { status: string; max_drawdown?: number; max_allowed_dd?: number };
   };
@@ -75,11 +77,11 @@ interface ValidationReport {
 
 export default function V16PerformancePanel({ signals }: Props) {
   const [report, setReport] = useState<ValidationReport | null>(null);
-  const [cohort, setCohort] = useState<"current" | "archived">("current");
+  const [cohort, setCohort] = useState<"current" | "archived" | "all">("current");
   const [loading, setLoading] = useState(true);
   const [showCalibrationDrawer, setShowCalibrationDrawer] = useState(false);
 
-  const fetchValidation = (c: "current" | "archived" = cohort) => {
+  const fetchValidation = (c: "current" | "archived" | "all" = cohort) => {
     v16Api
       .getValidation(c)
       .then((res) => {
@@ -174,10 +176,20 @@ export default function V16PerformancePanel({ signals }: Props) {
             >
               Frozen Baseline (SHADOW-001)
             </button>
+            <button
+              onClick={() => setCohort("all")}
+              className={`px-2.5 py-1 rounded-md font-bold transition-all ${
+                cohort === "all"
+                  ? "bg-indigo-600 text-white shadow-sm"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              Cumulative (All)
+            </button>
           </div>
 
           <span className="text-[10px] font-mono px-2.5 py-1 rounded-md bg-amber-950/60 border border-amber-500/30 text-amber-300 font-bold">
-            EXP: {report?.experiment_id || (cohort === "current" ? "V16.1.0-SHADOW-002" : "V16.0.0-SHADOW-001")}
+            EXP: {report?.experiment_id || (cohort === "current" ? "V16.1.0-SHADOW-002" : (cohort === "archived" ? "V16.0.0-SHADOW-001" : "V16-CUMULATIVE"))}
           </span>
           {cohort === "current" ? (
             isGraduated ? (
@@ -191,10 +203,15 @@ export default function V16PerformancePanel({ signals }: Props) {
                 LIVE SHADOW 🟢
               </span>
             )
-          ) : (
+          ) : cohort === "archived" ? (
             <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2.5 py-1 rounded-md bg-indigo-950/60 border border-indigo-500/30 text-indigo-300 font-bold">
               <Lock className="w-2.5 h-2.5" />
               FROZEN BASELINE 🔒
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2.5 py-1 rounded-md bg-purple-950/60 border border-purple-500/30 text-purple-300 font-bold">
+              <Layers className="w-2.5 h-2.5" />
+              CUMULATIVE AUDIT 📊
             </span>
           )}
         </div>
@@ -318,15 +335,18 @@ export default function V16PerformancePanel({ signals }: Props) {
             <span className="text-[9px] text-slate-400">Calibration</span>
           </div>
           <div className="text-base font-black text-cyan-300 mt-1">
-            {report?.brier_score !== null && report?.brier_score !== undefined
+            {resolved >= 30 && report?.brier_score !== null && report?.brier_score !== undefined
               ? report.brier_score.toFixed(3)
               : "Pending"}{" "}
-            <span className="text-[10px] text-slate-400 font-normal">(Brier)</span>
+            <span className="text-[10px] text-slate-400 font-normal">
+              {resolved >= 30 && report?.raw_brier_score ? `(Raw: ${report.raw_brier_score.toFixed(3)})` : "(Brier)"}
+            </span>
           </div>
           <div className="text-[10px] text-slate-400 mt-2">
             ECE:{" "}
             <strong
               className={
+                resolved >= 30 &&
                 report?.expected_calibration_error !== null &&
                 report?.expected_calibration_error !== undefined
                   ? report.expected_calibration_error <= 0.12
@@ -335,9 +355,10 @@ export default function V16PerformancePanel({ signals }: Props) {
                   : "text-slate-400"
               }
             >
-              {report?.expected_calibration_error !== null &&
+              {resolved >= 30 &&
+              report?.expected_calibration_error !== null &&
               report?.expected_calibration_error !== undefined
-                ? `${report.expected_calibration_error.toFixed(3)} ${
+                ? `${report.expected_calibration_error < 0.01 ? report.expected_calibration_error.toFixed(4) : report.expected_calibration_error.toFixed(3)} ${
                     report.expected_calibration_error <= 0.12 ? "(Pass ≤ 0.12)" : "(Monitoring)"
                   }`
                 : "Pending (≤ 0.12)"}
@@ -346,13 +367,29 @@ export default function V16PerformancePanel({ signals }: Props) {
           <div className="text-[9px] text-slate-400 mt-0.5">
             Max Drawdown:{" "}
             <strong className="text-teal-300">
-              {report?.realized_max_drawdown_pct !== null && report?.realized_max_drawdown_pct !== undefined
+              {resolved >= 30 && report?.realized_max_drawdown_pct !== null && report?.realized_max_drawdown_pct !== undefined
                 ? `${report.realized_max_drawdown_pct.toFixed(1)}% (≤ 6.0%)`
-                : "0.0% (≤ 6.0%)"}
+                : "Pending (≤ 6.0%)"}
             </strong>
           </div>
         </div>
       </div>
+
+      {/* SHADOW-002 In-Flight / Forward-Testing Information Banner */}
+      {cohort === "current" && totalTracked === 0 && (
+        <div className="bg-cyan-950/30 border border-cyan-800/40 p-3 rounded-xl flex flex-wrap items-center justify-between text-[11px] font-mono text-cyan-200 gap-2 relative z-10">
+          <span className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-cyan-400 animate-pulse" />
+            SHADOW-002 forward testing active since Nov 4 freeze. Scanner is accumulating out-of-sample production trades (0/100).
+          </span>
+          <button
+            onClick={() => setCohort("archived")}
+            className="px-2.5 py-1 rounded bg-amber-900/60 hover:bg-amber-800/60 text-white font-bold text-[10px] transition-colors"
+          >
+            Inspect Baseline Records →
+          </button>
+        </div>
+      )}
 
       {/* Promotion Gates Status Bar */}
       <div className="bg-slate-950/60 p-3.5 rounded-xl border border-slate-800/80 font-mono text-[11px] relative z-10 space-y-2.5">
@@ -388,7 +425,7 @@ export default function V16PerformancePanel({ signals }: Props) {
             <span>Gate 2: Sample Accumulation</span>
             {resolved >= 100 ? (
               <span className="text-emerald-400 font-bold flex items-center gap-1 text-[10px]">
-                <CheckCircle2 className="w-3 h-3 text-emerald-400" /> PASS ({resolved}/100 Target Met — GRADUATED 🎓)
+                <CheckCircle2 className="w-3 h-3 text-emerald-400" /> PASS ({resolved}/100 Target Met{isGraduated ? " — GRADUATED 🎓" : ""})
               </span>
             ) : (
               <span className="text-amber-400 font-bold flex items-center gap-1 text-[10px]">
@@ -400,21 +437,31 @@ export default function V16PerformancePanel({ signals }: Props) {
           {/* Gate 3 */}
           <div className="flex justify-between items-center bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800">
             <span>Gate 3: Probability Calibration</span>
-            {resolved < 30 ? (
+            {resolved < 30 || gate3?.status === "AWAITING_OUTCOMES" ? (
               <span className="text-slate-400 font-bold flex items-center gap-1 text-[10px]">
                 <Clock className="w-3 h-3 text-slate-400" /> AWAITING SAMPLE (≥30)
               </span>
-            ) : report?.expected_calibration_error !== null &&
-              report?.expected_calibration_error !== undefined &&
-              report.expected_calibration_error <= 0.12 ? (
+            ) : gate3?.status === "DEGENERATE_SAMPLE" ? (
+              <span className="text-amber-400 font-bold flex items-center gap-1 text-[10px]">
+                <AlertTriangle className="w-3 h-3 text-amber-400" /> DEGENERATE BINS (ECE: 0.000 — INVALID)
+              </span>
+            ) : gate3?.status === "PASS" ? (
               <span className="text-emerald-400 font-bold flex items-center gap-1 text-[10px]">
                 <CheckCircle2 className="w-3 h-3 text-emerald-400" /> PASS (ECE:{" "}
-                {report.expected_calibration_error.toFixed(3)} ≤ 0.12)
+                {report?.expected_calibration_error !== null && report?.expected_calibration_error !== undefined
+                  ? (report.expected_calibration_error < 0.01
+                      ? report.expected_calibration_error.toFixed(4)
+                      : report.expected_calibration_error.toFixed(3))
+                  : "0.000"}{" "}
+                ≤ 0.12)
               </span>
             ) : (
               <span className="text-amber-400 font-bold flex items-center gap-1 text-[10px]">
                 <AlertTriangle className="w-3 h-3 text-amber-400" /> MONITORING (ECE:{" "}
-                {report?.expected_calibration_error?.toFixed(3) || "0.18"} &gt; 0.12)
+                {report?.expected_calibration_error !== null && report?.expected_calibration_error !== undefined
+                  ? report.expected_calibration_error.toFixed(3)
+                  : "0.18"}{" "}
+                &gt; 0.12)
               </span>
             )}
           </div>
@@ -422,16 +469,14 @@ export default function V16PerformancePanel({ signals }: Props) {
           {/* Gate 4 */}
           <div className="flex justify-between items-center bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800">
             <span>Gate 4: Economic Edge (Net EV)</span>
-            {resolved < 30 ? (
+            {resolved < 30 || gate4?.status === "AWAITING_OUTCOMES" ? (
               <span className="text-slate-400 font-bold flex items-center gap-1 text-[10px]">
                 <Clock className="w-3 h-3 text-slate-400" /> AWAITING SAMPLE (≥30)
               </span>
-            ) : report?.realized_profit_factor !== null &&
-              report?.realized_profit_factor !== undefined &&
-              report.realized_profit_factor >= 1.2 ? (
+            ) : gate4?.status === "PASS" ? (
               <span className="text-emerald-400 font-bold flex items-center gap-1 text-[10px]">
                 <CheckCircle2 className="w-3 h-3 text-emerald-400" /> PASS (PF:{" "}
-                {report.realized_profit_factor.toFixed(2)} ≥ 1.20)
+                {report?.realized_profit_factor?.toFixed(2) ?? "1.20"} ≥ 1.20)
               </span>
             ) : (
               <span className="text-rose-400 font-bold flex items-center gap-1 text-[10px]">
@@ -443,10 +488,14 @@ export default function V16PerformancePanel({ signals }: Props) {
           {/* Gate 5 */}
           <div className="flex justify-between items-center bg-slate-900/80 px-3 py-2 rounded-lg border border-slate-800 sm:col-span-2">
             <span>Gate 5: Portfolio Risk Drawdown (1% Risk Unit Sizing)</span>
-            {report?.promotion_gates?.gate_5_risk_drawdown?.status === "PASS" ? (
+            {resolved < 30 || gate5?.status === "AWAITING_OUTCOMES" ? (
+              <span className="text-slate-400 font-bold flex items-center gap-1 text-[10px]">
+                <Clock className="w-3 h-3 text-slate-400" /> AWAITING SAMPLE (≥30)
+              </span>
+            ) : gate5?.status === "PASS" ? (
               <span className="text-emerald-400 font-bold flex items-center gap-1 text-[10px]">
                 <CheckCircle2 className="w-3 h-3 text-emerald-400" /> PASS (DD:{" "}
-                {report.realized_max_drawdown_pct !== null && report.realized_max_drawdown_pct !== undefined
+                {report?.realized_max_drawdown_pct !== null && report?.realized_max_drawdown_pct !== undefined
                   ? `${report.realized_max_drawdown_pct.toFixed(1)}%`
                   : "0.0%"}{" "}
                 ≤ 6.0%)
@@ -495,7 +544,9 @@ export default function V16PerformancePanel({ signals }: Props) {
                       {(bin.actual_tp1_rate * 100).toFixed(1)}%
                     </span>
                     <span className="text-right text-slate-400">
-                      {Math.abs(bin.calibration_error).toFixed(3)}
+                      {Math.abs(bin.calibration_error) < 0.01
+                        ? Math.abs(bin.calibration_error).toFixed(4)
+                        : Math.abs(bin.calibration_error).toFixed(3)}
                     </span>
                   </div>
                 ))}

@@ -49,15 +49,9 @@ export interface HorizonDef {
 }
 
 export const ALL_9_HORIZONS: HorizonDef[] = [
-  { key: "5m", altKeys: ["5M"], label: "5m (5 Minutes)", short: "5M", badge: "⚡ 5M", desc: "Micro Momentum & Scalp Trigger" },
-  { key: "15m", altKeys: ["15M", "scalp"], label: "15m (15 Minutes)", short: "15M", badge: "⚡ 15M", desc: "Primary Scalp Horizon" },
-  { key: "1h", altKeys: ["1H", "swing"], label: "1h (1 Hour)", short: "1H", badge: "⏳ 1H", desc: "Day Trade / Hourly Momentum" },
-  { key: "4h", altKeys: ["4H"], label: "4h (4 Hours)", short: "4H", badge: "⏳ 4H", desc: "Intermediate Swing & Structure" },
-  { key: "12h", altKeys: ["12H"], label: "12h (12 Hours)", short: "12H", badge: "🌊 12H", desc: "Half-Day Directional Trend" },
-  { key: "1d", altKeys: ["1D", "24h", "24H", "macro"], label: "24h / 1d (1 Day / 24 Hours)", short: "24H / 1D", badge: "🌊 1D", desc: "Daily Anchor Horizon" },
-  { key: "1w", altKeys: ["1W", "7d", "7D", "weekly"], label: "7d / 1w (7 Days / 1 Week)", short: "7D / 1W", badge: "📅 7D", desc: "Macro Weekly Structure" },
-  { key: "15d", altKeys: ["15D"], label: "15d (15 Days / Bi-Weekly - aggregated from 1D candles)", short: "15D", badge: "📅 15D", desc: "Bi-Weekly Aggregated Cycle" },
-  { key: "1M", altKeys: ["30d", "30D", "1m", "monthly"], label: "30d / 1M (1 Month / 30 Days)", short: "30D / 1M", badge: "🏛️ 1M", desc: "Macro Secular Trend" },
+  { key: "15m", altKeys: ["15M", "scalp"], label: "15m (15 Minutes)", short: "15M", badge: "⚡ 15M", desc: "Primary Scalp & Signal Execution Horizon" },
+  { key: "1h", altKeys: ["1H", "swing"], label: "1h (1 Hour)", short: "1H", badge: "⏳ 1H", desc: "Day Trade / Hourly Momentum Context" },
+  { key: "4h", altKeys: ["4H"], label: "4h (4 Hours)", short: "4H", badge: "⏳ 4H", desc: "Intermediate Swing & Macro Anchor" },
 ];
 
 export type HorizonFilterKey =
@@ -461,10 +455,14 @@ const AssetFull9HorizonsRow = React.memo(function AssetFull9HorizonsRow({
         <div className="flex flex-col items-end gap-1 min-w-[130px]">
           <span
             className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-black border ${
-              bullCount >= 6
+              bullCount >= ALL_9_HORIZONS.length
                 ? "bg-emerald-950/80 text-emerald-300 border-emerald-500/60"
-                : bearCount >= 6
+                : bearCount >= ALL_9_HORIZONS.length
                 ? "bg-rose-950/80 text-rose-300 border-rose-500/60"
+                : bullCount >= 2
+                ? "bg-emerald-950/40 text-emerald-400 border-emerald-500/30"
+                : bearCount >= 2
+                ? "bg-rose-950/40 text-rose-400 border-rose-500/30"
                 : "bg-slate-900/90 text-slate-400 border-slate-800"
             }`}
           >
@@ -737,17 +735,11 @@ export default function AssetPredictionMatrix() {
   // Horizon Filter Tabs
   const horizonTabs: { key: HorizonFilterKey; label: string }[] = useMemo(
     () => [
-      { key: "all", label: "🌐 All 9 Horizons (5M .. 30D)" },
+      { key: "all", label: "🌐 Multi-Horizon (15M, 1H, 4H)" },
       { key: "order_blocks", label: "🎯 OB Touches" },
-      { key: "5m", label: "⚡ 5M Micro" },
-      { key: "15m", label: "⚡ 15M Scalp" },
+      { key: "15m", label: "⚡ 15M Execution" },
       { key: "1h", label: "⏳ 1H Intraday" },
-      { key: "4h", label: "⏳ 4H Swing" },
-      { key: "12h", label: "🌊 12H Half-Day" },
-      { key: "1d", label: "🌊 1D / 24H Daily" },
-      { key: "1w", label: "📅 7D Weekly" },
-      { key: "15d", label: "📅 15D Bi-Weekly" },
-      { key: "1M", label: "🏛️ 30D / 1M Monthly" },
+      { key: "4h", label: "⏳ 4H Macro Anchor" },
       { key: "high_confluence", label: "💎 High Confluence" },
       { key: "watchlist", label: `⭐ Watchlist (${watchlist.length})` },
     ],
@@ -773,7 +765,7 @@ export default function AssetPredictionMatrix() {
           <div className="flex items-center gap-2.5 flex-wrap">
             <h2 className="text-lg font-black tracking-tight text-white flex items-center gap-2">
               <Compass className="h-5 w-5 text-cyan-400" />
-              Multi-Horizon Matrix (5M, 15M, 1H, 4H, 12H, 24H, 7D, 15D, 1M)
+              Multi-Horizon Matrix (15M, 1H, 4H)
             </h2>
             <span className="rounded-md bg-dark-900 px-2.5 py-0.5 text-xs font-semibold text-cyan-300 border border-cyan-700/50">
               {filteredAssets.length} of {rawLeaderboard.length || 40} Coins
@@ -784,7 +776,7 @@ export default function AssetPredictionMatrix() {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Institutional AI prediction matrix showing next candle direction (Green Bullish / Red Bearish), 5 Classifiers + 5 Regressors consensus, and Secondary ML Meta-Labelers across all 9 timeframes.{" "}
+            Institutional AI prediction matrix showing next candle direction (Green Bullish / Red Bearish), 5 Classifiers + 5 Regressors consensus, and Secondary ML Meta-Labelers across 15M, 1H, and 4H timeframes (15M Execution Only).{" "}
             <span className="text-cyan-400 font-semibold underline decoration-dotted">
               Click any column header to sort by that timeframe.
             </span>

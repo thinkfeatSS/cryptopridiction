@@ -29,44 +29,6 @@ def init_db():
     try:
         Base.metadata.create_all(bind=engine)
         ensure_schema_compatibility(engine)
-        is_mysql = "mysql" in settings.DATABASE_URL.lower()
-        with engine.connect() as conn:
-            # Note: Column definitions and types are managed by SQLAlchemy models.
-            # Avoid runtime ALTER TABLE on market_forecasts to prevent metadata lock deadlocks.
-
-            # ── paper_positions: add new columns (idempotent) ────────────────
-            for _stmt in [
-                "ALTER TABLE paper_positions ADD COLUMN execution_engine VARCHAR(64) DEFAULT 'paper'",
-                "ALTER TABLE paper_positions ADD COLUMN raw_entry_price DOUBLE",
-                "ALTER TABLE paper_positions ADD COLUMN tp1_price DOUBLE",
-                "ALTER TABLE paper_positions ADD COLUMN tp2_price DOUBLE",
-                "ALTER TABLE paper_positions ADD COLUMN tp3_price DOUBLE",
-                "ALTER TABLE paper_positions ADD COLUMN unrealized_gross_pnl_usd DOUBLE DEFAULT 0.0",
-                "ALTER TABLE paper_positions ADD COLUMN buy_fee_usd DOUBLE DEFAULT 0.0",
-                "ALTER TABLE paper_positions ADD COLUMN est_sell_fee_usd DOUBLE DEFAULT 0.0",
-                "ALTER TABLE paper_positions ADD COLUMN unrealized_fee_usd DOUBLE DEFAULT 0.0",
-            ]:
-                try:
-                    conn.execute(text(_stmt))
-                    conn.commit()
-                except Exception:
-                    pass  # Column already exists — harmless
-
-            # ── closed_trades: add new columns (idempotent) ──────────────────
-            for _stmt in [
-                "ALTER TABLE closed_trades ADD COLUMN execution_engine VARCHAR(64) DEFAULT 'paper'",
-                "ALTER TABLE closed_trades ADD COLUMN raw_entry_price DOUBLE",
-                "ALTER TABLE closed_trades ADD COLUMN gross_pnl_usd DOUBLE DEFAULT 0.0",
-                "ALTER TABLE closed_trades ADD COLUMN buy_fee_usd DOUBLE DEFAULT 0.0",
-                "ALTER TABLE closed_trades ADD COLUMN sell_fee_usd DOUBLE DEFAULT 0.0",
-                "ALTER TABLE closed_trades ADD COLUMN total_fee_usd DOUBLE DEFAULT 0.0",
-                "ALTER TABLE closed_trades ADD COLUMN binance_fee_usd DOUBLE DEFAULT 0.0",
-            ]:
-                try:
-                    conn.execute(text(_stmt))
-                    conn.commit()
-                except Exception:
-                    pass  # Column already exists — harmless
         print("[DATABASE] All database tables verified and created.")
     except Exception as e:
         print(f"[DATABASE ERROR] Table creation error: {e}")
@@ -310,10 +272,11 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                     q_grade = str(fs.get("quality_grade") or "Grade A")
                                     clean_g = "Grade A+" if "A+" in q_grade else ("Grade A" if "Grade A" in q_grade else "Grade B")
                                     tier_n = 1 if "A+" in q_grade else (2 if "Grade A" in q_grade else 3)
+                                    clean_dir_th = "SHORT" if str(fs_dir).upper().startswith("SHOR") else "LONG"
 
                                     row_bridge = {
                                         "signal_id": fs_sig_id,
-                                        "trade_thesis_id": f"THESIS-{sym_clean}-{fs_dir[:4]}-{now_utc.strftime('%Y%m%d_%H%M')}",
+                                        "trade_thesis_id": f"THESIS-{sym_clean}-{clean_dir_th}",
                                         "date_utc": now_utc.strftime("%Y-%m-%d"),
                                         "time_utc": now_utc.strftime("%H:%M:%S UTC"),
                                         "rank": str(fs.get("rank") or "#1"),
@@ -357,6 +320,13 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                         "market_shield": fs.get("btc_shield_status", "NORMAL"),
                                         "strategy_archetype": fs.get("strategy_playbook") or "MULTI_HORIZON_TREND",
                                         "order_block_setup": json.dumps(fs.get("order_block_setup", {})) if fs.get("order_block_setup") else "",
+                                        "is_higher_low_entry": bool(fs.get("is_higher_low_entry", False)),
+                                        "is_lower_high_entry": bool(fs.get("is_lower_high_entry", False)),
+                                        "entry_anchor_type": fs.get("entry_anchor_type") or "",
+                                        "entry_anchor_price": fs.get("entry_anchor_price") or "",
+                                        "execution_mode": fs.get("execution_mode", "MARKET"),
+                                        "is_candlestick_unanimous": bool(fs.get("is_candlestick_unanimous", False)),
+                                        "candlestick_direction": fs.get("candlestick_direction") or "",
                                         "is_tp1_notified_wa": False,
                                         "is_tp2_notified_wa": False,
                                     }
@@ -512,6 +482,7 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                     tp2_price=safe_f(r.get("tp2_price"), 0.0),
                                     tp3_price=safe_f(r.get("tp3_price"), 0.0),
                                     sl_price=safe_f(r.get("sl_price"), 0.0),
+                                    sl_original=safe_f(r.get("sl_original"), safe_f(r.get("sl_price"), 0.0)),
                                     risk_reward_ratio=str(r.get("risk_reward_ratio", "1:2.0"))[:16],
                                     expected_return_pct=safe_f(r.get("expected_return_pct"), 0.0),
                                     decision=str(r.get("decision", ""))[:250],
@@ -544,6 +515,10 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                     existing.max_potential_gain_pct = safe_f(r.get("max_potential_gain_pct"), existing.max_potential_gain_pct)
                                     if tier and tier != existing.grade_tier:
                                         existing.grade_tier = tier
+                                    if str(r.get("sl_original", "")) != "":
+                                        existing.sl_original = safe_f(r.get("sl_original"), getattr(existing, "sl_original", None))
+                                    elif getattr(existing, "sl_original", None) is None and str(r.get("sl_price", "")) != "":
+                                        existing.sl_original = safe_f(r.get("sl_price"), getattr(existing, "sl_price", 0.0))
                                     if str(r.get("sl_price", "")) != "":
                                         existing.sl_price = safe_f(r.get("sl_price"), existing.sl_price)
                                     if str(r.get("exit_price", "")) != "":

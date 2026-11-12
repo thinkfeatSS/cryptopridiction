@@ -270,7 +270,7 @@ export default function V16SignalCardsGrid({
                   : "text-slate-400 hover:text-slate-200"
               }`}
             >
-              <span>TP HIT (WON)</span>
+              <span>WON (TP / PROFIT)</span>
               <span className="px-1.5 py-0.2 rounded-full bg-slate-800 text-[10px] text-emerald-300">
                 {counts.won}
               </span>

@@ -56,9 +56,9 @@ export default function PortfolioView() {
   };
 
   const rawDesks = (portfolio as any)?.desks || {};
-  const scalpDesk = rawDesks.scalp || { name: "⚡ Scalp Desk", allocated_usd: 350.0, open_positions: 0, active_slots: 0, max_slots: 2, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
-  const dayDesk = rawDesks.day || rawDesks.intraday || { name: "⏳ Day Trading Desk", allocated_usd: 400.0, open_positions: 0, active_slots: 0, max_slots: 2, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
-  const swingDesk = rawDesks.swing || rawDesks.macro || { name: "🌊 Swing Desk", allocated_usd: 250.0, open_positions: 0, active_slots: 0, max_slots: 1, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
+  const scalpDesk = rawDesks.scalp || { name: "⚡ Scalp Desk", allocated_usd: 500.0, open_positions: 0, active_slots: 0, max_slots: 5, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
+  const dayDesk = rawDesks.day || rawDesks.intraday || { name: "⏳ Day Trading Desk", allocated_usd: 200.0, open_positions: 0, active_slots: 0, max_slots: 2, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
+  const swingDesk = rawDesks.swing || rawDesks.macro || { name: "🌊 Swing Desk", allocated_usd: 300.0, open_positions: 0, active_slots: 0, max_slots: 3, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
 
   const sharpe = (portfolio as any)?.sharpe_ratio ?? 0.0;
   const sortino = (portfolio as any)?.sortino_ratio ?? 0.0;
@@ -81,16 +81,16 @@ export default function PortfolioView() {
         <div className="glass-panel rounded-2xl p-4 border border-cyan-500/20 bg-cyan-950/20 relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-black uppercase tracking-wider text-cyan-300 flex items-center gap-1.5">
-              ⚡ Scalp Desk (35%)
+              ⚡ Scalp Desk (50%)
             </span>
             <span className={`text-[11px] font-mono px-2 py-0.5 rounded-full border ${scalpSlots > 0 ? "bg-cyan-500/30 text-cyan-200 border-cyan-400/50 font-bold" : "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"}`}>
-              {scalpSlots} / {scalpDesk.max_slots ?? 2} Slots
+              {scalpSlots} / {scalpDesk.max_slots ?? 5} Slots
             </span>
           </div>
           <div className="mt-2.5 flex items-baseline justify-between">
             <div>
-              <p className="text-xl font-black text-white font-mono">${(scalpDesk.allocated_usd ?? 350.0).toFixed(0)}</p>
-              <p className="text-[10px] text-slate-400">15M Scalp Timeframe (5x Leverage)</p>
+              <p className="text-xl font-black text-white font-mono">${(scalpDesk.allocated_usd ?? 500.0).toFixed(0)}</p>
+              <p className="text-[10px] text-slate-400">15M Scalp Timeframe (2x Leverage)</p>
             </div>
             <div className="text-right">
               <span className={`text-xs font-bold font-mono ${scalpPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
@@ -105,7 +105,7 @@ export default function PortfolioView() {
         <div className="glass-panel rounded-2xl p-4 border border-indigo-500/20 bg-indigo-950/20 relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-black uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
-              ⏳ Day Trading Desk (40%)
+              ⏳ Day Trading Desk (20%)
             </span>
             <span className={`text-[11px] font-mono px-2 py-0.5 rounded-full border ${daySlots > 0 ? "bg-indigo-500/30 text-indigo-200 border-indigo-400/50 font-bold" : "bg-indigo-500/20 text-indigo-300 border-indigo-500/30"}`}>
               {daySlots} / {dayDesk.max_slots ?? 2} Slots
@@ -113,7 +113,7 @@ export default function PortfolioView() {
           </div>
           <div className="mt-2.5 flex items-baseline justify-between">
             <div>
-              <p className="text-xl font-black text-white font-mono">${(dayDesk.allocated_usd ?? 400.0).toFixed(0)}</p>
+              <p className="text-xl font-black text-white font-mono">${(dayDesk.allocated_usd ?? 200.0).toFixed(0)}</p>
               <p className="text-[10px] text-slate-400">1H Day Trade Timeframe (3x Leverage)</p>
             </div>
             <div className="text-right">
@@ -129,15 +129,15 @@ export default function PortfolioView() {
         <div className="glass-panel rounded-2xl p-4 border border-purple-500/20 bg-purple-950/20 relative overflow-hidden">
           <div className="flex items-center justify-between">
             <span className="text-xs font-black uppercase tracking-wider text-purple-300 flex items-center gap-1.5">
-              🌊 Swing Desk (25%)
+              🌊 Swing Desk (30%)
             </span>
             <span className={`text-[11px] font-mono px-2 py-0.5 rounded-full border ${swingSlots > 0 ? "bg-purple-500/30 text-purple-200 border-purple-400/50 font-bold" : "bg-purple-500/20 text-purple-300 border-purple-500/30"}`}>
-              {swingSlots} / {swingDesk.max_slots ?? 1} Slot
+              {swingSlots} / {swingDesk.max_slots ?? 3} Slots
             </span>
           </div>
           <div className="mt-2.5 flex items-baseline justify-between">
             <div>
-              <p className="text-xl font-black text-white font-mono">${(swingDesk.allocated_usd ?? 250.0).toFixed(0)}</p>
+              <p className="text-xl font-black text-white font-mono">${(swingDesk.allocated_usd ?? 300.0).toFixed(0)}</p>
               <p className="text-[10px] text-slate-400">1D (24H) Swing Trade Timeframe (2x Leverage)</p>
             </div>
             <div className="text-right">

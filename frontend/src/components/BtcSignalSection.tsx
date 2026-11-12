@@ -27,15 +27,9 @@ import {
 import { getShieldTheme } from "@/lib/marketShield";
 
 const ALL_9_BTC_HORIZONS = [
-  { key: "5m", label: "5m", name: "5M Scalp" },
-  { key: "15m", label: "15m", name: "15M Scalp" },
-  { key: "1h", label: "1h", name: "1H Day" },
-  { key: "4h", label: "4h", name: "4H Swing" },
-  { key: "12h", label: "12h", name: "12H Macro" },
-  { key: "1d", label: "24h", name: "24H / 1D" },
-  { key: "1w", label: "7d", name: "7D / 1W" },
-  { key: "15d", label: "15d", name: "15D Bi-W" },
-  { key: "1M", label: "30d", name: "30D / 1M" },
+  { key: "15m", label: "15m", name: "15M Scalp / Exec" },
+  { key: "1h", label: "1h", name: "1H Intraday Context" },
+  { key: "4h", label: "4h", name: "4H Macro Anchor" },
 ];
 
 export default function BtcSignalSection() {
@@ -321,8 +315,8 @@ export default function BtcSignalSection() {
               </div>
             </div>
 
-            {/* 9-Horizon Spectrum Grid */}
-            <div className="grid grid-cols-3 sm:grid-cols-3 md:grid-cols-5 xl:grid-cols-9 gap-1.5">
+            {/* Multi-Horizon Triad Spectrum Grid (15M, 1H, 4H) */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {ALL_9_BTC_HORIZONS.map((h) => {
                 const hData = btcItem.horizons?.[h.key] || btcItem.all_9_timeframe_predictions?.[h.key] || {};
                 const stance = getHorizonStance(hData);

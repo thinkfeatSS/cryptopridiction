@@ -633,7 +633,53 @@ class EntryConfirmationEngine:
         elif candle_metrics and (candle_metrics.get("is_range_resistance_rejection") or candle_metrics.get("is_range_support_rejection")):
             optimal_limit = current_price
         elif is_momentum_breakout:
-            optimal_limit = current_price
+            c_rng = float(candle_metrics.get("candle_range") or 0.0) if candle_metrics else 0.0
+            exp_ratio = float(candle_metrics.get("expansion_ratio") or 1.0) if candle_metrics else 1.0
+            u_wick = float(candle_metrics.get("upper_wick_ratio") or 0.0) if candle_metrics else 0.0
+            l_wick = float(candle_metrics.get("lower_wick_ratio") or 0.0) if candle_metrics else 0.0
+            body_r = float(candle_metrics.get("body_ratio") or 0.0) if candle_metrics else 0.0
+            close_pos = float(candle_metrics.get("close_pos_in_range") or 0.5) if candle_metrics else 0.5
+            vol_surge = float(candle_metrics.get("volume_surge_ratio") or 1.0) if candle_metrics else 1.0
+            tb_r = float(candle_metrics.get("taker_buy_ratio") or 0.5) if candle_metrics else 0.5
+            cvd_s = float(candle_metrics.get("cvd_surge_5") or 0.0) if candle_metrics else 0.0
+            is_sqz = bool(candle_metrics and candle_metrics.get("is_squeeze_expansion"))
+
+            # 1. Institutional Parabolic Momentum / Marubozu Continuation Signature:
+            # - Extreme directional close (>= 82% for Long, <= 18% for Short)
+            # - Negligible counter-wick (upper wick <= 12% for Long, lower wick <= 12% for Short - buyers/sellers completely absorbed)
+            # - Decisive candle body (body_ratio >= 60%)
+            # - Confirmed aggressive order flow (taker_ratio >= 0.56 or cvd_surge >= 0.12 for Long; <= 0.44 or <= -0.12 for Short)
+            # - Strong volume expansion (vol_surge >= 1.25 or squeeze expansion)
+            is_parabolic_long = is_long and (close_pos >= 0.82) and (u_wick <= 0.12) and (body_r >= 0.60) and ((tb_r >= 0.56) or (cvd_s >= 0.12)) and ((vol_surge >= 1.25) or is_sqz)
+            is_parabolic_short = (not is_long) and (close_pos <= 0.18) and (l_wick <= 0.12) and (body_r >= 0.60) and ((tb_r <= 0.44) or (cvd_s <= -0.12)) and ((vol_surge >= 1.25) or is_sqz)
+            is_parabolic_impulse = is_parabolic_long or is_parabolic_short
+
+            # 2. Optimal Entry Limit (OEL) Protocol:
+            if is_parabolic_impulse:
+                # Strong Parabolic Continuation: Price velocity is high and counter-wicks are negligible.
+                # In hyper-momentum (counter-wick <= 6%), execute directly at market to prevent leaving unfilled orders.
+                # If minor breath (6% < wick <= 12%), place an aggressive shallow micro-retest limit (0.12 * range).
+                counter_wick = u_wick if is_long else l_wick
+                if counter_wick <= 0.06:
+                    optimal_limit = current_price  # Confirms MARKET_CONFIRMED entry immediately
+                else:
+                    shallow_offset = 0.12 * c_rng
+                    optimal_limit = (current_price - shallow_offset) if is_long else (current_price + shallow_offset)
+            else:
+                # Standard Breakout with Extension or Counter-Wicks:
+                # If breakout candle shows volatility extension or upper/lower seller rejection wicks,
+                # anchor limit to 0.382 Fibonacci retracement to prevent buying the top of the wick.
+                is_extended_expansion = (
+                    (c_rng >= 0.35 * active_atr and active_atr > 0) or
+                    (exp_ratio >= 1.25 and c_rng > 0) or
+                    (is_long and u_wick >= 0.18 and c_rng > 0) or
+                    (not is_long and l_wick >= 0.18 and c_rng > 0)
+                )
+                if is_extended_expansion and c_rng > 0:
+                    pullback_offset = 0.382 * c_rng
+                    optimal_limit = (current_price - pullback_offset) if is_long else (current_price + pullback_offset)
+                else:
+                    optimal_limit = current_price
         else:
             # Dynamic volatility-scaled pullback anchor (Zero hardcoding):
             # Scales pullback depth proportional to active ATR volatility, bounded between 0.15% and 0.80% of current price.
@@ -653,6 +699,8 @@ class EntryConfirmationEngine:
         atr_pct = (active_atr / max(1e-8, current_price)) * 100.0 if active_atr > 0 else 0.50
         base_chase = float(chase_threshold_pct) if chase_threshold_pct is not None else 0.40
         dynamic_chase_pct = float(np.clip(max(0.20, min(base_chase, atr_pct * 0.35)), 0.20, 1.25))
+        if is_momentum_breakout and 'is_parabolic_impulse' in locals() and is_parabolic_impulse:
+            dynamic_chase_pct = max(dynamic_chase_pct, 0.55)
 
         # Check if price has run away beyond chase threshold
         is_chasing = False
@@ -668,7 +716,7 @@ class EntryConfirmationEngine:
             if ob_min <= current_price <= ob_max:
                 is_inside_ob_zone = True
 
-        if not is_momentum_breakout and not is_inside_ob_zone:
+        if not is_inside_ob_zone:
             if is_long and current_price > (optimal_limit * (1.0 + dynamic_chase_pct / 100.0)):
                 is_chasing = True
                 chase_warning = f"Price extended {dist_pct:.2f}% above optimal POI ({format_dynamic_precision(optimal_limit)}). Await pullback."
@@ -696,4 +744,482 @@ class EntryConfirmationEngine:
             "distance_from_limit_pct": round(dist_pct, 2),
             "is_chasing": is_chasing,
             "chase_warning": chase_warning
+        }
+
+    @staticmethod
+    def calculate_top5_obi(depth_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Calculates Level-5 Order Book Imbalance (OBI), notional depth, spread, and micro-price.
+        OBI = (Bid_Depth - Ask_Depth) / (Bid_Depth + Ask_Depth) in [-1.0, +1.0]
+        """
+        if not depth_data or not isinstance(depth_data, dict):
+            return {
+                "obi_5": 0.0,
+                "bid_depth_usd": 0.0,
+                "ask_depth_usd": 0.0,
+                "best_bid": 0.0,
+                "best_ask": 0.0,
+                "spread_bps": 0.0,
+                "micro_price": 0.0,
+                "has_depth": False
+            }
+
+        # Check if pre-computed OBI is already available
+        if "obi_5" in depth_data and "bid_depth_usd" in depth_data:
+            return depth_data
+
+        bids_raw = depth_data.get("bids", [])
+        asks_raw = depth_data.get("asks", [])
+
+        if not bids_raw and not asks_raw:
+            return {
+                "obi_5": float(depth_data.get("obi") or depth_data.get("order_book_imbalance") or 0.0),
+                "bid_depth_usd": float(depth_data.get("bid_depth_usd") or 0.0),
+                "ask_depth_usd": float(depth_data.get("ask_depth_usd") or 0.0),
+                "best_bid": float(depth_data.get("best_bid") or 0.0),
+                "best_ask": float(depth_data.get("best_ask") or 0.0),
+                "spread_bps": float(depth_data.get("spread_bps") or 0.0),
+                "micro_price": float(depth_data.get("micro_price") or 0.0),
+                "has_depth": bool(depth_data.get("has_depth", False))
+            }
+
+        # Safely parse up to top-5 bids and asks
+        top5_bids = []
+        for b in bids_raw[:5]:
+            if isinstance(b, (list, tuple)) and len(b) >= 2:
+                try:
+                    p, q = float(b[0]), float(b[1])
+                    if p > 0 and q > 0:
+                        top5_bids.append((p, q))
+                except (ValueError, TypeError):
+                    pass
+            elif isinstance(b, dict):
+                try:
+                    p = float(b.get("price") or b.get("p") or 0.0)
+                    q = float(b.get("qty") or b.get("quantity") or b.get("q") or 0.0)
+                    if p > 0 and q > 0:
+                        top5_bids.append((p, q))
+                except (ValueError, TypeError):
+                    pass
+
+        top5_asks = []
+        for a in asks_raw[:5]:
+            if isinstance(a, (list, tuple)) and len(a) >= 2:
+                try:
+                    p, q = float(a[0]), float(a[1])
+                    if p > 0 and q > 0:
+                        top5_asks.append((p, q))
+                except (ValueError, TypeError):
+                    pass
+            elif isinstance(a, dict):
+                try:
+                    p = float(a.get("price") or a.get("p") or 0.0)
+                    q = float(a.get("qty") or a.get("quantity") or a.get("q") or 0.0)
+                    if p > 0 and q > 0:
+                        top5_asks.append((p, q))
+                except (ValueError, TypeError):
+                    pass
+
+        bid_depth_usd = sum(p * q for p, q in top5_bids)
+        ask_depth_usd = sum(p * q for p, q in top5_asks)
+        tot_depth = bid_depth_usd + ask_depth_usd
+
+        best_bid = top5_bids[0][0] if top5_bids else 0.0
+        best_ask = top5_asks[0][0] if top5_asks else 0.0
+
+        if best_bid > 0 and best_ask > best_bid:
+            spread_bps = round(((best_ask - best_bid) / best_bid) * 10000.0, 2)
+        else:
+            spread_bps = 0.0
+
+        if tot_depth > 0:
+            obi_5 = round(float(np.clip((bid_depth_usd - ask_depth_usd) / tot_depth, -1.0, 1.0)), 4)
+            micro_price = round((best_bid * ask_depth_usd + best_ask * bid_depth_usd) / tot_depth, 6) if (best_bid > 0 and best_ask > 0) else best_bid
+        else:
+            obi_5 = 0.0
+            micro_price = best_bid
+
+        return {
+            "obi_5": obi_5,
+            "bid_depth_usd": round(bid_depth_usd, 2),
+            "ask_depth_usd": round(ask_depth_usd, 2),
+            "best_bid": round(best_bid, 6),
+            "best_ask": round(best_ask, 6),
+            "spread_bps": spread_bps,
+            "micro_price": micro_price,
+            "has_depth": (len(top5_bids) > 0 and len(top5_asks) > 0)
+        }
+
+    @staticmethod
+    def validate_resting_limit_fill(
+        direction: str,
+        limit_price: float,
+        current_price: float,
+        depth_data: Optional[Dict[str, Any]] = None,
+        cvd_metrics: Optional[Dict[str, Any]] = None,
+        candle_metrics: Optional[Dict[str, Any]] = None,
+        obi_threshold: float = 0.25,
+        cvd_threshold: float = 0.20
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Authoritative Live OBI / CVD Inflow Confirmation for Resting Limit Fills.
+        Connects top-5 order book depth to resting limit order execution:
+        - Prevents filling long limits into adverse ask wall avalanches and aggressive market dumps.
+        - Prevents filling short limits into adverse bid wall ramps and aggressive market squeezes.
+        - Confirms fill when incoming microstructure shows buyer absorption on longs / seller resistance on shorts.
+
+        Returns: (is_fill_confirmed: bool, reason: str, telemetry: Dict[str, Any])
+        """
+        dir_upper = str(direction).upper()
+        is_long = dir_upper in ["LONG", "BULLISH", "BUY"]
+
+        # 1. Price touch verification
+        if is_long and current_price > limit_price:
+            return False, f"Price (${current_price:,.4f}) above Long limit (${limit_price:,.4f})", {}
+        elif not is_long and current_price < limit_price:
+            return False, f"Price (${current_price:,.4f}) below Short limit (${limit_price:,.4f})", {}
+
+        # 2. Extract Top-5 OBI metrics
+        depth_info = EntryConfirmationEngine.calculate_top5_obi(depth_data)
+        has_depth = depth_info.get("has_depth", False)
+        obi_val = float(depth_info.get("obi_5", 0.0))
+
+        # 3. Extract CVD Surge / Inflow metrics
+        # In local test environments without live WebSockets or Redis, falls back to conservative taker-buy volume estimates
+        cvd_val = 0.0
+        if cvd_metrics and isinstance(cvd_metrics, dict):
+            cvd_val = float(cvd_metrics.get("cvd_surge") or cvd_metrics.get("cvd_surge_5") or 0.0)
+        elif candle_metrics and isinstance(candle_metrics, dict):
+            tb_r_cand = float(candle_metrics.get("taker_buy_ratio", 0.50))
+            cvd_raw = candle_metrics.get("cvd_surge_5")
+            if cvd_raw is not None and not (isinstance(cvd_raw, float) and np.isnan(cvd_raw)):
+                cvd_val = float(cvd_raw)
+            elif "taker_buy_ratio" in candle_metrics:
+                # Conservative taker-buy volume estimate fallback
+                cvd_val = round(float(np.clip(2.0 * tb_r_cand - 1.0, -1.0, 1.0)), 4)
+            else:
+                cvd_val = 0.0
+
+        # Fallback to high-frequency synthetic taker flow if depth is absent or lagged (> 350ms)
+        is_synthetic = False
+        depth_lag_ms = float(depth_data.get("latency_ms", 0.0)) if depth_data else 0.0
+        if (not has_depth or depth_lag_ms > 350.0) and candle_metrics and isinstance(candle_metrics, dict) and candle_metrics:
+            tb_r = float(candle_metrics.get("taker_buy_ratio", 0.50))
+            cvd_s = cvd_val
+            synth_obi = round(float(np.clip(1.5 * (tb_r - 0.50) + 0.5 * cvd_s, -1.0, 1.0)), 4)
+            obi_val = synth_obi
+            is_synthetic = True
+
+        telemetry = {
+            "direction": dir_upper,
+            "limit_price": limit_price,
+            "current_price": current_price,
+            "obi_5": obi_val,
+            "cvd_surge": cvd_val,
+            "bid_depth_usd": depth_info.get("bid_depth_usd", 0.0),
+            "ask_depth_usd": depth_info.get("ask_depth_usd", 0.0),
+            "spread_bps": depth_info.get("spread_bps", 0.0),
+            "has_depth": has_depth,
+            "is_synthetic": is_synthetic
+        }
+
+        # 4. Microstructure Inflow Decision Logic
+        if is_long:
+            # Adverse Long Fill Interception:
+            # A. Extreme ask wall depth imbalance (OBI < -0.60 indicates severe bid void / wall collapse)
+            is_extreme_ask_void = (has_depth or is_synthetic) and (obi_val < -0.60)
+            # B. Heavy ask stacking with aggressive market selling (OBI < -0.25 and CVD < -0.15)
+            is_toxic_sell_cascade = (obi_val < -obi_threshold) and (cvd_val < -cvd_threshold)
+
+            if is_extreme_ask_void or is_toxic_sell_cascade:
+                reason = f"Adverse ask wall pressure (OBI {obi_val:+.2f} < -{obi_threshold:.2f}, CVD {cvd_val:+.2f}). Awaiting bid absorption inflow."
+                telemetry["fill_state"] = "AWAITING_INFLOW"
+                return False, reason, telemetry
+
+            # Confirmed Long Fill
+            reason = f"Long limit fill confirmed by microstructure absorption (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+            telemetry["fill_state"] = "CONFIRMED"
+            telemetry["fill_confirmation_type"] = "LIVE_OBI_CVD_CONFIRMED" if (has_depth and not is_synthetic) else ("SYNTHETIC_MICROSTRUCTURE_CONFIRMED" if is_synthetic else "PRICE_TOUCH_FALLBACK")
+            return True, reason, telemetry
+
+        else:
+            # Adverse Short Fill Interception:
+            # A. Extreme bid wall depth imbalance (OBI > +0.60 indicates severe ask void / squeeze breakout)
+            is_extreme_bid_void = (has_depth or is_synthetic) and (obi_val > 0.60)
+            # B. Heavy bid stacking with aggressive market buying (OBI > +0.25 and CVD > +0.15)
+            is_toxic_buy_cascade = (obi_val > obi_threshold) and (cvd_val > cvd_threshold)
+
+            if is_extreme_bid_void or is_toxic_buy_cascade:
+                reason = f"Adverse bid wall pressure (OBI {obi_val:+.2f} > +{obi_threshold:.2f}, CVD {cvd_val:+.2f}). Awaiting ask resistance inflow."
+                telemetry["fill_state"] = "AWAITING_INFLOW"
+                return False, reason, telemetry
+
+            # Confirmed Short Fill
+            reason = f"Short limit fill confirmed by microstructure resistance (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+            telemetry["fill_state"] = "CONFIRMED"
+            telemetry["fill_confirmation_type"] = "LIVE_OBI_CVD_CONFIRMED" if (has_depth and not is_synthetic) else ("SYNTHETIC_MICROSTRUCTURE_CONFIRMED" if is_synthetic else "PRICE_TOUCH_FALLBACK")
+            return True, reason, telemetry
+
+    @staticmethod
+    def anchor_to_higher_low_and_ob(
+        df_15m: pd.DataFrame,
+        hl_pivot_price: float,
+        current_price: float,
+        bullish_ob_low: Optional[float] = None,
+        bullish_ob_high: Optional[float] = None,
+        opposing_sh_price: Optional[float] = None,
+        opposing_supply_low: Optional[float] = None,
+        spread_bps: float = 5.0
+    ) -> Dict[str, Any]:
+        """
+        Anchors LONG execution strictly to a confirmed 15M Higher Low (HL) and Bullish Order Block.
+        Enforces strict price geometry: SL < Entry < TP1 < TP2 < TP3 with dynamic volatility cushions.
+        """
+        # Dynamic 15M ATR computation
+        atr_15m = 0.0
+        if df_15m is not None and len(df_15m) >= 5 and "high" in df_15m.columns and "low" in df_15m.columns:
+            h = df_15m["high"].astype(float)
+            l = df_15m["low"].astype(float)
+            c = df_15m["close"].astype(float)
+            tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+            atr_15m = float(tr.rolling(14, min_periods=3).mean().iloc[-1])
+        if atr_15m <= 0:
+            atr_15m = max(1e-8, current_price * 0.008)
+
+        # Dynamic Entry Zone Anchored to Higher Low (with stale/distant pivot recency guard for 15M scalps)
+        hl_price = float(hl_pivot_price if hl_pivot_price and hl_pivot_price > 0 else current_price)
+        if df_15m is not None and len(df_15m) >= 8 and current_price > 0 and "low" in df_15m.columns and "close" in df_15m.columns:
+            max_hl_dist = min(1.80 * atr_15m, current_price * 0.016)
+            if (current_price - hl_price) > max_hl_dist:
+                recent_lows = df_15m["low"].iloc[-12:].astype(float).values
+                local_hl = None
+                for idx in range(len(recent_lows) - 2, 0, -1):
+                    if recent_lows[idx] <= recent_lows[idx - 1] and recent_lows[idx] <= recent_lows[idx + 1]:
+                        if hl_price < recent_lows[idx] < (current_price - 0.15 * atr_15m):
+                            local_hl = float(recent_lows[idx])
+                            break
+                ema9_val = float(df_15m["close"].iloc[-16:].astype(float).ewm(span=9, adjust=False).mean().iloc[-1])
+                candidate_hl = local_hl if local_hl is not None else min(ema9_val, current_price - 0.35 * atr_15m)
+                floor_bound = max(hl_price, current_price - max_hl_dist)
+                ceil_bound = current_price - (0.20 * atr_15m)
+                if ceil_bound > floor_bound:
+                    hl_price = float(np.clip(candidate_hl, floor_bound, ceil_bound))
+                else:
+                    hl_price = float(floor_bound)
+
+        zone_floor = hl_price - (0.10 * atr_15m)
+        zone_ceiling = hl_price + (0.35 * atr_15m)
+        if bullish_ob_high is not None and bullish_ob_high > hl_price and bullish_ob_high <= current_price:
+            zone_ceiling = max(zone_ceiling, float(bullish_ob_high))
+
+        # Anti-chase logic: If price is already extended > 1.2 ATR above the Higher Low, use RESTING LIMIT
+        is_extended = current_price > (hl_price + 1.20 * atr_15m)
+        if is_extended:
+            execution_mode = "RESTING_LIMIT"
+            entry_price = format_dynamic_precision(hl_price + 0.20 * atr_15m)
+            decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO HL @ ${entry_price})"
+        elif current_price < zone_floor:
+            # Price is retesting deep below the HL
+            execution_mode = "MARKET_TRIGGER"
+            entry_price = format_dynamic_precision(current_price)
+            decision_label = f"🟢 BUY 15M (DEEP HL RETEST @ ${entry_price})"
+        else:
+            execution_mode = "MARKET_TRIGGER"
+            entry_price = format_dynamic_precision(current_price)
+            decision_label = f"🟢 BUY 15M (HIGHER LOW RETEST @ ${entry_price})"
+
+        # Stop Loss: Anchored strictly below the structural floor with dynamic volatility & spread noise floor
+        ob_is_local = (bullish_ob_low is not None and 0 < float(bullish_ob_low) and (hl_price - float(bullish_ob_low)) <= (1.50 * atr_15m))
+        structural_floor = min(hl_price, float(bullish_ob_low)) if ob_is_local else hl_price
+        spread_drag_usd = (spread_bps * 0.0001) * entry_price
+        vol_cushion = max(0.25 * atr_15m, 2.0 * spread_drag_usd, entry_price * 0.002)
+        min_sl_dist = max(0.35 * atr_15m, 3.0 * spread_drag_usd, entry_price * 0.0035)
+        sl_price = format_dynamic_precision(min(structural_floor - vol_cushion, entry_price - min_sl_dist))
+
+        # Invariant assertion: SL must be strictly below Entry by at least the noise floor
+        if sl_price >= entry_price or (entry_price - sl_price) < (min_sl_dist * 0.90):
+            sl_price = format_dynamic_precision(entry_price - max(0.50 * atr_15m, min_sl_dist))
+
+        risk_amount = max(1e-8, entry_price - sl_price)
+
+        # Take Profit Targets: Anchored to opposing swing high liquidity and Fibonacci extensions
+        target_ref = opposing_sh_price
+        if opposing_supply_low is not None and opposing_supply_low > entry_price:
+            target_ref = min(target_ref, opposing_supply_low) if target_ref else opposing_supply_low
+
+        if target_ref is None or target_ref <= entry_price:
+            target_ref = entry_price + (2.0 * risk_amount)
+
+        # Take Profit Targets: Strictly enforce 1:2 Risk to Reward Ratio (Risk = 1.0, Reward = 2.0)
+        # TP1: Strictly 2.0 * Risk (1:2 R:R)
+        tp1_candidate = entry_price + (2.0 * risk_amount)
+        tp1_price = format_dynamic_precision(tp1_candidate)
+
+        # TP2: Runner tranche target (3.0 * Risk or opposing swing high beyond TP1)
+        tp2_candidate = entry_price + (3.0 * risk_amount)
+        if target_ref is not None and float(target_ref) > tp1_price:
+            tp2_candidate = max(tp2_candidate, float(target_ref))
+        tp2_price = format_dynamic_precision(tp2_candidate)
+
+        # TP3: Extended runner tranche target (4.0 * Risk or Fibonacci expansion)
+        tp3_candidate = entry_price + (4.0 * risk_amount)
+        if tp3_candidate <= tp2_price:
+            tp3_candidate = tp2_price + (1.0 * risk_amount)
+        tp3_price = format_dynamic_precision(tp3_candidate)
+
+        # Final invariant verification
+        assert sl_price < entry_price < tp1_price < tp2_price < tp3_price, (
+            f"Long price geometry violation: SL={sl_price}, Entry={entry_price}, "
+            f"TP1={tp1_price}, TP2={tp2_price}, TP3={tp3_price}"
+        )
+
+        rr_ratio = round((tp1_price - entry_price) / risk_amount, 2)
+
+        return {
+            "direction": "LONG",
+            "execution_mode": execution_mode,
+            "decision_label": decision_label,
+            "entry_price": entry_price,
+            "sl_price": sl_price,
+            "tp1_price": tp1_price,
+            "tp2_price": tp2_price,
+            "tp3_price": tp3_price,
+            "risk_reward_ratio": rr_ratio,
+            "hl_pivot_price": format_dynamic_precision(hl_price),
+            "structural_floor": format_dynamic_precision(structural_floor),
+            "atr_15m": format_dynamic_precision(atr_15m),
+            "entry_zone": [format_dynamic_precision(zone_floor), format_dynamic_precision(zone_ceiling)],
+            "is_extended": is_extended,
+        }
+
+    @staticmethod
+    def anchor_to_lower_high_and_ob(
+        df_15m: pd.DataFrame,
+        lh_pivot_price: float,
+        current_price: float,
+        bearish_ob_low: Optional[float] = None,
+        bearish_ob_high: Optional[float] = None,
+        opposing_sl_price: Optional[float] = None,
+        opposing_demand_high: Optional[float] = None,
+        spread_bps: float = 5.0
+    ) -> Dict[str, Any]:
+        """
+        Anchors SHORT execution strictly to a confirmed 15M Lower High (LH) and Bearish Order Block.
+        Enforces strict price geometry: SL > Entry > TP1 > TP2 > TP3 with dynamic volatility cushions.
+        """
+        # Dynamic 15M ATR computation
+        atr_15m = 0.0
+        if df_15m is not None and len(df_15m) >= 5 and "high" in df_15m.columns and "low" in df_15m.columns:
+            h = df_15m["high"].astype(float)
+            l = df_15m["low"].astype(float)
+            c = df_15m["close"].astype(float)
+            tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+            atr_15m = float(tr.rolling(14, min_periods=3).mean().iloc[-1])
+        if atr_15m <= 0:
+            atr_15m = max(1e-8, current_price * 0.008)
+
+        # Dynamic Entry Zone Anchored to Lower High (with stale/distant pivot recency guard for 15M scalps)
+        lh_price = float(lh_pivot_price if lh_pivot_price and lh_pivot_price > 0 else current_price)
+        if df_15m is not None and len(df_15m) >= 8 and current_price > 0 and "high" in df_15m.columns and "close" in df_15m.columns:
+            max_lh_dist = min(1.80 * atr_15m, current_price * 0.016)
+            if (lh_price - current_price) > max_lh_dist:
+                recent_highs = df_15m["high"].iloc[-12:].astype(float).values
+                local_lh = None
+                for idx in range(len(recent_highs) - 2, 0, -1):
+                    if recent_highs[idx] >= recent_highs[idx - 1] and recent_highs[idx] >= recent_highs[idx + 1]:
+                        if (current_price + 0.15 * atr_15m) < recent_highs[idx] < lh_price:
+                            local_lh = float(recent_highs[idx])
+                            break
+                ema9_val = float(df_15m["close"].iloc[-16:].astype(float).ewm(span=9, adjust=False).mean().iloc[-1])
+                candidate_lh = local_lh if local_lh is not None else max(ema9_val, current_price + 0.35 * atr_15m)
+                floor_bound = current_price + (0.20 * atr_15m)
+                ceil_bound = min(lh_price, current_price + max_lh_dist)
+                if ceil_bound > floor_bound:
+                    lh_price = float(np.clip(candidate_lh, floor_bound, ceil_bound))
+                else:
+                    lh_price = float(ceil_bound)
+
+        zone_ceiling = lh_price + (0.10 * atr_15m)
+        zone_floor = lh_price - (0.35 * atr_15m)
+        if bearish_ob_low is not None and bearish_ob_low < lh_price and bearish_ob_low >= current_price:
+            zone_floor = min(zone_floor, float(bearish_ob_low))
+
+        # Anti-chase logic: If price is already dumped > 1.2 ATR below the Lower High, use RESTING LIMIT
+        is_extended = current_price < (lh_price - 1.20 * atr_15m)
+        if is_extended:
+            execution_mode = "RESTING_LIMIT"
+            entry_price = format_dynamic_precision(lh_price - 0.20 * atr_15m)
+            decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO LH @ ${entry_price})"
+        elif current_price > zone_ceiling:
+            # Price is retesting deep above the LH
+            execution_mode = "MARKET_TRIGGER"
+            entry_price = format_dynamic_precision(current_price)
+            decision_label = f"🔴 SELL 15M (DEEP LH RETEST @ ${entry_price})"
+        else:
+            execution_mode = "MARKET_TRIGGER"
+            entry_price = format_dynamic_precision(current_price)
+            decision_label = f"🔴 SELL 15M (LOWER HIGH REJECTION @ ${entry_price})"
+
+        # Stop Loss: Anchored strictly above the structural ceiling with dynamic volatility & spread noise floor
+        ob_is_local = (bearish_ob_high is not None and float(bearish_ob_high) > 0 and (float(bearish_ob_high) - lh_price) <= (1.50 * atr_15m))
+        structural_ceiling = max(lh_price, float(bearish_ob_high)) if ob_is_local else lh_price
+        spread_drag_usd = (spread_bps * 0.0001) * entry_price
+        vol_cushion = max(0.25 * atr_15m, 2.0 * spread_drag_usd, entry_price * 0.002)
+        min_sl_dist = max(0.35 * atr_15m, 3.0 * spread_drag_usd, entry_price * 0.0035)
+        sl_price = format_dynamic_precision(max(structural_ceiling + vol_cushion, entry_price + min_sl_dist))
+
+        # Invariant assertion: SL must be strictly above Entry by at least the noise floor
+        if sl_price <= entry_price or (sl_price - entry_price) < (min_sl_dist * 0.90):
+            sl_price = format_dynamic_precision(entry_price + max(0.50 * atr_15m, min_sl_dist))
+
+        risk_amount = max(1e-8, sl_price - entry_price)
+
+        # Take Profit Targets: Anchored to opposing swing low liquidity and Fibonacci extensions
+        target_ref = opposing_sl_price
+        if opposing_demand_high is not None and opposing_demand_high < entry_price:
+            target_ref = max(target_ref, opposing_demand_high) if target_ref else opposing_demand_high
+
+        if target_ref is None or target_ref >= entry_price:
+            target_ref = entry_price - (2.0 * risk_amount)
+
+        # Take Profit Targets: Strictly enforce 1:2 Risk to Reward Ratio (Risk = 1.0, Reward = 2.0)
+        # TP1: Strictly 2.0 * Risk (1:2 R:R)
+        tp1_candidate = entry_price - (2.0 * risk_amount)
+        tp1_price = format_dynamic_precision(tp1_candidate)
+
+        # TP2: Runner tranche target (3.0 * Risk or opposing swing low beyond TP1)
+        tp2_candidate = entry_price - (3.0 * risk_amount)
+        if target_ref is not None and float(target_ref) < tp1_price:
+            tp2_candidate = min(tp2_candidate, float(target_ref))
+        tp2_price = format_dynamic_precision(tp2_candidate)
+
+        # TP3: Extended runner tranche target (4.0 * Risk)
+        tp3_candidate = entry_price - (4.0 * risk_amount)
+        if tp3_candidate >= tp2_price:
+            tp3_candidate = tp2_price - (1.0 * risk_amount)
+        tp3_price = format_dynamic_precision(tp3_candidate)
+
+        # Final invariant verification
+        assert sl_price > entry_price > tp1_price > tp2_price > tp3_price, (
+            f"Short price geometry violation: SL={sl_price}, Entry={entry_price}, "
+            f"TP1={tp1_price}, TP2={tp2_price}, TP3={tp3_price}"
+        )
+
+        rr_ratio = round((entry_price - tp1_price) / risk_amount, 2)
+
+        return {
+            "direction": "SHORT",
+            "execution_mode": execution_mode,
+            "decision_label": decision_label,
+            "entry_price": entry_price,
+            "sl_price": sl_price,
+            "tp1_price": tp1_price,
+            "tp2_price": tp2_price,
+            "tp3_price": tp3_price,
+            "risk_reward_ratio": rr_ratio,
+            "lh_pivot_price": format_dynamic_precision(lh_price),
+            "structural_ceiling": format_dynamic_precision(structural_ceiling),
+            "atr_15m": format_dynamic_precision(atr_15m),
+            "entry_zone": [format_dynamic_precision(zone_floor), format_dynamic_precision(zone_ceiling)],
+            "is_extended": is_extended,
         }

@@ -97,8 +97,8 @@ class RectangleStrategyConfig:
     max_sl_pct: float = 3.50           # Maximum SL distance (reject oversized stops)
 
     # 10. Signal Scoring Engine (100-Point Model)
-    min_signal_score: float = 75.0     # Minimum score for a valid signal
-    high_quality_score: float = 85.0   # Score for grade A+ / prime signal
+    min_signal_score: float = field(default_factory=lambda: float(os.getenv("MIN_RECTANGLE_SIGNAL_SCORE", "65.0")))     # Minimum score for a valid signal
+    high_quality_score: float = field(default_factory=lambda: float(os.getenv("HIGH_QUALITY_RECTANGLE_SCORE", "80.0")))   # Score for grade A+ / prime signal
 
     # 11. Session High / Low Filter
     session_confluence_enabled: bool = True

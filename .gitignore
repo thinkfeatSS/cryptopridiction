@@ -51,6 +51,7 @@ catboost_info/
 export_app_data/
 staging_export_app_data/
 export_staging/
+data/cache/
 trader_signals_tracker.csv
 freeze_archive*.csv
 *.log

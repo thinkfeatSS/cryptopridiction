@@ -163,3 +163,80 @@ class M1EntryEngine:
 
         return None
 
+    def evaluate_candle_breakout(
+        self,
+        rectangle: DynamicRectangle,
+        df: pd.DataFrame,
+        current_idx: int = -1,
+        timeframe: str = "15m"
+    ) -> Optional[M1EntryTriggerResult]:
+        """
+        Evaluates any closed candle (15M or 1M) for rectangle flip breakout.
+        Provides dual-trigger execution: allows 15M candle breakout or 1M precision flip.
+        """
+        if rectangle.status not in (RectangleStatus.WAITING_FOR_M1_CONFIRMATION, RectangleStatus.CREATED):
+            return None
+
+        n = len(df)
+        idx = n + current_idx if current_idx < 0 else current_idx
+        if idx < 0 or idx >= n:
+            return None
+
+        o = float(df['open'].iloc[idx])
+        h = float(df['high'].iloc[idx])
+        l = float(df['low'].iloc[idx])
+        c = float(df['close'].iloc[idx])
+        ts = df['timestamp'].iloc[idx] if 'timestamp' in df.columns else idx
+
+        upper = rectangle.upper_boundary
+        lower = rectangle.lower_boundary
+        dir_trade = rectangle.direction
+
+        # Check interaction
+        interacted = (l <= upper and h >= lower)
+        if interacted:
+            rectangle.retest_occurred = True
+
+        # Check invalidation
+        blowout_buf = max(1e-6, rectangle.width * 0.50)
+        if dir_trade == "LONG" and c < (lower - blowout_buf):
+            rectangle.status = RectangleStatus.INVALIDATED
+            return None
+        elif dir_trade == "SHORT" and c > (upper + blowout_buf):
+            rectangle.status = RectangleStatus.INVALIDATED
+            return None
+
+        tf_label = str(timeframe).upper()
+        if dir_trade == "LONG":
+            if c > upper:
+                rectangle.status = RectangleStatus.ENTRY_CONFIRMED
+                rectangle.entry_price = c
+                return M1EntryTriggerResult(
+                    is_triggered=True,
+                    direction="LONG",
+                    entry_mode="BREAKOUT_FLIP",
+                    trigger_candle_idx=idx,
+                    trigger_timestamp=ts,
+                    trigger_price=c,
+                    rectangle=rectangle,
+                    m1_flip_score=10.0,
+                    reason=f"{tf_label} candle confirmed close ({c:.4f}) above bullish rectangle upper boundary ({upper:.4f})"
+                )
+        elif dir_trade == "SHORT":
+            if c < lower:
+                rectangle.status = RectangleStatus.ENTRY_CONFIRMED
+                rectangle.entry_price = c
+                return M1EntryTriggerResult(
+                    is_triggered=True,
+                    direction="SHORT",
+                    entry_mode="BREAKOUT_FLIP",
+                    trigger_candle_idx=idx,
+                    trigger_timestamp=ts,
+                    trigger_price=c,
+                    rectangle=rectangle,
+                    m1_flip_score=10.0,
+                    reason=f"{tf_label} candle confirmed close ({c:.4f}) below bearish rectangle lower boundary ({lower:.4f})"
+                )
+
+        return None
+

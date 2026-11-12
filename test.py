@@ -40,6 +40,7 @@ from tabulate import tabulate
 from datetime import datetime, timezone, timedelta
 from scipy.signal import savgol_filter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, Tuple, Dict, Any, List, Set
 
 import ccxt
 import xgboost as xgb
@@ -321,7 +322,7 @@ CONFIG = {
     "mode": "both",               # "both", "scanner", or "single"
     "continuous_loop": True,      # 24/7 Background Watcher Loop
     "scanner_mode": "top_volume", # "top_volume" (dynamic auto-discovery of all active Binance coins), "expanded_universe", or "custom_list"
-    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "40")), # Curated Top 40 high-volume active crypto momentum universe
+    "scanner_top_n": int(os.getenv("SCANNER_TOP_N", "100")), # Curated Top 100 high-volume active crypto momentum universe
     "max_scan_workers": int(os.getenv("MAX_SCAN_WORKERS", "16")), # 16 parallel worker threads for high-throughput scanning
     "heartbeat_interval_seconds": int(os.getenv("HEARTBEAT_SECONDS", "4")), # Fast intra-candle position monitoring
     "scan_interval_seconds": int(os.getenv("SCAN_INTERVAL_SECONDS", "60")), # Frequent continuous 60s rescan cycle fallback
@@ -377,7 +378,7 @@ CONFIG = {
         "15m": 350
     },
     "paper_trading": {
-        "enabled": True,
+        "enabled": False,
         "spot_only": False,                 # Bi-directional trading enabled: Execute both high-edge LONG and SHORT setups
         "start_balance_usd": 1000.0,        # $1,000.00 Institutional Virtual Portfolio Benchmark
         "dynamic_sizing": True,             # Dynamic ATR Volatility Risk Parity sizing
@@ -547,17 +548,76 @@ class CryptoDataLoader:
         self._funding_cache = {}
         self._binance_ip_throttled_until = 0.0
         self.MAX_LIVE_PRICE_AGE_SECONDS = 15.0
+        self.MAX_SWR_RATE_LIMIT_GRACE_SECONDS = 180.0
         self._is_price_fresh_15s = True
         self._price_freshness_age = 0.0
         self._is_global_outage = False
         self._global_outage_reason = ""
+        self._is_partition_stale = False
+        self._rest_outage_start_ts = None
+        self._last_outage_log_ts = 0.0
+        self._last_swr_log_ts = 0.0
         self._symbol_price_timestamps = {}
         self._exchange_geo_cooldowns = {}
         self._coincap_rates_cache = {}
         self._coincap_rates_ts = 0.0
         self._coincap_throttled_until = 0.0
+        self._paprika_rates_cache = {}
+        self._paprika_rates_ts = 0.0
+        self._paprika_throttled_until = 0.0
+        self._bitget_throttled_until = 0.0
         self.COINCAP_MIN_INTERVAL_SECONDS = 2.0
+        self._disk_cache_dir = "export_app_data"
+        try:
+            from app.engine.scanner.websocket_feed import ws_feed_manager
+            self.ws_feed = ws_feed_manager
+        except Exception:
+            self.ws_feed = None
         self.init_resilient_exchange()
+
+    def is_partition_stale_active(self) -> bool:
+        """Returns True if upstream exchange partition or global multi-exchange outage is active."""
+        with self._cache_lock:
+            return getattr(self, "_is_partition_stale", False) or getattr(self, "_is_global_outage", False)
+
+    def get_partition_status(self) -> dict:
+        """Provides partition health metrics for telemetry."""
+        with self._cache_lock:
+            return {
+                "is_partition_stale": getattr(self, "_is_partition_stale", False) or getattr(self, "_is_global_outage", False),
+                "is_global_outage": getattr(self, "_is_global_outage", False),
+                "outage_reason": getattr(self, "_global_outage_reason", ""),
+                "price_freshness_age": getattr(self, "_price_freshness_age", 0.0),
+                "is_price_fresh_15s": getattr(self, "_is_price_fresh_15s", True)
+            }
+
+    def _save_tickers_to_swr_disk(self, tickers: dict, ts: float):
+        """Persists live ticker prices atomically to disk for resilient SWR fallback during extreme rate limiting or public API quota exhaustion."""
+        if not tickers:
+            return
+        try:
+            cache_dir = getattr(self, '_disk_cache_dir', 'export_app_data')
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, "live_tickers_swr.json")
+            tmp_file = f"{cache_file}.tmp_{os.getpid()}_{threading.get_ident()}"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump({"timestamp": ts, "tickers": tickers}, f)
+            os.replace(tmp_file, cache_file)
+        except Exception:
+            pass
+
+    def _load_tickers_from_swr_disk(self) -> tuple:
+        """Loads cached ticker prices from persistent disk during upstream quota exhaustion or exchange rate limiting."""
+        try:
+            cache_dir = getattr(self, '_disk_cache_dir', 'export_app_data')
+            cache_file = os.path.join(cache_dir, "live_tickers_swr.json")
+            if os.path.exists(cache_file):
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("tickers", {}), float(data.get("timestamp", 0.0))
+        except Exception:
+            pass
+        return {}, 0.0
 
     def _is_exchange_geo_blocked(self, exchange_name: str) -> bool:
         """Returns True if the upstream exchange is currently in a geo-restriction / cloud IP ban cooldown."""
@@ -726,22 +786,30 @@ class CryptoDataLoader:
             pass
         return res
 
-    def _fetch_coincap_tickers(self) -> dict:
-        """Tier-6.5 Failover: Global decentralized price aggregator (CoinCap API) when all CEX endpoints are geo-fenced."""
+    def _fetch_mexc_tickers(self) -> dict:
+        """Tier-6 Failover: Bulk fetches spot tickers from MEXC with geo-restriction detection."""
+        if self._is_exchange_geo_blocked("mexc"):
+            return {}
         res = {}
         try:
-            url = "https://api.coincap.io/v2/rates"
-            resp = self.session.get(url, timeout=3.5)
+            resp = self.session.get("https://api.mexc.com/api/v3/ticker/price", timeout=4.5)
             if resp.status_code == 200:
                 data = resp.json()
-                for it in data.get("data", []):
-                    sym = it.get("symbol")
-                    rate_usd = it.get("rateUsd")
-                    if sym and rate_usd:
-                        p = float(rate_usd)
-                        res[f"{sym}USDT"] = p
-                        res[f"{sym}/USDT"] = p
-                        res[f"{sym}/USDT:USDT"] = p
+                if isinstance(data, dict) and ("restricted" in str(data).lower() or "forbidden" in str(data).lower() or "access denied" in str(data).lower()):
+                    self._record_exchange_geo_block("mexc", 200, str(data.get("msg", "")))
+                    return {}
+                if isinstance(data, list):
+                    for it in data:
+                        sym = it.get("symbol")
+                        p_val = it.get("price")
+                        if sym and p_val:
+                            p = float(p_val)
+                            res[sym] = p
+                            if sym.endswith("USDT"):
+                                base = sym[:-4]
+                                res[f"{base}/USDT"] = p
+            elif resp.status_code in [403, 451]:
+                self._record_exchange_geo_block("mexc", resp.status_code, "Geo-restriction/Forbidden")
         except Exception:
             pass
         return res
@@ -858,6 +926,49 @@ class CryptoDataLoader:
             pass
         return []
 
+    def _reconcile_public_aggregator_multipliers(self, raw_rates: dict) -> dict:
+        """
+        Public Aggregator Multiplier Mapping:
+        CoinCap and Coinpaprika provide index rates for base coins (e.g. MOG) rather than derivatives (1000000MOG).
+        By resolving through resolve_symbol_aliases and scaling by (target_mult / 1.0), the system correctly
+        reconciles public aggregator failovers across all multiplier tiers (10^4, 10^5, 10^6, 1MBABYDOGE, etc.).
+        """
+        if not raw_rates:
+            return {}
+
+        res = dict(raw_rates)
+        from app.engine.config import strip_contract_multiplier, resolve_symbol_aliases
+
+        candidate_bases = {
+            "MOG", "LADYS", "PEPE", "SHIB", "BONK", "BABYDOGE", "SATS", "AIDOGE",
+            "FLOKI", "CHEEMS", "PEIPEI", "CAT", "RATS", "TOKEN", "BTT", "XEC",
+            "LUNC", "RACA", "SPELL", "VVS", "BTTC", "NEIRO", "MEME", "DOGS", "NOT"
+        }
+
+        for k, p_val in list(raw_rates.items()):
+            if p_val <= 0:
+                continue
+            cand_base, cand_mult = strip_contract_multiplier(k)
+            if cand_base in candidate_bases or cand_mult > 1.0:
+                base_rate = float(p_val) / max(1e-8, float(cand_mult)) if cand_mult > 1.0 else float(p_val)
+                res[cand_base] = base_rate
+                res[f"{cand_base}USDT"] = base_rate
+                res[f"{cand_base}/USDT"] = base_rate
+                res[f"{cand_base}/USDT:USDT"] = base_rate
+
+                for alias in resolve_symbol_aliases(f"{cand_base}/USDT"):
+                    target_base, target_mult = strip_contract_multiplier(alias)
+                    if target_mult > 1.0:
+                        scaled_p = base_rate * (float(target_mult) / 1.0)
+                        res[alias] = scaled_p
+                        clean_a = alias.replace("/", "").replace(":USDT", "").replace("-", "").replace("_", "").strip()
+                        res[clean_a] = scaled_p
+                        if not alias.endswith("USDT") and "/" not in alias:
+                            res[f"{alias}USDT"] = scaled_p
+                            res[f"{alias}/USDT"] = scaled_p
+
+        return res
+
     def _fetch_coincap_tickers(self) -> dict:
         """
         Tier-6.5 Failover: Global decentralized price aggregator (CoinCap API) when all CEX endpoints are geo-fenced.
@@ -887,9 +998,10 @@ class CryptoDataLoader:
                         res[f"{sym}/USDT"] = p
                         res[f"{sym}/USDT:USDT"] = p
                 if res:
+                    res = self._reconcile_public_aggregator_multipliers(res)
                     self._coincap_rates_cache = res
                     self._coincap_rates_ts = now
-                    print(f"[DATA LOADER [TIER-6.5]] Engaged CoinCap Global Rates Aggregator ({len(res)} prices).", flush=True)
+                    print(f"[DATA LOADER [TIER-6.5]] Engaged CoinCap Global Rates Aggregator ({len(res)} prices with multiplier mapping).", flush=True)
             elif resp.status_code == 429:
                 self._coincap_throttled_until = now + 60.0
                 print(f"[DATA LOADER [TIER-6.5]] CoinCap public endpoint rate-limited (HTTP 429). 60s cooldown active.", flush=True)
@@ -901,9 +1013,62 @@ class CryptoDataLoader:
             return res
         return getattr(self, '_coincap_rates_cache', {}).copy()
 
+    def _fetch_coinpaprika_tickers(self) -> dict:
+        """
+        Tier-6.6 Failover: Coinpaprika Global Price Aggregator (2000+ USD pairs).
+        Engaged when CEX endpoints and Tier-6.5 CoinCap are rate-limited or experiencing network drops.
+        """
+        now = time.time()
+        if (now - getattr(self, '_paprika_rates_ts', 0.0)) < 3.0 and getattr(self, '_paprika_rates_cache', None):
+            return self._paprika_rates_cache.copy()
+
+        if now < getattr(self, '_paprika_throttled_until', 0.0):
+            return getattr(self, '_paprika_rates_cache', {}).copy()
+
+        res = {}
+        try:
+            url = "https://api.coinpaprika.com/v1/tickers"
+            resp = self.session.get(url, timeout=3.5)
+            if resp.status_code == 200:
+                data = resp.json()
+                for it in data:
+                    sym = it.get("symbol")
+                    p_usd = it.get("quotes", {}).get("USD", {}).get("price")
+                    if sym and p_usd and float(p_usd) > 0:
+                        p = float(p_usd)
+                        res[f"{sym}USDT"] = p
+                        res[f"{sym}/USDT"] = p
+                        res[f"{sym}/USDT:USDT"] = p
+                if res:
+                    res = self._reconcile_public_aggregator_multipliers(res)
+                    self._paprika_rates_cache = res
+                    self._paprika_rates_ts = now
+                    print(f"[DATA LOADER [TIER-6.6]] Engaged Coinpaprika Global Rates Aggregator ({len(res)} prices with multiplier mapping).", flush=True)
+            elif resp.status_code == 429:
+                self._paprika_throttled_until = now + 60.0
+                return getattr(self, '_paprika_rates_cache', {}).copy()
+        except Exception:
+            pass
+
+        return res or getattr(self, '_paprika_rates_cache', {}).copy()
+
     def fetch_all_tickers(self, max_age_seconds: float = 3.0) -> dict:
         """Fetches real-time price tickers with multi-exchange fallback (Binance -> Bybit -> OKX -> Gate.io -> KuCoin -> CoinCap) and 15s staleness circuit breaker."""
         now = time.time()
+        # Tier-0: Real-Time WebSocket stream (<500ms latency, 0ms HTTP round-trip)
+        if getattr(self, "ws_feed", None) and not getattr(self.ws_feed, "is_mirror_outage", False) and self.ws_feed.is_healthy():
+            ws_ticks = self.ws_feed.get_prices()
+            if ws_ticks and len(ws_ticks) > 10:
+                with self._cache_lock:
+                    self._live_tickers_cache = ws_ticks
+                    self._live_tickers_ts = self.ws_feed.last_update_ts
+                    self._is_price_fresh_15s = True
+                    self._price_freshness_age = max(0.0, now - self._live_tickers_ts)
+                    self._is_global_outage = False
+                    for s in ws_ticks:
+                        self._symbol_price_timestamps[s] = self._live_tickers_ts
+                return ws_ticks
+
         with self._cache_lock:
             if self._live_tickers_cache and (now - getattr(self, '_live_tickers_ts', 0.0)) < max_age_seconds:
                 return self._live_tickers_cache.copy()
@@ -1000,9 +1165,24 @@ class CryptoDataLoader:
                 self._is_price_fresh_15s = True
                 self._price_freshness_age = 0.0
                 self._is_global_outage = False
+                self._rest_outage_start_ts = None
                 for s in kucoin_ticks:
                     self._symbol_price_timestamps[s] = now
             return kucoin_ticks
+
+        # Tier-6 Fallback: MEXC Tickers
+        mexc_ticks = self._fetch_mexc_tickers()
+        if mexc_ticks:
+            with self._cache_lock:
+                self._live_tickers_cache = mexc_ticks
+                self._live_tickers_ts = now
+                self._is_price_fresh_15s = True
+                self._price_freshness_age = 0.0
+                self._is_global_outage = False
+                self._rest_outage_start_ts = None
+                for s in mexc_ticks:
+                    self._symbol_price_timestamps[s] = now
+            return mexc_ticks
 
         # Tier-6.5 Fallback: Global Decentralized Price Aggregator (CoinCap)
         coincap_ticks = self._fetch_coincap_tickers()
@@ -1013,58 +1193,133 @@ class CryptoDataLoader:
                 self._is_price_fresh_15s = True
                 self._price_freshness_age = 0.0
                 self._is_global_outage = False
+                self._rest_outage_start_ts = None
                 for s in coincap_ticks:
                     self._symbol_price_timestamps[s] = now
             return coincap_ticks
 
-        # Circuit Breaker: 15s Price Staleness Recovery
-        cache_age = max(0.0, now - self._live_tickers_ts) if self._live_tickers_ts > 0 else 999.0
-        is_fresh = (cache_age <= self.MAX_LIVE_PRICE_AGE_SECONDS) and bool(self._live_tickers_cache)
+        # Tier-6.6 Failover: Coinpaprika Global Rates Aggregator
+        is_paprika_throttled = (now < getattr(self, '_paprika_throttled_until', 0.0))
+        if not is_paprika_throttled:
+            paprika_ticks = self._fetch_coinpaprika_tickers()
+            if paprika_ticks:
+                with self._cache_lock:
+                    self._live_tickers_cache = paprika_ticks
+                    self._live_tickers_ts = now
+                    self._is_price_fresh_15s = True
+                    self._price_freshness_age = 0.0
+                    self._is_global_outage = False
+                    self._rest_outage_start_ts = None
+                    for s in paprika_ticks:
+                        self._symbol_price_timestamps[s] = now
+                return paprika_ticks
+
+        # Catastrophic Global Multi-Exchange Outage / Multi-Exchange Rate Limiting
+        # Engaged when Tier-1 through Tier-6 CEXs are geo-blocked/unreachable, and public aggregators
+        # are concurrently throttled or unavailable.
+        if getattr(self, '_rest_outage_start_ts', None) is None:
+            self._rest_outage_start_ts = self._live_tickers_ts if self._live_tickers_ts > 0 else now
+
+        outage_age = max(0.0, now - self._rest_outage_start_ts)
+
+        # Step down to persistent SWR disk cache
+        swr_ticks, swr_ts = self._load_tickers_from_swr_disk()
+        served_ticks = swr_ticks or self._live_tickers_cache or getattr(self, '_coincap_rates_cache', {}) or getattr(self, '_paprika_rates_cache', {}) or {}
+        swr_age = max(0.0, now - swr_ts) if swr_ts > 0 else outage_age
+
+        # Check if upstream public aggregators are in an active rate-limiting exponential backoff window
+        is_rate_limit_backoff = (
+            now < getattr(self, '_coincap_throttled_until', 0.0) or
+            now < getattr(self, '_paprika_throttled_until', 0.0) or
+            now < getattr(self, '_bitget_throttled_until', 0.0)
+        )
+        max_grace = getattr(self, 'MAX_SWR_RATE_LIMIT_GRACE_SECONDS', 180.0)
+
+        if is_rate_limit_backoff and served_ticks and (swr_age <= max_grace):
+            # Graceful SWR step-down: during active public aggregator backoff (60s-180s),
+            # warm persistent disk cache prices bridge the backoff window without tripping
+            # global outage flags or interrupting core signal generation.
+            is_fresh = True
+            effective_age = swr_age
+        else:
+            is_fresh = (outage_age <= self.MAX_LIVE_PRICE_AGE_SECONDS) and bool(served_ticks)
+            effective_age = outage_age
+
         with self._cache_lock:
+            self._live_tickers_cache = served_ticks
+            if swr_ts > 0:
+                self._live_tickers_ts = swr_ts
+                for s in served_ticks:
+                    self._symbol_price_timestamps[s] = swr_ts
             self._is_price_fresh_15s = is_fresh
-            self._price_freshness_age = cache_age
+            self._price_freshness_age = effective_age
             if not is_fresh:
                 self._is_global_outage = True
                 self._global_outage_reason = (
-                    f"PRICE_STALENESS_EXCEEDED: Live market ticker freshness ({cache_age:.1f}s) "
-                    f"exceeded {self.MAX_LIVE_PRICE_AGE_SECONDS:.0f}s maximum constraint. "
+                    f"PRICE_STALENESS_EXCEEDED: Live market ticker freshness ({effective_age:.1f}s) "
+                    f"exceeded maximum constraint ({max_grace:.0f}s rate-limit grace / {self.MAX_LIVE_PRICE_AGE_SECONDS:.0f}s baseline). "
                     "All upstream exchange gateways rate-limited or unreachable."
                 )
+            else:
+                self._is_global_outage = False
             return self._live_tickers_cache.copy()
+
+    def _lookup_price_with_multiplier(self, symbol: str, tickers: dict) -> tuple:
+        """
+        Dynamically looks up price for symbol, supporting contract multiplier scaling
+        (e.g., 1000000MOG price derived from MOG spot * 10^6, or vice-versa).
+        """
+        if not symbol or not tickers:
+            return 0.0, None
+
+        if symbol in tickers and float(tickers[symbol]) > 0:
+            return float(tickers[symbol]), symbol
+
+        raw_s = symbol.replace("/", "").replace(":USDT", "").replace("-", "").replace("_", "").strip().upper()
+        if raw_s in tickers and float(tickers[raw_s]) > 0:
+            return float(tickers[raw_s]), raw_s
+        if f"{raw_s}USDT" in tickers and float(tickers[f"{raw_s}USDT"]) > 0:
+            return float(tickers[f"{raw_s}USDT"]), f"{raw_s}USDT"
+        if f"{raw_s}/USDT" in tickers and float(tickers[f"{raw_s}/USDT"]) > 0:
+            return float(tickers[f"{raw_s}/USDT"]), f"{raw_s}/USDT"
+
+        try:
+            from app.engine.config import strip_contract_multiplier, resolve_symbol_aliases
+            target_base, target_mult = strip_contract_multiplier(symbol)
+
+            for alias in resolve_symbol_aliases(symbol):
+                raw_a = alias.replace("/", "").replace(":USDT", "").replace("-", "").replace("_", "").strip().upper()
+                matched_key = None
+                if alias in tickers and float(tickers[alias]) > 0:
+                    matched_key = alias
+                elif raw_a in tickers and float(tickers[raw_a]) > 0:
+                    matched_key = raw_a
+                elif f"{raw_a}USDT" in tickers and float(tickers[f"{raw_a}USDT"]) > 0:
+                    matched_key = f"{raw_a}USDT"
+                elif f"{raw_a}/USDT" in tickers and float(tickers[f"{raw_a}/USDT"]) > 0:
+                    matched_key = f"{raw_a}/USDT"
+
+                if matched_key:
+                    raw_p = float(tickers[matched_key])
+                    cand_base, cand_mult = strip_contract_multiplier(matched_key)
+                    ratio = float(target_mult) / max(1e-8, float(cand_mult))
+                    return raw_p * ratio, matched_key
+        except Exception:
+            pass
+
+        return 0.0, None
 
     def get_live_price_with_freshness(self, symbol: str) -> tuple:
         """Returns tuple of (live_price, is_price_fresh_15s, freshness_age_seconds)."""
         tickers = self.fetch_all_tickers(max_age_seconds=2.0)
-        raw_s = symbol.replace('/', '').replace(':USDT', '')
-        p = float(tickers.get(symbol) or tickers.get(raw_s) or tickers.get(f"{raw_s}USDT") or 0.0)
+        p, matched_key = self._lookup_price_with_multiplier(symbol, tickers)
         return p, getattr(self, "_is_price_fresh_15s", True), getattr(self, "_price_freshness_age", 0.0)
-
-    def fetch_orderbook_imbalance(self, symbol: str, limit: int = 5) -> float:
-        """Calculates fast Orderbook Depth Imbalance ratio from top bid/ask levels.
-        Returns value in range [-1.0, 1.0] (positive = bid heavy / buy wall, negative = ask heavy / sell wall).
-        """
-        try:
-            raw_sym = symbol.replace('/', '').replace(':USDT', '')
-            url = "https://data-api.binance.vision/api/v3/depth"
-            resp = self.session.get(url, params={"symbol": raw_sym, "limit": limit}, timeout=3)
-            if resp.status_code == 200:
-                data = resp.json()
-                bids = [float(b[1]) for b in data.get('bids', [])[:limit]]
-                asks = [float(a[1]) for a in data.get('asks', [])[:limit]]
-                tot_bids = sum(bids)
-                tot_asks = sum(asks)
-                tot = tot_bids + tot_asks
-                if tot > 0:
-                    return round((tot_bids - tot_asks) / tot, 4)
-        except Exception:
-            pass
-        return 0.0
 
     def get_live_price(self, symbol: str) -> float:
         """Fetches real-time price from the pre-cached live ticker map or returns 0.0."""
         tickers = self.fetch_all_tickers(max_age_seconds=3.0)
-        raw_s = symbol.replace('/', '').replace(':USDT', '')
-        return float(tickers.get(symbol) or tickers.get(raw_s) or tickers.get(f"{raw_s}USDT") or 0.0)
+        p, _ = self._lookup_price_with_multiplier(symbol, tickers)
+        return p
 
     def init_resilient_exchange(self):
         """Finds the best working, unrestricted free global exchange in priority (Binance first)."""
@@ -1294,6 +1549,137 @@ class CryptoDataLoader:
         trade_close_str = target_close.strftime('%Y-%m-%d %H:%M UTC')
         return trade_open, target_close, trade_open_str, trade_close_str
 
+    def _load_from_disk_cache(self, symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+        """Loads cached OHLCV candles from disk/memory cache if available."""
+        cache_key = f"{symbol}_{timeframe}"
+        with getattr(self, '_cache_lock', threading.RLock()):
+            if hasattr(self, '_cache') and cache_key in self._cache:
+                return self._cache[cache_key].copy()
+        return None
+
+    @classmethod
+    def _resample_chunk(cls, df: pd.DataFrame, chunk_size: int = 7) -> pd.DataFrame:
+        """Resamples finer candles into coarser institutional bars (e.g. 1D -> 7D/1W)."""
+        if df is None or len(df) < 2:
+            return df
+
+        n = len(df)
+        resampled_rows = []
+        for i in range(0, n, chunk_size):
+            chunk = df.iloc[i:min(i + chunk_size, n)]
+            if len(chunk) < 1:
+                continue
+            tb_sum = float(chunk["taker_buy_vol"].sum()) if "taker_buy_vol" in chunk.columns else float(chunk["volume"].sum() * 0.5)
+            resampled_rows.append({
+                "timestamp": int(chunk["timestamp"].iloc[0]),
+                "datetime": chunk["datetime"].iloc[0] if "datetime" in chunk.columns else pd.to_datetime(int(chunk["timestamp"].iloc[0]), unit="ms", utc=True),
+                "open": float(chunk["open"].iloc[0]),
+                "high": float(chunk["high"].max()),
+                "low": float(chunk["low"].min()),
+                "close": float(chunk["close"].iloc[-1]),
+                "volume": float(chunk["volume"].sum()),
+                "taker_buy_vol": tb_sum
+            })
+
+        df_out = pd.DataFrame(resampled_rows)
+        for col in ["open", "high", "low", "close", "volume", "taker_buy_vol"]:
+            df_out[col] = df_out[col].astype(np.float32)
+        return df_out
+
+    def _dampen_wide_spread_macro_wicks(self, symbol: str, tf: str, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Mitigates predatory wicks and artificial blowout spreads on low-liquidity macro bars (spread > 40%).
+        Clamps outlier extremes relative to the reference price to protect downstream
+        trend extractors and stop-loss calculations.
+        """
+        if df is None or len(df) == 0:
+            return df
+        if tf not in ["1w", "7d", "weekly", "15d", "1M", "30d"]:
+            return df
+
+        try:
+            close_s = df["close"].replace(0, np.nan)
+            spread_ratio = (df["high"] - df["low"]) / close_s
+            max_spread = float(spread_ratio.max()) if not spread_ratio.empty else 0.0
+
+            if max_spread > 0.40:
+                df = df.copy()
+                ref_p = 0.0
+                try:
+                    ref_p = self.get_live_price(symbol)
+                except Exception:
+                    pass
+                if ref_p <= 0.0:
+                    try:
+                        tickers = self.fetch_all_tickers() or {}
+                        ref_p = float(tickers.get(symbol) or tickers.get(symbol.replace("/", "")) or 0.0)
+                    except Exception:
+                        pass
+                if ref_p <= 0.0:
+                    ref_p = float(df["close"].iloc[-1]) if not df.empty else 0.0
+
+                for idx in df.index:
+                    c_open = float(df.at[idx, "open"])
+                    c_close = float(df.at[idx, "close"])
+                    c_high = float(df.at[idx, "high"])
+                    c_low = float(df.at[idx, "low"])
+                    curr_spread = (c_high - c_low) / max(1e-8, c_close)
+
+                    if curr_spread > 0.40:
+                        body_max = max(c_open, c_close)
+                        body_min = min(c_open, c_close)
+
+                        allowed_high = max(body_max * 1.25, ref_p * 1.35 if ref_p > 0 else body_max * 1.25)
+                        new_high = min(c_high, allowed_high)
+                        new_high = max(new_high, body_max)
+
+                        allowed_low = min(body_min * 0.75, ref_p * 0.65 if ref_p > 0 else body_min * 0.75)
+                        new_low = max(c_low, allowed_low)
+                        new_low = min(new_low, body_min)
+
+                        df.at[idx, "high"] = new_high
+                        df.at[idx, "low"] = new_low
+
+                df.attrs["wide_spread_dampened"] = True
+        except Exception:
+            pass
+
+        return df
+
+    def _backfill_pre_listing_candles(self, symbol: str, timeframe: str, all_ohlcv: list, min_required: int = 15) -> list:
+        """
+        Backfills pre-listing historical candles from secondary gateways (Bybit, OKX, Gate.io, KuCoin)
+        when a newly listed token on Binance has sparse candles (len < min_required).
+        Stitches pre-listing historical prefix before the primary listing timestamp.
+        """
+        if not all_ohlcv or len(all_ohlcv) >= min_required:
+            return all_ohlcv
+
+        first_ts = min(c[0] for c in all_ohlcv)
+        sec_batches = []
+        for fetch_fn in [self._fetch_bybit_klines, self._fetch_okx_klines, self._fetch_gateio_klines, self._fetch_kucoin_klines]:
+            try:
+                batch = fetch_fn(symbol, timeframe, limit=200)
+                if batch and len(batch) > 0:
+                    pre_listing = [c for c in batch if c[0] < first_ts]
+                    if pre_listing:
+                        sec_batches = pre_listing
+                        break
+            except Exception:
+                pass
+
+        if sec_batches:
+            combined = sec_batches + all_ohlcv
+            seen = set()
+            deduped = []
+            for c in sorted(combined, key=lambda x: x[0]):
+                if c[0] not in seen:
+                    seen.add(c[0])
+                    deduped.append(c)
+            return deduped
+
+        return all_ohlcv
+
     def fetch_ohlcv_extended(self, symbol: str, timeframe: str, total_candles: int = 2000) -> pd.DataFrame:
         cache_key = f"{symbol}_{timeframe}_{total_candles}"
         now_ts = time.time()
@@ -1422,6 +1808,11 @@ class CryptoDataLoader:
             if batch:
                 all_ohlcv.extend(batch)
 
+        # Pre-listing cross-exchange backfill when newly listed asset has sparse candles
+        min_candles_req = 30 if timeframe in ['1d', '1w', '7d', 'weekly', '15d', '1M', '30d'] else 15
+        if 0 < len(all_ohlcv) < min_candles_req:
+            all_ohlcv = self._backfill_pre_listing_candles(symbol, timeframe, all_ohlcv, min_required=min_candles_req)
+
         # SWR Disk / Memory Cache Fallback with 15s price staleness sync
         if not all_ohlcv:
             with self._cache_lock:
@@ -1437,6 +1828,87 @@ class CryptoDataLoader:
                         cached_df.at[cached_df.index[-1], 'high'] = max(float(cached_df['high'].iloc[-1]), live_p)
                         cached_df.at[cached_df.index[-1], 'low'] = min(float(cached_df['low'].iloc[-1]), live_p)
                     return cached_df
+
+        # Weekly/Macro synthesis from 1D candles if 1W is empty
+        if not all_ohlcv and timeframe in ['1w', '7d', 'weekly']:
+            try:
+                df_1d = self.fetch_ohlcv_extended(symbol, '1d', total_candles=min(total_candles * 7, 1000))
+                if df_1d is not None and len(df_1d) >= 2:
+                    c_size = 7 if len(df_1d) >= 7 else max(2, len(df_1d) // 2)
+                    df_res = self._resample_chunk(df_1d, chunk_size=c_size)
+                    if df_res is not None and len(df_res) >= 2:
+                        is_synth = (c_size < 7) or (len(df_1d) < 14) or bool(df_1d.attrs.get("is_synthetic", False))
+                        df_res.attrs["is_synthetic"] = True
+                        df_res.attrs["native_candle_count"] = 0 if is_synth else len(df_res)
+                        df_res.attrs["resampled_from"] = "1d"
+                        df_res = self._dampen_wide_spread_macro_wicks(symbol, timeframe, df_res)
+                        with self._cache_lock:
+                            self._cache[cache_key] = df_res
+                            if not hasattr(self, '_cache_ts'):
+                                self._cache_ts = {}
+                            self._cache_ts[cache_key] = now_ts
+                        return df_res.copy()
+            except Exception:
+                pass
+
+        # Macro CoinCap/SWR baseline fallback for 1w, 15d, 1M
+        if not all_ohlcv and timeframe in ['1w', '7d', 'weekly', '15d', '1M', '30d']:
+            ref_price = 0.0
+            try:
+                ref_price = self.get_live_price(symbol)
+            except Exception:
+                pass
+            if ref_price <= 0.0:
+                try:
+                    tickers = self.fetch_all_tickers() or {}
+                    p_val, _ = self._lookup_price_with_multiplier(symbol, tickers)
+                    ref_price = p_val
+                except Exception:
+                    pass
+            if ref_price <= 0.0:
+                coincap_ticks = getattr(self, '_coincap_rates_cache', {}) or {}
+                if not coincap_ticks and not (now_ts < getattr(self, '_coincap_throttled_until', 0.0)):
+                    coincap_ticks = self._fetch_coincap_tickers()
+                p_val, _ = self._lookup_price_with_multiplier(symbol, coincap_ticks)
+                ref_price = p_val
+            if ref_price <= 0.0:
+                paprika_ticks = getattr(self, '_paprika_rates_cache', {}) or {}
+                if not paprika_ticks and not (now_ts < getattr(self, '_paprika_throttled_until', 0.0)):
+                    paprika_ticks = self._fetch_coinpaprika_tickers()
+                p_val, _ = self._lookup_price_with_multiplier(symbol, paprika_ticks)
+                ref_price = p_val
+            if ref_price > 0.0:
+                now_ms = int(now_ts * 1000)
+                step_ms = tf_ms_map.get(timeframe, 7 * 86400 * 1000)
+                rows = [
+                    {
+                        "timestamp": now_ms - step_ms,
+                        "open": float(ref_price * 0.999),
+                        "high": float(ref_price * 1.002),
+                        "low": float(ref_price * 0.998),
+                        "close": float(ref_price),
+                        "volume": 1000.0,
+                        "taker_buy_vol": 500.0,
+                    },
+                    {
+                        "timestamp": now_ms,
+                        "open": float(ref_price),
+                        "high": float(ref_price * 1.001),
+                        "low": float(ref_price * 0.999),
+                        "close": float(ref_price),
+                        "volume": 500.0,
+                        "taker_buy_vol": 250.0,
+                    }
+                ]
+                df_synth = pd.DataFrame(rows)
+                df_synth["datetime"] = pd.to_datetime(df_synth["timestamp"], unit="ms", utc=True)
+                for c in ["open", "high", "low", "close", "volume", "taker_buy_vol"]:
+                    df_synth[c] = df_synth[c].astype(np.float32)
+                df_synth.attrs["is_synthetic"] = True
+                df_synth.attrs["exchange_source"] = "coincap_swr_fallback"
+                df_synth.attrs["native_candle_count"] = 0
+                df_synth.attrs["reference_price"] = float(ref_price)
+                return df_synth
 
         if not all_ohlcv:
             raise ValueError(f"No OHLCV records returned for {symbol} on {timeframe}")
@@ -1456,6 +1928,9 @@ class CryptoDataLoader:
         if len(df) > total_candles:
             df = df.iloc[-total_candles:].reset_index(drop=True)
 
+        if timeframe in ['1w', '7d', 'weekly', '15d', '1M', '30d']:
+            df = self._dampen_wide_spread_macro_wicks(symbol, timeframe, df)
+
         with self._cache_lock:
             self._cache[cache_key] = df
             if not hasattr(self, '_cache_ts'):
@@ -1473,9 +1948,30 @@ class CryptoDataLoader:
             if not raw_sym.endswith('USDT'):
                 raw_sym += 'USDT'
 
-            if hasattr(self, '_funding_cache') and raw_sym in self._funding_cache:
-                fr_val = self._funding_cache[raw_sym]
-            else:
+            fr_val = None
+            if hasattr(self, '_funding_cache') and self._funding_cache:
+                if raw_sym in self._funding_cache:
+                    fr_val = self._funding_cache[raw_sym]
+                elif symbol in self._funding_cache:
+                    fr_val = self._funding_cache[symbol]
+                else:
+                    try:
+                        from app.engine.config import resolve_symbol_aliases
+                        for alias in resolve_symbol_aliases(symbol):
+                            raw_a = alias.replace('/', '').replace(':USDT', '')
+                            if alias in self._funding_cache:
+                                fr_val = self._funding_cache[alias]
+                                break
+                            if raw_a in self._funding_cache:
+                                fr_val = self._funding_cache[raw_a]
+                                break
+                            if f"{raw_a}USDT" in self._funding_cache:
+                                fr_val = self._funding_cache[f"{raw_a}USDT"]
+                                break
+                    except Exception:
+                        pass
+
+            if fr_val is None:
                 fr_val = 0.0001
 
             regime = "🔥 SHORT SQUEEZE" if fr_val <= -0.0002 else ("❄️ LONG SQUEEZE" if fr_val >= 0.0005 else "⚪ NEUTRAL")
@@ -1530,10 +2026,18 @@ class CryptoDataLoader:
         Fetches live top-5 orderbook depth levels and computes bid-ask liquidity imbalance ratio:
         imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume)
         Range: [-1.0 (Heavy Sell Wall), +1.0 (Heavy Buy Wall)]
+        Supports symbol aliases for tokens with contract multipliers.
         """
+        candidates = [symbol]
         try:
-            if self.is_binance_vision_direct or self.active_exchange_id == 'binance':
-                raw_sym = symbol.replace('/', '').replace(':USDT', '')
+            from app.engine.config import resolve_symbol_aliases
+            candidates.extend(resolve_symbol_aliases(symbol))
+        except Exception:
+            pass
+
+        for sym_cand in candidates:
+            try:
+                raw_sym = sym_cand.replace('/', '').replace(':USDT', '')
                 url = f"https://data-api.binance.vision/api/v3/depth?symbol={raw_sym}&limit={limit}"
                 resp = self.session.get(url, timeout=2)
                 if resp.status_code == 200:
@@ -1545,16 +2049,59 @@ class CryptoDataLoader:
                     total_vol = bid_vol + ask_vol
                     if total_vol > 0:
                         return (bid_vol - ask_vol) / total_vol
-            elif self.exchange:
-                ob = self.exchange.fetch_order_book(symbol, limit=limit)
-                bid_vol = sum(b[1] for b in ob.get('bids', []))
-                ask_vol = sum(a[1] for a in ob.get('asks', []))
-                total_vol = bid_vol + ask_vol
-                if total_vol > 0:
-                    return (bid_vol - ask_vol) / total_vol
+                elif self.exchange and not (self.is_binance_vision_direct or self.active_exchange_id == 'binance'):
+                    ob = self.exchange.fetch_order_book(sym_cand, limit=limit)
+                    bid_vol = sum(b[1] for b in ob.get('bids', []))
+                    ask_vol = sum(a[1] for a in ob.get('asks', []))
+                    total_vol = bid_vol + ask_vol
+                    if total_vol > 0:
+                        return (bid_vol - ask_vol) / total_vol
+            except Exception:
+                continue
+
+        # Fallback to conservative taker-buy volume estimate when microstructure feeds are offline
+        try:
+            cache_k = f"{symbol}_15m_2000"
+            cached_df = self._cache.get(cache_k)
+            if cached_df is not None and not cached_df.empty and "taker_buy_vol" in cached_df.columns and "volume" in cached_df.columns:
+                tb_sum = float(cached_df["taker_buy_vol"].iloc[-5:].sum())
+                v_sum = float(cached_df["volume"].iloc[-5:].sum())
+                if v_sum > 0:
+                    tb_ratio = float(np.clip(tb_sum / v_sum, 0.05, 0.95))
+                    return float(np.clip((tb_ratio - 0.50) * 2.0, -1.0, 1.0))
         except Exception:
             pass
+
         return 0.0
+
+    def fetch_cvd_metrics(self, symbol: str) -> dict:
+        """
+        Fetches Cumulative Volume Delta (CVD) inflow & divergence metrics for symbol.
+        In local test environments without live WebSockets or Redis:
+        Falls back to conservative taker-buy volume estimates from the most recent closed candle.
+        """
+        tb_ratio = 0.50
+        try:
+            cache_k = f"{symbol}_15m_2000"
+            cached_df = self._cache.get(cache_k)
+            if cached_df is not None and not cached_df.empty and "taker_buy_vol" in cached_df.columns and "volume" in cached_df.columns:
+                tb_sum = float(cached_df["taker_buy_vol"].iloc[-5:].sum())
+                v_sum = float(cached_df["volume"].iloc[-5:].sum())
+                if v_sum > 0:
+                    tb_ratio = float(np.clip(tb_sum / v_sum, 0.05, 0.95))
+        except Exception:
+            pass
+
+        cvd_surge = round(float(np.clip(2.0 * tb_ratio - 1.0, -1.0, 1.0)), 4)
+        is_live = bool(getattr(self, "ws_feed", None) and self.ws_feed.is_healthy())
+        return {
+            "symbol": symbol,
+            "cvd_surge": cvd_surge,
+            "cvd_surge_5": cvd_surge,
+            "taker_buy_ratio": round(tb_ratio, 4),
+            "source": "live_websocket" if is_live else "conservative_taker_buy_estimate",
+            "is_synthetic": not is_live
+        }
 
     def fetch_active_binance_symbols(self) -> set:
         """
@@ -2548,6 +3095,9 @@ class TripleBarrierLabeler:
             data['Target_Primary'] = np.nan
             data['Target_Meta'] = np.nan
             data['Target_Return'] = np.nan
+            data['Target_Close_Return'] = np.nan
+            data['Target_MFE'] = np.nan
+            data['Target_MAE'] = np.nan
             data['Excursion_Score'] = np.nan
             return data
 
@@ -2640,7 +3190,7 @@ class TripleBarrierLabeler:
 
         data['Target_Primary'] = primary_direction
         data['Target_Meta'] = meta_label
-        data['Target_Return'] = target_mfe  # Train price regressor on Peak Favorable Excursion (MFE)
+        data['Target_Return'] = exp_ret.astype(np.float32)  # Train price regressor strictly on future candle close return (not on wicks/MFE)
         data['Target_Close_Return'] = exp_ret.astype(np.float32)
         data['Target_MFE'] = target_mfe
         data['Target_MAE'] = target_mae
@@ -3567,7 +4117,12 @@ class PaperTradingLedger:
                     exit_reason = f"STAGNATION_SCRATCH ({duration_str} - zero momentum)"
                 else:
                     exit_p = curr_p
-                    exit_reason = f"HORIZON_EXPIRY ({duration_str})"
+                    if pos.get("tp2_hit"):
+                        exit_reason = f"TAKE_PROFIT_2_RUNNER_EXPIRY ({duration_str})"
+                    elif pos.get("tp1_hit"):
+                        exit_reason = f"TAKE_PROFIT_1_RUNNER_EXPIRY ({duration_str})"
+                    else:
+                        exit_reason = f"HORIZON_EXPIRY ({duration_str})"
 
                 rem_gain = rem_size * ((exit_p - entry_p)/entry_p if is_long else (entry_p - exit_p)/entry_p)
                 rem_nominal_exit = max(0.0, rem_size + rem_gain)
@@ -3881,6 +4436,45 @@ class SignalAuditTracker:
             print(f"[V16 ⚠️] Could not initialize full V16 suite in SignalAuditTracker: {v16_init_err}")
             self.has_v16 = False
         self._lock = threading.RLock()
+        self._last_csv_mtime = os.path.getmtime(self.csv_path) if os.path.exists(self.csv_path) else 0.0
+
+    def reconcile_disk_records(self):
+        """
+        Two-way disk reconciliation between PaperTradingBot/SignalService and SignalAuditTracker.
+        Detects external status resolutions written to trader_signals_tracker.csv by external services
+        and merges them into in-memory records without reverting or clobbering completed trades.
+        """
+        if not os.path.exists(self.csv_path):
+            return
+        try:
+            curr_mtime = os.path.getmtime(self.csv_path)
+            if curr_mtime <= getattr(self, '_last_csv_mtime', 0.0):
+                return
+            disk_records = self.load_records()
+            if not disk_records:
+                return
+
+            disk_map = {str(r.get('signal_id')): r for r in disk_records if r.get('signal_id')}
+            in_mem_map = {str(r.get('signal_id')): r for r in self.records if r.get('signal_id')}
+
+            terminal_statuses = {
+                "WON_TP1", "WON_TP2", "WON_TP3", "WON_TP1_BE", "WON_TP2_TRAIL",
+                "LOST_SL", "WON_TIER0_BE", "BREAKEVEN_GUARD", "STOP_LOSS_BREAKEVEN",
+                "TIER0_GUARD", "EXPIRED_BREAKEVEN", "BREAKEVEN_EXP", "WON_EXP_PROFIT", "LOST_EXP", "CLOSED"
+            }
+            for sid, d_rec in disk_map.items():
+                if sid in in_mem_map:
+                    mem_rec = in_mem_map[sid]
+                    d_status = str(d_rec.get('status', '')).upper()
+                    m_status = str(mem_rec.get('status', '')).upper()
+                    if d_status in terminal_statuses or (m_status not in terminal_statuses and d_status not in ["", "PENDING_EVALUATION"]):
+                        mem_rec.update(d_rec)
+                else:
+                    self.records.append(d_rec)
+
+            self._last_csv_mtime = curr_mtime
+        except Exception:
+            pass
 
     def load_records(self) -> list:
         if os.path.exists(self.csv_path):
@@ -3903,6 +4497,9 @@ class SignalAuditTracker:
                 summary_data = self.build_kpi_summary()
                 df_sum = pd.DataFrame([summary_data]).fillna("")
                 df_sum.to_csv(self.summary_csv_path, index=False)
+
+                if os.path.exists(self.csv_path):
+                    self._last_csv_mtime = os.path.getmtime(self.csv_path)
 
                 # Sync into MySQL / Database automatically
                 try:
@@ -4672,6 +5269,7 @@ class SignalAuditTracker:
             return self._evaluate_signals_internal(live_prices, live_highs, live_lows)
 
     def _evaluate_signals_internal(self, live_prices: dict, live_highs: dict = None, live_lows: dict = None):
+        self.reconcile_disk_records()
         if not self.records:
             return
 
@@ -4739,9 +5337,17 @@ class SignalAuditTracker:
                     exit_p = float(pt_match.get("exit_price") or r.get("entry_price") or 0.0)
                     ret_pct = float(pt_match.get("return_pct") or 0.0)
                     closed_at = pt_match.get("closed_at_utc") or pt_match.get("closed_at") or now_str
+                    pt_tp2 = bool(pt_match.get("tp2_hit", False))
+                    pt_tp1 = bool(pt_match.get("tp1_hit", False)) or pt_tp2
 
-                    if "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
-                        r['status'] = "WON_TIER0_BE"
+                    if "TAKE_PROFIT_2_RUNNER_EXPIRY" in exit_reason or (("HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason) and pt_tp2):
+                        r['status'] = "WON_TP2_EXP"
+                        r['outcome_label'] = f"🟢 WON (TP2 + EXP {ret_pct:+.2f}%)"
+                    elif "TAKE_PROFIT_1_RUNNER_EXPIRY" in exit_reason or (("HORIZON_EXPIRY" in exit_reason or "EXPIRY" in exit_reason) and pt_tp1):
+                        r['status'] = "WON_TP1_EXP"
+                        r['outcome_label'] = f"🟢 WON (TP1 + EXP {ret_pct:+.2f}%)"
+                    elif "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
+                        r['status'] = "BREAKEVEN_GUARD"
                         r['outcome_label'] = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_pct:+.2f}%)"
                     elif "STOP_LOSS" in exit_reason:
                         r['status'] = "LOST_SL"
@@ -5121,7 +5727,7 @@ class SignalAuditTracker:
                     elif is_tier0_locked:
                         # Tier-0 Protected Breakeven Stop hit (saved trade from full loss)
                         ret_be = ((sl_p - entry_p) / safe_denom) * 100.0 if is_long else ((entry_p - sl_p) / safe_denom) * 100.0
-                        r['status'] = "WON_TIER0_BE"
+                        r['status'] = "BREAKEVEN_GUARD"
                         r['exit_price'] = format_precision_price(sl_p)
                         r['realized_return_pct'] = f"{ret_be:+.2f}%"
                         r['outcome_label'] = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
@@ -5161,7 +5767,7 @@ class SignalAuditTracker:
                     elif hit_sl_during_interval and is_be_locked:
                         if is_tier0_locked:
                             ret_be = ((sl_p - entry_p) / safe_denom) * 100.0 if is_long else ((entry_p - sl_p) / safe_denom) * 100.0
-                            r['status'] = "WON_TIER0_BE"
+                            r['status'] = "BREAKEVEN_GUARD"
                             r['exit_price'] = format_precision_price(sl_p)
                             r['realized_return_pct'] = f"{ret_be:+.2f}%"
                             r['outcome_label'] = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
@@ -5189,7 +5795,7 @@ class SignalAuditTracker:
                             r['outcome_label'] = f"🟢 WON (TP1 + EXP {blended_ret:+.2f}%)"
                             resolved_ret = blended_ret
                         elif is_tier0_locked:
-                            r['status'] = "WON_TIER0_BE"
+                            r['status'] = "BREAKEVEN_GUARD"
                             r['exit_price'] = format_precision_price(curr_p)
                             r['realized_return_pct'] = f"{ret_current:+.2f}%"
                             r['outcome_label'] = f"🛡️ EXPIRED (TIER-0 BE {ret_current:+.2f}%)"
@@ -5834,7 +6440,7 @@ class ActiveInstitutionalSignalManager:
                         s['outcome_label'] = "🏆 WON (TP1 + BE)"
                         event_type = "BE_HIT"
                     elif is_tier0_locked:
-                        s['status'] = "WON_TIER0_BE"
+                        s['status'] = "BREAKEVEN_GUARD"
                         ret_be = ((sl_p - entry_p) / safe_denom) * 100.0 if is_long else ((entry_p - sl_p) / safe_denom) * 100.0
                         s['outcome_label'] = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
                         event_type = "TIER0_BE_HIT"
@@ -6068,23 +6674,35 @@ class DominantHorizonArbiter:
         long_sigs = valid_long_sigs if valid_long_sigs else [s for s in coin_signals if str(s.get('direction', 'LONG')).upper() in ['LONG', 'BULLISH']]
         short_sigs = valid_short_sigs if valid_short_sigs else [s for s in coin_signals if str(s.get('direction', 'LONG')).upper() in ['SHORT', 'BEARISH']]
 
-        # Select favored directional group by count and cumulative conviction of executable signals
-        long_score = sum(_safe_float(s.get('conviction', 60.0)) * _safe_float(s.get('meta_win_prob', 0.50)) for s in valid_long_sigs)
-        short_score = sum(_safe_float(s.get('conviction', 60.0)) * _safe_float(s.get('meta_win_prob', 0.50)) for s in valid_short_sigs)
+        is_all_neutral = all(
+            str(s.get('direction', '')).upper() in ['CONSOLIDATION', 'NEUTRAL', 'NO_TRADE'] or
+            "CONSOLIDATION" in str(s.get('decision', '')) or
+            "NO_TRADE" in str(s.get('decision', ''))
+            for s in coin_signals
+        )
 
-        if long_score > short_score:
-            favored_group = long_sigs
-            opposing_group = short_sigs
-            favored_dir = "LONG"
-        elif short_score > long_score:
-            favored_group = short_sigs
-            opposing_group = long_sigs
-            favored_dir = "SHORT"
+        if is_all_neutral:
+            favored_group = coin_signals
+            opposing_group = []
+            favored_dir = "NEUTRAL"
         else:
-            # Tie breaker: if no valid setups, check raw count
-            favored_group = long_sigs if len(long_sigs) >= len(short_sigs) else short_sigs
-            opposing_group = short_sigs if favored_group is long_sigs else long_sigs
-            favored_dir = "LONG" if favored_group is long_sigs else "SHORT"
+            # Select favored directional group by count and cumulative conviction of executable signals
+            long_score = sum(_safe_float(s.get('conviction', 60.0)) * _safe_float(s.get('meta_win_prob', 0.50)) for s in valid_long_sigs)
+            short_score = sum(_safe_float(s.get('conviction', 60.0)) * _safe_float(s.get('meta_win_prob', 0.50)) for s in valid_short_sigs)
+
+            if long_score > short_score:
+                favored_group = long_sigs
+                opposing_group = short_sigs
+                favored_dir = "LONG"
+            elif short_score > long_score:
+                favored_group = short_sigs
+                opposing_group = long_sigs
+                favored_dir = "SHORT"
+            else:
+                # Tie breaker: if no valid setups, check raw count
+                favored_group = long_sigs if len(long_sigs) >= len(short_sigs) else short_sigs
+                opposing_group = short_sigs if favored_group is long_sigs else long_sigs
+                favored_dir = "LONG" if favored_group is long_sigs else "SHORT"
 
         total_eval = len(coin_signals)
         favored_count = len(favored_group)
@@ -6150,6 +6768,7 @@ class DominantHorizonArbiter:
         for s in coin_signals:
             ht = s.get('horizon_tag') or resolve_horizon_tag(s.get('horizon_key', 'scalp'))
             s_dir = str(s.get('direction', 'LONG')).upper()
+            is_s_neutral = s_dir in ['CONSOLIDATION', 'NEUTRAL', 'NO_TRADE'] or "CONSOLIDATION" in str(s.get('decision', ''))
             is_s_long = s_dir in ['LONG', 'BULLISH']
             is_fav_long = favored_dir in ['LONG', 'BULLISH']
             h_idx = cls.HORIZON_ORDER.index(ht) if ht in cls.HORIZON_ORDER else 0
@@ -6158,7 +6777,15 @@ class DominantHorizonArbiter:
             prob = _safe_float(s.get('meta_win_prob', 0.70), 0.70)
             conv = _safe_float(s.get('conviction', 60.0), 60.0)
 
-            if is_s_long == is_fav_long:
+            if is_all_neutral or (favored_dir == "NEUTRAL" and is_s_neutral):
+                status = "IN_FAVOR"
+                status_badge = "🟡 CONSOLIDATION"
+                tailwind_horizons.append(ht)
+            elif is_s_neutral:
+                status = "IN_FAVOR"
+                status_badge = "🟡 CONSOLIDATION"
+                tailwind_horizons.append(ht)
+            elif is_s_long == is_fav_long:
                 status = "IN_FAVOR"
                 status_badge = "🟢 IN FAVOR"
                 tailwind_horizons.append(ht)
@@ -6169,7 +6796,7 @@ class DominantHorizonArbiter:
 
             horizon_flow.append({
                 "horizon": ht,
-                "direction": "LONG" if is_s_long else "SHORT",
+                "direction": "CONSOLIDATION" if is_s_neutral else ("LONG" if is_s_long else "SHORT"),
                 "status": status,
                 "status_badge": status_badge,
                 "probability": round(prob, 2),
@@ -6184,7 +6811,12 @@ class DominantHorizonArbiter:
         fav_score = round((lower_ratio * 60.0) + (alignment_pct * 0.40), 1)
 
         # Determine dynamic favorability state and action directive
-        if lower_ratio >= 0.65:
+        if is_all_neutral:
+            fav_status = "MOMENTUM_COILING"
+            fav_badge = "🟡 MOMENTUM COILING"
+            rec = "STAND_ASIDE"
+            directive = "Stand aside until directional breakout occurs. All horizons consolidating in equilibrium."
+        elif lower_ratio >= 0.65:
             fav_status = "CONFIRMED_IN_FAVOR"
             fav_badge = "🟢 CONFIRMED IN FAVOR"
             rec = "HOLD_FOR_RUNNER"
@@ -6515,163 +7147,31 @@ class SignalMetaClassifier:
         except Exception:
             return None, [], 0
 
-    def predict_win_probability(self, sig: dict, symbol: str = None) -> float:
+    def predict_win_probability(self, sig: Any, symbol: Any = None) -> float:
         """Predicts calibrated win probability (0.0 to 1.0) using Bayesian shrinkage between per-coin and global meta-labeler."""
-        sym = symbol or sig.get('symbol', '')
-        active_model = self.model
-        active_features = self.feature_cols
-
-        # 1. Check for dedicated per-coin model (>= 5 resolved samples)
-        coin_m, coin_f, coin_sample_sz = self._get_per_coin_model(sym, min_sample_size=5)
-
-        # Auto-check if global model was updated on disk
-        if os.path.exists(self.model_path):
-            try:
-                if os.path.getmtime(self.model_path) != self._last_mtime:
-                    self.load_model()
-                    active_model = self.model
-                    active_features = self.feature_cols
-            except Exception:
-                pass
-
-        conv = float(sig.get('conviction', 70.0))
-        is_a_plus = 1.0 if "A+" in str(sig.get('grade', '')) else 0.0
-        exp_ret = abs(float(sig.get('exp_return', 0.0))) * 100.0
-        h_key = str(sig.get('horizon_key', 'scalp')).lower()
-        direction_str = str(sig.get('direction', 'LONG')).upper()
-        decision_str = str(sig.get('decision', 'EXECUTE')).upper()
-
-        curr_p = float(sig.get('entry_price', 0.0) or 0.0)
-        tp1_p = float(sig.get('tp1_price', 0.0) or 0.0)
-        sl_p = float(sig.get('sl_original') or sig.get('initial_sl_price') or sig.get('sl_price', 0.0) or 0.0)
-
-        if curr_p > 0 and sl_p > 0 and tp1_p > 0 and tp1_p != curr_p and sl_p != curr_p:
-            tp_pct = abs(tp1_p - curr_p) / curr_p * 100.0
-            sl_pct = abs(curr_p - sl_p) / curr_p * 100.0
-        else:
-            tp_pct = max(0.5, abs(exp_ret))
-            sl_pct = max(0.3, abs(exp_ret) / 2.0)
-
-        rr_ratio = round(tp_pct / max(0.01, sl_pct), 2)
-
-        if not active_model or not active_features:
-            from app.engine.config import PROBABILITY_CALIBRATION_MODE
-            if PROBABILITY_CALIBRATION_MODE == "CHRONOLOGICAL_CALIBRATED":
-                return 0.367
-            base_p = (conv / 100.0) * (0.88 if is_a_plus else 0.76)
-            return round(min(0.95, max(0.40, base_p)), 3)
+        if isinstance(sig, str) and isinstance(symbol, dict):
+            sig, symbol = symbol, sig
+        elif isinstance(sig, str) and symbol is None:
+            sig, symbol = {}, sig
+        if not isinstance(sig, dict):
+            sig = {}
+        sym = str(symbol or sig.get('symbol', ''))
 
         try:
-            is_bottom_reversal = 1.0 if "BOTTOM-REVERSAL" in decision_str else 0.0
-            is_top_reversal = 1.0 if "TOP-REVERSAL" in decision_str else 0.0
-            is_reversal = 1.0 if (is_bottom_reversal or is_top_reversal) else 0.0
-
-            sym_str = str(symbol or sig.get('symbol', '')).upper()
-            is_meme = 1.0 if any(m in sym_str for m in ["SHIB", "PEPE", "BONK", "DOGE", "FLOKI", "MEME", "WIF", "BOME"]) else 0.0
-
-            rank_raw = str(sig.get('rank', sig.get('priority', 1))).replace('#', '').strip()
-            try:
-                rank_val = float(rank_raw)
-            except Exception:
-                rank_val = 1.0
-
-            row = {
-                'conviction_pct': conv,
-                'expected_return_pct': exp_ret,
-                'risk_reward_ratio': rr_ratio,
-                'is_a_plus': is_a_plus,
-                'is_scalp': 1.0 if any(k in h_key for k in ["scalp", "15m", "30m"]) else 0.0,
-                'is_swing': 1.0 if any(k in h_key for k in ["swing", "intraday", "1h", "4h"]) else 0.0,
-                'is_macro': 1.0 if any(k in h_key for k in ["macro", "24h", "1d", "2d", "3d", "4d", "7d", "15d", "30d", "week", "month", "48h", "72h"]) else 0.0,
-                'is_long': 1.0 if direction_str in ["LONG", "BULLISH"] else 0.0,
-                'is_dip_buy': 1.0 if "DIP-BUY" in decision_str else 0.0,
-                'is_rally_sell': 1.0 if "RALLY-SELL" in decision_str else 0.0,
-                'is_bottom_reversal': is_bottom_reversal,
-                'is_top_reversal': is_top_reversal,
-                'is_reversal': is_reversal,
-                'is_liq_sweep': 1.0 if "LIQUIDITY-SWEEP" in decision_str else 0.0,
-                'is_squeeze': 1.0 if "SHORT SQUEEZE" in decision_str else 0.0,
-                'is_order_block': 1.0 if "ORDER-BLOCK" in decision_str else 0.0,
-                'is_breaker_block': 1.0 if "BREAKER-BLOCK" in decision_str else 0.0,
-                'is_blowoff_top': 1.0 if "BLOW-OFF TOP" in decision_str else 0.0,
-                'is_hype_surge': 1.0 if "HYPE PUMP" in decision_str else 0.0,
-                'is_paper_exec': 1.0 if any(k in str(sig.get('paper_trading_status', '')).upper() for k in ["EXECUTED", "ACTIVE"]) else 0.0,
-                'is_meme': is_meme,
-                'rank': rank_val,
-                'tp_pct': tp_pct,
-                'sl_pct': sl_pct,
-                'tp_sl_ratio': rr_ratio
-            }
-            # 1. Global Market Prior Prediction (Trained on 4,200+ multi-regime samples)
-            row_global = {c: row.get(c, 0.0) for c in (self.feature_cols or [])}
-            def _extract_safe_prob(m, df_f):
-                if m is None:
-                    return 0.50
-                try:
-                    p_out = m.predict_proba(df_f)
-                    if hasattr(m, "classes_") and len(m.classes_) > 0:
-                        cls_list = list(m.classes_)
-                        if 1 in cls_list:
-                            idx = cls_list.index(1)
-                            return float(p_out[0, idx])
-                        elif len(cls_list) == 1:
-                            return 1.0 if cls_list[0] == 1 else 0.0
-                        else:
-                            return float(p_out[0, -1])
-                    return float(p_out[0, 1] if p_out.shape[1] > 1 else p_out[0, 0])
-                except Exception:
-                    return 0.50
-
-            prob_global = _extract_safe_prob(self.model, df_feat_global)
-
-            # 2. Dedicated Per-Coin Model Blend (Activates at N >= 5 samples with Empirical Bayes Shrinkage)
-            if coin_m is not None and coin_f and coin_sample_sz >= 5:
-                row_coin = {c: row.get(c, 0.0) for c in coin_f}
-                df_feat_coin = pd.DataFrame([row_coin])[coin_f]
-                prob_coin = _extract_safe_prob(coin_m, df_feat_coin)
-                # Empirical Bayes shrinkage: alpha = N / (N + 15.0), bounded [0.20, 0.85]
-                alpha = min(0.85, max(0.20, coin_sample_sz / (coin_sample_sz + 15.0)))
-                prob = (alpha * prob_coin) + ((1.0 - alpha) * prob_global)
-            else:
-                prob = prob_global
-
-            # Prior Probability Shift Adjustment (Saerens et al., 2002)
-            # Re-centers posterior probabilities from the imbalanced ~21.8% baseline
-            # to a balanced 50% decision boundary: P < 0.48 = Filter, P >= 0.60 = Strong, P >= 0.70 = Elite.
-            from app.engine.config import PROBABILITY_CALIBRATION_MODE
-            if PROBABILITY_CALIBRATION_MODE != "CHRONOLOGICAL_CALIBRATED":
-                baseline_win_rate = float(self.bundle.get('baseline_win_rate', 0.218) if self.bundle else 0.218)
-                pi1 = max(0.05, min(0.50, baseline_win_rate))
-                pi0 = 1.0 - pi1
-                prob = (prob / pi1) / max(1e-6, ((prob / pi1) + ((1.0 - prob) / pi0)))
-
-            # ------------------------------------------------------------------
-            # Phase 2 Alpha Adjustment: Microstructure Volatility & Meme Penalty
-            # ------------------------------------------------------------------
-            # 1. Meme token penalty in low-expansion conditions
-            if row.get('is_meme', 0.0) > 0.5:
-                prob -= 0.06  # 6% discount for high-wick meme consolidation
-
-            # 2. Wick / Wide spread risk penalty
-            # Check if signal has upper/lower wick ratio or wide stop risk
-            wick_ratio = float(sig.get('wick_ratio', sig.get('wick_to_body_ratio', 1.0)) or 1.0)
-            if wick_ratio > 1.8:
-                wick_penalty = min(0.12, (wick_ratio - 1.8) * 0.06)
-                prob -= wick_penalty
-
-            # If Stop-Loss risk is unusually large relative to TP (poor R:R in choppy environment)
-            if sl_pct > tp_pct * 1.5 and sl_pct > 2.5:
-                prob -= 0.05
-
-            if PROBABILITY_CALIBRATION_MODE == "CHRONOLOGICAL_CALIBRATED":
-                return round(min(0.95, max(0.05, prob)), 3)
-            return round(min(0.95, max(0.20, prob)), 3)
+            from app.engine.signals.meta_labeler import CoinSpecificMetaLabeler
+            labeler = CoinSpecificMetaLabeler(base_models_dir=self.models_dir)
+            prob, _, _ = labeler.predict_coin_win_probability(sym, sig)
+            return float(prob)
         except Exception:
-            from app.engine.config import PROBABILITY_CALIBRATION_MODE
-            if PROBABILITY_CALIBRATION_MODE == "CHRONOLOGICAL_CALIBRATED":
-                return 0.367
-            base_p = (conv / 100.0) * (0.88 if is_a_plus else 0.76)
-            return round(min(0.95, max(0.40, base_p)), 3)
+            pass
+
+        conv = float(sig.get('conviction', 70.0))
+        is_a_plus = 1.0 if any("A+" in str(sig.get(k, '')) for k in ['grade', 'quality_grade']) else 0.0
+        from app.engine.config import PROBABILITY_CALIBRATION_MODE
+        if PROBABILITY_CALIBRATION_MODE == "CHRONOLOGICAL_CALIBRATED":
+            return 0.367
+        base_p = (conv / 100.0) * (0.88 if is_a_plus else 0.76)
+        return round(min(0.95, max(0.40, base_p)), 3)
 
 # ------------------------------------------------------------------------------
 # 8. INSTITUTIONAL TRADER REGIME PLAYBOOK & BEST PRACTICES ENGINE

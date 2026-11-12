@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = os.getenv("DATABASE_URL", "mysql+pymysql://root:@localhost:3306/crypto_trading")
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     EXPORT_DIR: str = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "export_app_data"))
+    WEBSOCKET_FEED_ENABLED: bool = os.getenv("WEBSOCKET_FEED_ENABLED", "true").lower() in ("true", "1", "yes")
 
     # WhatsApp Automation & Broadcast Settings
     WHATSAPP_ENABLED: bool = os.getenv("WHATSAPP_ENABLED", "false").lower() in ("true", "1", "yes")

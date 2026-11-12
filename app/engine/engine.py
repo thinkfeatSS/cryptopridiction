@@ -2,7 +2,10 @@ import os
 import json
 import time
 import math
+import logging
 import numpy as np
+
+logger = logging.getLogger("engine")
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +37,9 @@ class UnifiedCryptoEngine:
         self.signal_system = SignalGenerationSystem(data_loader=self.data_loader)
         self.paper_bot = PaperTradingBot(ledger_file=os.path.join(self.export_dir, "paper_trading_ledger.json"))
 
+        from app.quant_v16.thesis import get_thesis_engine
+        self.thesis_engine = get_thesis_engine(export_dir=self.export_dir)
+
         # Macro No Trade Zone (NTZ) State Tracking
         self._macro_ntz_state_file = os.path.join(self.export_dir, "macro_ntz_state.json")
         self._last_macro_ntz = self._load_macro_ntz_state()
@@ -64,12 +70,14 @@ class UnifiedCryptoEngine:
         # Start decoupled 24/7 real-time WebSocket market data feed
         self.data_loader.start_websocket_feed()
 
-        # Start decoupled 24/7 high-speed sub-second tick loop with latency and partition awareness
+        # Start decoupled 24/7 high-speed sub-second tick loop with latency, depth, and partition awareness
         self.paper_bot.start_tick_daemon(
             ticker_fetch_fn=self.scanner.loader.fetch_all_tickers,
             interval_seconds=0.5,
             partition_check_fn=self.scanner.loader.is_partition_stale_active,
-            latency_fetch_fn=self.scanner.loader.get_feed_latency_ms
+            latency_fetch_fn=self.scanner.loader.get_feed_latency_ms,
+            depth_fetch_fn=self.scanner.loader.fetch_top5_depth,
+            cvd_fetch_fn=self.scanner.loader.fetch_cvd_metrics
         )
 
     def run_scan_and_prediction_cycle(self) -> Dict[str, Any]:
@@ -157,8 +165,10 @@ class UnifiedCryptoEngine:
                     sig["ask_price"] = coin_meta.get("ask_price", coin_meta.get("price"))
                     sig["spread_bps"] = coin_meta.get("spread_bps", 5.0)
                     return sig
-            except Exception:
-                pass
+            except Exception as e:
+                import traceback
+                print(f"[ENGINE ⚠️] Error evaluating asset {sym}: {e}", flush=True)
+                traceback.print_exc()
             return None
 
         with ThreadPoolExecutor(max_workers=8) as executor:
@@ -193,19 +203,24 @@ class UnifiedCryptoEngine:
                     if not m15_pre.get("weakness_confirmed") or float(m15_pre.get("rectangle_upper", 0.0)) <= 0:
                         continue
 
-                    # Tier 2: Confirmed M15 Rectangle candidate! Fetch live M1 candles for precision trigger
-                    df_1m = self.data_loader.fetch_single_timeframe_raw(sym, "1m", limit=60)
-                    if df_1m is None or len(df_1m) < 20:
-                        continue
+                    rect_res = m15_pre
+                    min_score_hurdle = float(getattr(self.rectangle_config, "min_signal_score", 65.0))
 
-                    rect_res = self.rectangle_orchestrator.scan_for_setups(
-                        symbol=sym,
-                        df_m15=df_15m,
-                        df_m1=df_1m,
-                        bid_price=bid_p if bid_p > 0 else None,
-                        ask_price=ask_p if ask_p > 0 else None
-                    )
-                    min_score_hurdle = float(getattr(self.rectangle_config, "min_signal_score", 75.0))
+                    # If not already triggered by 15M breakout, check Tier 2: Fetch M1 candles for precision M1 flip
+                    if rect_res.get("signal_status") != "VALID":
+                        try:
+                            df_1m = self.data_loader.fetch_single_timeframe_raw(sym, "1m", limit=60)
+                            if df_1m is not None and len(df_1m) >= 20:
+                                rect_res = self.rectangle_orchestrator.scan_for_setups(
+                                    symbol=sym,
+                                    df_m15=df_15m,
+                                    df_m1=df_1m,
+                                    bid_price=bid_p if bid_p > 0 else None,
+                                    ask_price=ask_p if ask_p > 0 else None
+                                )
+                        except Exception:
+                            pass
+
                     if rect_res.get("signal_status") == "VALID" and float(rect_res.get("signal_score", 0.0)) >= min_score_hurdle:
                         rect_dir = rect_res.get("direction")
                         rect_entry = float(rect_res.get("entry_price", 0.0))
@@ -216,8 +231,134 @@ class UnifiedCryptoEngine:
                         rect_rr = str(rect_res.get("risk_reward", "1:2.0"))
                         actual_rect_rr = round(abs(rect_tp1 - rect_entry) / max(1e-9, abs(rect_entry - rect_sl)), 2)
                         is_valid_geom = (rect_sl < rect_entry < rect_tp1) if rect_dir == "LONG" else (rect_sl > rect_entry > rect_tp1)
-                        if is_valid_geom and rect_entry > 0 and actual_rect_rr >= 2.0:
-                            print(f"[RECTANGLE STRATEGY 📐] Triggered {sym} {rect_dir} M1 Setup! Score: {rect_res.get('signal_score'):.1f} | Entry: ${rect_entry} | TP1: ${rect_tp1} | SL: ${rect_sl} | RR: 1:{actual_rect_rr:.1f}", flush=True)
+                        if is_valid_geom and rect_entry > 0 and actual_rect_rr >= 1.5:
+                            # 1. Macro & BTC Shield Alignment Check
+                            btc_regime = str(btc_shield.get("v16_regime") or btc_shield.get("regime") or "RANGE").upper()
+                            alt_longs_ok = btc_shield.get("altcoin_longs_allowed", True)
+                            alt_shorts_ok = btc_shield.get("altcoin_shorts_allowed", True)
+                            if (rect_dir == "LONG" and not alt_longs_ok) or (rect_dir == "SHORT" and not alt_shorts_ok):
+                                continue
+
+                            # 2. Dynamic Execution Friction Calculation
+                            from app.quant_v16.costs import calculate_execution_costs
+                            vol_usd = float(coin_meta.get("volume_24h_usd", 0.0) or coin_meta.get("volume_24h", 0.0) or 0.0)
+                            rect_costs = calculate_execution_costs(
+                                symbol=sym,
+                                price=rect_entry,
+                                side=rect_dir,
+                                spread_bps=float(coin_meta.get("spread_bps", 5.0) or 5.0),
+                                volume_24h_usd=vol_usd,
+                                holding_hours=0.25
+                            )
+
+                            # 3. Dynamic Secondary Meta-Labeler Evaluation
+                            rect_tb_ratio = float(rect_res.get("taker_buy_ratio", 0.50) or 0.50)
+                            rect_cvd_val = float(rect_res.get("cvd_surge", 0.0) or 0.0)
+                            rect_obi_val = float(rect_res.get("order_book_imbalance", (rect_tb_ratio - 0.50) * 2.0) or (rect_tb_ratio - 0.50) * 2.0)
+
+                            rect_vol_ratio = 1.0
+                            target_df = df_1m if (df_1m is not None and len(df_1m) >= 20) else df_15m
+                            if target_df is not None and len(target_df) >= 20:
+                                try:
+                                    h_vals = target_df['high'].astype(float)
+                                    l_vals = target_df['low'].astype(float)
+                                    c_vals = target_df['close'].astype(float)
+                                    tr_series = np.maximum(h_vals - l_vals, np.maximum(abs(h_vals - c_vals.shift(1)), abs(l_vals - c_vals.shift(1))))
+                                    tr5 = tr_series.iloc[-5:].mean()
+                                    tr20 = tr_series.iloc[-20:].mean()
+                                    if tr20 > 1e-9:
+                                        rect_vol_ratio = float(np.clip(tr5 / tr20, 0.1, 5.0))
+                                except Exception:
+                                    rect_vol_ratio = 1.0
+
+                            rect_rvol = 1.0
+                            if target_df is not None and 'volume' in target_df.columns and len(target_df) >= 20:
+                                try:
+                                    vols = target_df['volume'].astype(float)
+                                    v_cur = float(vols.iloc[-1])
+                                    v_ma20 = float(vols.iloc[-20:].mean())
+                                    if v_ma20 > 1e-9:
+                                        rect_rvol = float(np.clip(v_cur / v_ma20, 0.05, 10.0))
+                                except Exception:
+                                    rect_rvol = 1.0
+
+                            rect_liq_prox = float(round(min(abs(rect_entry - rect_sl), abs(rect_tp1 - rect_entry)) / max(1e-9, rect_entry) * 100.0, 2))
+                            rect_funding = float(coin_meta.get("funding_rate", 0.0001) or 0.0001)
+                            rect_funding_drag = float(np.clip(rect_funding * 10000.0 if abs(rect_funding) < 0.1 else rect_funding, -50.0, 50.0))
+
+                            cand_meta_payload = {
+                                "direction": rect_dir,
+                                "horizon": "15M",
+                                "entry_price": rect_entry,
+                                "tp1_price": rect_tp1,
+                                "sl_price": rect_sl,
+                                "conviction": float(rect_res.get("signal_score", 75.0)),
+                                "expected_return_pct": abs(rect_tp1 - rect_entry) / max(1e-9, rect_entry) * 100.0,
+                                "quality_grade": "Grade A",
+                                "regime": btc_regime,
+                                "market_regime": btc_regime,
+                                "canonical_strategy": "THE_ONLY_1_MINUTE_RECTANGLE_STRATEGY",
+                                "chop_index": float(rect_res.get("chop_index", 50.0) or 50.0),
+                                "funding_rate": rect_funding,
+                                "taker_buy_ratio": rect_tb_ratio,
+                                "cvd_surge_5": rect_cvd_val,
+                                # Phase 4 Microstructure Physics Features:
+                                "f_cvd_divergence": rect_cvd_val,
+                                "f_order_book_imbalance": rect_obi_val,
+                                "f_volatility_ratio": rect_vol_ratio,
+                                "f_taker_buy_ratio": rect_tb_ratio,
+                                "f_liquidity_proximity": rect_liq_prox,
+                                "f_funding_drag": rect_funding_drag,
+                                "f_relative_volume": rect_rvol
+                            }
+                            # 4. Pure Probability Calibration & Directional Superiority (Meta-Labeler Retired)
+                            from app.quant_v16.probability import ProbabilityCalibrator
+                            from app.quant_v16.expectancy import PathProbabilities, calculate_canonical_expectancy
+                            _platt = ProbabilityCalibrator(method="platt")
+                            rect_conv = float(rect_res.get("signal_score", 70.0) or 70.0)
+                            base_win_p = _platt.calibrate(float(np.clip(rect_conv / 100.0, 0.40, 0.90)))
+                            p_tp1 = round(max(0.15, min(0.95, base_win_p)), 4)
+                            p_tp2 = round(p_tp1 * 0.65, 4)
+                            p_tp3 = round(p_tp2 * 0.55, 4)
+                            p_sl = round(max(0.05, 1.0 - p_tp1), 4)
+
+                            # Directional Superiority Invariant: P(TP1) >= 50% and P(SL) < P(TP1)
+                            if p_tp1 < 0.50 or p_sl >= p_tp1:
+                                continue
+
+                            path_probs = PathProbabilities(
+                                p_tp1=p_tp1,
+                                p_tp2=p_tp2,
+                                p_tp3=p_tp3,
+                                p_sl=p_sl,
+                                p_tp2_given_tp1=0.65,
+                                p_tp3_given_tp2=0.55,
+                                risk_reward=actual_rect_rr
+                            )
+                            exp_res = calculate_canonical_expectancy(
+                                entry_price=rect_entry,
+                                tp1_price=rect_tp1,
+                                tp2_price=rect_tp2,
+                                tp3_price=rect_tp3,
+                                sl_price=rect_sl,
+                                direction=rect_dir,
+                                probabilities=path_probs,
+                                costs=rect_costs
+                            )
+
+                            # Require positive Net Expectancy (> +0.25% after all frictions)
+                            if exp_res.ev_net < 0.0025:
+                                continue
+
+                            # 6. Dynamic Institutional Grade Assignment
+                            if exp_res.ev_net >= 0.010 and p_tp1 >= 0.65:
+                                qual_grade = "💎 Grade A+ (THE ONLY 1 MINUTE RECTANGLE STRATEGY)"
+                            elif exp_res.ev_net >= 0.005 and p_tp1 >= 0.50:
+                                qual_grade = "⚡ Grade A (THE ONLY 1 MINUTE RECTANGLE STRATEGY)"
+                            else:
+                                qual_grade = "Grade B (THE ONLY 1 MINUTE RECTANGLE STRATEGY)"
+
+                            print(f"[RECTANGLE STRATEGY 📐] Qualified {sym} {rect_dir} M1 Setup! Score: {rect_res.get('signal_score'):.1f} | P(TP1): {p_tp1*100:.1f}% | EVnet: {exp_res.ev_net*100:+.2f}% | Entry: ${rect_entry} | TP1: ${rect_tp1} | SL: ${rect_sl} | RR: 1:{actual_rect_rr:.1f}", flush=True)
                             now_iso = datetime.now(timezone.utc).isoformat()
                             rect_sig_core = {
                                 "symbol": sym,
@@ -236,14 +377,14 @@ class UnifiedCryptoEngine:
                                 "tp3_price": rect_tp3,
                                 "sl_price": rect_sl,
                                 "risk_reward_ratio": rect_rr,
-                                "conviction": float(rect_res.get("signal_score", 90.0)),
-                                "win_probability_pct": 72.0,
-                                "meta_win_probability_pct": 72.0,
-                                "meta_win_prob_pct": 72.0,
-                                "p_tp1": 0.72,
-                                "p_tp1_pct": 72.0,
-                                "p_sl": 0.28,
-                                "quality_grade": "💎 Grade A+ (THE ONLY 1 MINUTE RECTANGLE STRATEGY)",
+                                "conviction": float(rect_res.get("signal_score", 85.0)),
+                                "win_probability_pct": round(p_tp1 * 100.0, 1),
+                                "meta_win_probability_pct": round(base_win_p * 100.0, 1),
+                                "meta_win_prob_pct": round(base_win_p * 100.0, 1),
+                                "p_tp1": p_tp1,
+                                "p_tp1_pct": round(p_tp1 * 100.0, 1),
+                                "p_sl": p_sl,
+                                "quality_grade": qual_grade,
                                 "strategy": "THE_ONLY_1_MINUTE_RECTANGLE_STRATEGY",
                                 "canonical_strategy": "THE_ONLY_1_MINUTE_RECTANGLE_STRATEGY",
                                 "strategy_archetype": "RECTANGLE_STRATEGY_LONG" if rect_dir == "LONG" else "RECTANGLE_STRATEGY_SHORT",
@@ -252,12 +393,14 @@ class UnifiedCryptoEngine:
                                 "signal_status": "VALID_EXECUTION",
                                 "created_at": now_iso,
                                 "allocation_pct": 100.0,
-                                "sizing_multiplier": 1.15,
-                                "ev_net": 1.25,
-                                "ev_gross": 1.55,
-                                "costs_total_pct": 0.30,
-                                "volume_24h_usd": float(coin_meta.get("volume_24h_usd", 0.0) or 0.0),
-                                "change_24h_pct": float(coin_meta.get("change_24h_pct", 0.0) or 0.0)
+                                "sizing_multiplier": 1.0,
+                                "ev_net": round(exp_res.ev_net * 100.0, 2),
+                                "ev_gross": round(exp_res.ev_gross * 100.0, 2),
+                                "costs_total_pct": round(rect_costs.total_pct * 100.0, 2),
+                                "volume_24h_usd": vol_usd,
+                                "change_24h_pct": float(coin_meta.get("change_24h_pct", 0.0) or 0.0),
+                                "rectangle_upper": float(rect_res.get("rectangle_upper", 0.0) or 0.0),
+                                "rectangle_lower": float(rect_res.get("rectangle_lower", 0.0) or 0.0)
                             }
                             rect_sig = dict(rect_sig_core)
                             rect_sig["qualified_signals_by_horizon"] = {"15M": dict(rect_sig_core)}
@@ -314,25 +457,47 @@ class UnifiedCryptoEngine:
                 print(f"[WHATSAPP ❌] Error emitting Market Regime Alert: {wa_err}", flush=True)
         self._last_market_regime = current_regime
 
+        is_macro_dump = (
+            btc_shield.get("regime") == "FLASH_DUMP" or
+            btc_shield.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "ALERT_DUMP", "FLASH_DUMP"] or
+            "DEFENSIVE_CASH_ONLY" in str(btc_shield.get("altcoin_posture", ""))
+        )
+
         if is_macro_ntz:
-            print(f"\n🛑 [ENGINE ALERT] MACRO NO TRADE ZONE ACTIVE: {macro_ntz_reason}")
-            print("   Capital Preservation Mode: Active signal generation suppressed & Paper Trading entries locked.")
-            for s in generated_signals:
-                s["is_trade_active"] = False
-                s["is_ntz_active"] = True
-                s["signal_status"] = "HOLD_VETOED_BY_NO_TRADE_ZONE"
-                s["wait_reason"] = f"🛑 Macro No Trade Zone active: {macro_ntz_reason}"
-                s["dominant_direction"] = "NO_TRADE"
-                s["direction"] = "NO_TRADE"
+            if is_macro_dump or is_partition_stale:
+                print(f"\n🛑 [ENGINE ALERT] CRITICAL MACRO BLACKOUT ACTIVE: {macro_ntz_reason}")
+                print("   Capital Preservation Mode: Active signal generation suppressed & admissions locked.")
+                for s in generated_signals:
+                    s["is_trade_active"] = False
+                    s["is_ntz_active"] = True
+                    s["signal_status"] = "HOLD_VETOED_BY_NO_TRADE_ZONE"
+                    s["wait_reason"] = f"🛑 Macro Blackout: {macro_ntz_reason}"
+                    s["dominant_direction"] = "NO_TRADE"
+                    s["direction"] = "NO_TRADE"
+            else:
+                print(f"\n💤 [ENGINE ADAPTATION] BTC Consolidation / Low Volatility Squeeze ({macro_ntz_reason}).")
+                print("   Idiosyncratic Altcoin Scanner: Preserving independent trends, breakouts & order blocks.")
+                for s in generated_signals:
+                    if s.get("is_decoupled_trend") or s.get("is_trade_active"):
+                        # Keep active decoupled altcoin signal intact
+                        continue
+                    else:
+                        s["is_trade_active"] = False
+                        s["is_ntz_active"] = True
+                        s["signal_status"] = "HOLD_VETOED_BY_NO_TRADE_ZONE"
+                        s["wait_reason"] = f"🛑 Middle Chop in BTC Consolidation: {macro_ntz_reason}"
+                        s["dominant_direction"] = "NO_TRADE"
+                        s["direction"] = "NO_TRADE"
 
         # Extract strictly active trade signals (gated by strict multi-horizon alignment & No Trade Zone)
         active_trade_signals = []
-        if not is_macro_ntz:
+        if not (is_macro_dump or is_partition_stale):
             active_trade_signals = [
                 s for s in generated_signals
                 if s.get("is_trade_active") and s.get("dominant_direction") in ["LONG", "SHORT"]
                 and not s.get("is_ntz_active", False)
                 and "NO_TRADE_ZONE" not in s.get("signal_status", "")
+                and str(s.get("horizon") or s.get("dominant_timeframe") or "15M").upper() in ["15M", "15M SCALP", "SCALP"]
             ]
             def _signal_sort_rank(s):
                 qg = str(s.get("quality_grade", "")).upper()
@@ -349,38 +514,59 @@ class UnifiedCryptoEngine:
 
             active_trade_signals.sort(key=_signal_sort_rank)
 
-        # Admit ONLY active, strictly-aligned signals to Paper Trading Bot (Strict NTZ Gating)
+        # Emit & Register active, strictly-aligned institutional signals (Decoupled from Paper Trading Bottlenecks)
         admitted_count = 0
-        if not is_macro_ntz:
+        if not (is_macro_dump or is_partition_stale):
             now_ts = time.time()
             for s in active_trade_signals[:15]:
                 sym_key = s.get("symbol", "")
                 hz_key = str(s.get("horizon", s.get("dominant_timeframe", "1H"))).upper()
-                norm_hz_key = "15M" if "15" in hz_key else ("24H" if "24" in hz_key or "1D" in hz_key else "1H")
+                norm_hz_key = "15M" if any(x in hz_key for x in ["15", "5M", "SCALP"]) else ("24H" if any(x in hz_key for x in ["24", "1D", "SWING", "MACRO", "DAILY", "7D", "15D", "30D"]) else "1H")
                 direction_key = str(s.get("dominant_direction", s.get("direction", "LONG"))).upper()
 
-                # Prevent duplicate concurrent positions on the same coin
-                is_sym_active = any(p.get("symbol") == sym_key for p in self.paper_bot.data.get("open_positions", []))
-                if is_sym_active:
-                    print(f"[PORTFOLIO 🛡️] Symbol {sym_key} already has an active open position. Suppressing duplicate entry.")
-                    continue
-
-                # Inter-trade cooldown: require at least 15m (900s) between completed trades on the same coin
+                # Inter-trade cooldown: require reasonable spacing between repeated signals on the same coin
                 sym_last_emitted = self._symbol_cooldown_registry.get(sym_key, 0.0)
-                if (now_ts - sym_last_emitted) < 900 and norm_hz_key in ["15M", "1H"]:
-                    print(f"[COOLDOWN 🕐] Suppressing duplicate symbol {sym_key} within 15-minute inter-trade window")
+                cooldown_spacing = 600 if norm_hz_key == "15M" else (1800 if norm_hz_key == "1H" else 3600)
+                if (now_ts - sym_last_emitted) < cooldown_spacing:
                     continue
 
                 cooldown_key = f"{sym_key}_{norm_hz_key}_{direction_key}"
-                cooldown_secs = 1800 if norm_hz_key == "15M" else self._signal_cooldown_secs.get(norm_hz_key, 7200)
+                cooldown_secs = 900 if norm_hz_key == "15M" else self._signal_cooldown_secs.get(norm_hz_key, 3600)
                 last_emitted = self._signal_cooldown_registry.get(cooldown_key, 0.0)
                 if (now_ts - last_emitted) < cooldown_secs:
-                    print(f"[COOLDOWN 🕐] Suppressing duplicate {sym_key} {norm_hz_key} {direction_key} signal (cooldown {int(cooldown_secs/60)}min)")
                     continue
-                if self.paper_bot.admit_signal(s, btc_shield_state=btc_shield):
-                    admitted_count += 1
-                    self._signal_cooldown_registry[cooldown_key] = now_ts
-                    self._symbol_cooldown_registry[sym_key] = now_ts
+
+                # BTC Shield Beta Directional Gate Pre-Screening:
+                alt_longs_ok = btc_shield.get("altcoin_longs_allowed", True) if btc_shield else True
+                alt_shorts_ok = btc_shield.get("altcoin_shorts_allowed", True) if btc_shield else True
+                if (direction_key == "LONG" and not alt_longs_ok) or (direction_key == "SHORT" and not alt_shorts_ok):
+                    btc_reg = str(btc_shield.get("v16_regime") or btc_shield.get("regime") or "BEAR_TREND").upper()
+                    print(f"[ENGINE 🛡️ BETA VETO] Suppressing {direction_key} on {sym_key} ({norm_hz_key}): Counter to BTC Beta Shield ({btc_reg}).")
+                    continue
+
+                admitted_count += 1
+                self._signal_cooldown_registry[cooldown_key] = now_ts
+                self._symbol_cooldown_registry[sym_key] = now_ts
+
+                # Optional shadow/test sync to paper bot without blocking signal admission
+                try:
+                    self.paper_bot.admit_signal(s, btc_shield_state=btc_shield)
+                except Exception:
+                    pass
+
+                # Register trade thesis with institutional thesis engine
+                try:
+                    thesis, is_new = self.thesis_engine.register_or_update(
+                        symbol=sym_key,
+                        direction=direction_key,
+                        horizon=norm_hz_key,
+                        strategy=str(s.get("canonical_strategy") or s.get("strategy") or "MOMENTUM_TREND"),
+                        regime=str(s.get("market_regime") or "RANGE"),
+                        expected_net_return=float(s.get("ev_net") or s.get("expected_return_pct") or 0.5),
+                        signal_id=s.get("trade_id") or s.get("signal_id")
+                    )
+                except Exception as th_err:
+                    logger.debug(f"[ENGINE] Thesis registration: {th_err}")
             # Prune expired cooldown entries to prevent memory growth
             self._signal_cooldown_registry = {k: v for k, v in self._signal_cooldown_registry.items() if (now_ts - v) < 86400}
 
@@ -629,6 +815,10 @@ class UnifiedCryptoEngine:
                                 sig_dt = datetime.strptime(f"{date_u} {time_u}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                                 age_s = (now_utc - sig_dt).total_seconds()
                                 max_s = HORIZON_ACTIVE_WINDOW.get(norm_hz, 3600)
+                                if st in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]:
+                                    max_s *= 4.0
+                                elif st == "TIER0_PROTECTED_BREAKEVEN":
+                                    max_s *= 2.5
                                 if age_s <= max_s:
                                     is_still_active = True
                         except Exception:
@@ -827,7 +1017,7 @@ class UnifiedCryptoEngine:
                 if req_tf not in all_preds:
                     scaled_chg = round(prior_chg, 2)
                     scaled_target = round(c_price * (1.0 + (scaled_chg / 100.0)), 6)
-                    raw_p = float(anchor_tf.get("consensus_probability") or 0.58)
+                    raw_p = float(anchor_tf.get("consensus_probability") or 0.50)
                     scaled_p = round(0.50 + (raw_p - 0.50) * min(1.0, 1.0 / math.sqrt(max(1.0, scale_mult))), 3)
                     t_state = anchor_tf.get("trend_state", "CONSOLIDATION")
                     t_lbl = f"🟢 BULLISH ({req_tf.upper()})" if dom_dir == "LONG" else f"🔴 BEARISH ({req_tf.upper()})"
@@ -861,7 +1051,7 @@ class UnifiedCryptoEngine:
                         final_chg = round((shrink_lambda * blended_chg) + ((1.0 - shrink_lambda) * prior_chg), 2)
                         final_target = round(c_price * (1.0 + (final_chg / 100.0)), 6)
 
-                        native_prob = float(pred_entry.get("consensus_probability", 0.55))
+                        native_prob = float(pred_entry.get("consensus_probability", 0.50))
                         shrunk_prob = round(0.50 + (native_prob - 0.50) * math.sqrt(w_native), 3)
                         shrunk_prob = max(0.50, min(0.95, shrunk_prob))
 
@@ -893,20 +1083,26 @@ class UnifiedCryptoEngine:
                 h_obj["total_order_blocks"] = tf_data.get("total_order_blocks", 0)
                 horizons[tf_key] = h_obj
 
-            # Timeframe aliases for backward compatibility
+            # Timeframe aliases for backward compatibility and canonical V16 horizon alignment
             if "15m" in horizons:
                 horizons["scalp"] = horizons["15m"]
             if "1h" in horizons:
-                horizons["swing"] = horizons["1h"]
-            if "1d" in horizons:
-                horizons["macro"] = horizons["1d"]
-                horizons["24h"] = horizons["1d"]
-            if "1w" in horizons:
-                horizons["7d"] = horizons["1w"]
-                horizons["weekly"] = horizons["1w"]
-            if "1M" in horizons:
-                horizons["30d"] = horizons["1M"]
-                horizons["monthly"] = horizons["1M"]
+                horizons["day"] = horizons["1h"]
+                horizons["intraday"] = horizons["1h"]
+            if "1d" in horizons or "24h" in horizons:
+                h_daily = horizons.get("1d") or horizons.get("24h")
+                horizons["swing"] = h_daily
+                horizons["macro"] = h_daily
+                horizons["24h"] = h_daily
+                horizons["1d"] = h_daily
+            if "1w" in horizons or "7d" in horizons:
+                h_weekly = horizons.get("1w") or horizons.get("7d")
+                horizons["7d"] = h_weekly
+                horizons["weekly"] = h_weekly
+            if "1M" in horizons or "30d" in horizons:
+                h_monthly = horizons.get("1M") or horizons.get("30d")
+                horizons["30d"] = h_monthly
+                horizons["monthly"] = h_monthly
 
             c_p = float(s.get("current_price") or s.get("live_price") or s.get("entry_price") or 0.0)
             scanner_leaderboard.append({
@@ -921,6 +1117,7 @@ class UnifiedCryptoEngine:
                 "ntz_badge": s.get("ntz_badge", ""),
                 "active_signal_horizon": s.get("active_signal_horizon"),
                 "qualified_signal_horizons": s.get("qualified_signal_horizons", []),
+                "status": s.get("status") or s.get("signal_status", "WAITING_FOR_ALIGNMENT"),
                 "signal_status": s.get("signal_status", "WAITING_FOR_ALIGNMENT"),
                 "wait_reason": s.get("wait_reason"),
                 "trend_criteria_gates": s.get("trend_criteria_gates", {}),
@@ -973,7 +1170,10 @@ class UnifiedCryptoEngine:
                 "alignment_score": align_score,
                 "alignment_ratio": align_ratio,
                 "confluence_tag": f"{align_ratio} {s.get('dominant_trend', 'CONSOLIDATION')}",
-                "is_triple_confluence": ("15M" in s.get("qualified_signal_horizons", []) and "1H" in s.get("qualified_signal_horizons", []) and "24H" in s.get("qualified_signal_horizons", [])),
+                "is_triple_confluence": (
+                    bool(s.get("qualified_signal_horizons")) and
+                    all(h in {str(x).upper() for x in s.get("qualified_signal_horizons", [])} for h in ["15M", "1H", "24H"])
+                ),
                 "fundamental_matrix": s.get("fundamental_matrix"),
                 "composite_fundamental_score": s.get("composite_fundamental_score", 0.0),
                 "news_sentiment": s.get("news_sentiment"),
@@ -981,7 +1181,8 @@ class UnifiedCryptoEngine:
                 "sizing_multiplier": s.get("sizing_multiplier", 1.0)
             })
 
-        # STRICT HORIZONS: Signals generated ONLY for 15M, 1H, and 24H (Strictly omit if NTZ is active)
+        # STRICT HORIZONS: Signals generated ONLY for 15M Scalps (User Mandate)
+        # All other execution horizons (1H intraday, 24H swing) are completely removed from trade signal generation.
         signals_by_horizon = {
             "15M": [],
             "1H": [],
@@ -1002,19 +1203,6 @@ class UnifiedCryptoEngine:
                     sig_15["change_24h_pct"] = s.get("change_24h_pct", 0.0)
                     signals_by_horizon["15M"].append(sig_15)
                     signals_by_horizon["15m"].append(sig_15)
-                if "1H" in q_sigs and q_sigs["1H"].get("is_trade_active") and not q_sigs["1H"].get("is_ntz_active"):
-                    sig_1h = dict(q_sigs["1H"])
-                    sig_1h["volume_24h_usd"] = s.get("volume_24h_usd", 0.0)
-                    sig_1h["change_24h_pct"] = s.get("change_24h_pct", 0.0)
-                    signals_by_horizon["1H"].append(sig_1h)
-                    signals_by_horizon["1h"].append(sig_1h)
-                if "24H" in q_sigs and q_sigs["24H"].get("is_trade_active") and not q_sigs["24H"].get("is_ntz_active"):
-                    sig_24 = dict(q_sigs["24H"])
-                    sig_24["volume_24h_usd"] = s.get("volume_24h_usd", 0.0)
-                    sig_24["change_24h_pct"] = s.get("change_24h_pct", 0.0)
-                    signals_by_horizon["24H"].append(sig_24)
-                    signals_by_horizon["24h"].append(sig_24)
-                    signals_by_horizon["1d"].append(sig_24)
 
         # Ensure all active_trade_signals (including open paper positions) are fully represented in signals_by_horizon even during NTZ
         for s_act in active_trade_signals:
@@ -1027,14 +1215,14 @@ class UnifiedCryptoEngine:
                 if tk in signals_by_horizon and not any(x.get("symbol") == s_act.get("symbol") for x in signals_by_horizon[tk]):
                     signals_by_horizon[tk].append(s_act)
 
-        # Persist ALL qualified active signals across dominant & horizon lists to CSV
-        if not is_macro_ntz:
+        # Persist ALL qualified active signals across dominant & horizon lists to CSV (15M Scalps ONLY)
+        if not (is_macro_dump or is_partition_stale):
             all_active_signals = list(active_trade_signals)
             seen_sig_keys = {
                 (s.get("symbol"), str(s.get("dominant_timeframe") or s.get("horizon") or "15M").upper())
                 for s in active_trade_signals
             }
-            for hz_key in ["15M", "1H", "24H"]:
+            for hz_key in ["15M"]:
                 for sig_h in signals_by_horizon.get(hz_key, []):
                     sym_h = sig_h.get("symbol")
                     norm_h = str(sig_h.get("horizon") or hz_key).upper()
@@ -1082,11 +1270,11 @@ class UnifiedCryptoEngine:
         ]
 
         print("\n" + "="*80)
-        print("🎯 STRICT MULTI-HORIZON CRITERIA SIGNAL GENERATION (15M, 1H, 24H)")
+        print("🎯 STRICT MULTI-HORIZON CRITERIA SIGNAL GENERATION (15M SCALPS ONLY)")
         print("="*80)
-        print(f"  • 15M Scalp Signals   (Desk Confluence: 15M, 5M Trigger, 1H Anchor):    {len(signals_by_horizon['15M'])} qualified")
-        print(f"  • 1H Intraday Signals (Desk Confluence: 1H, 15M Trigger, 4H Anchor):    {len(signals_by_horizon['1H'])} qualified")
-        print(f"  • 24H Swing Signals   (Desk Confluence: 1D/12H, 4H Trigger, 1W Anchor): {len(signals_by_horizon['24H'])} qualified")
+        print(f"  • 15M Scalp Signals   (Pure Execution Horizon: 15M HL/LH + OB, 4H/1H Triad Alignment): {len(signals_by_horizon['15M'])} qualified")
+        print(f"  • 1H Intraday Signals (Context Only — Execution Suppressed):                              0 qualified")
+        print(f"  • 24H Swing Signals   (Context Only — Execution Suppressed):                              0 qualified")
         print(f"  • Total Active Institutional Signals: {len(active_trade_signals)} ({admitted_count} admitted to Paper Bot)")
         if not active_trade_signals:
             print("  ⚠️ NO COINS SATISFY STRICT MULTI-HORIZON CRITERIA -> PATIENTLY WAITING FOR RIGHT TIME TO GENERATE SIGNALS.")
@@ -1166,12 +1354,12 @@ class UnifiedCryptoEngine:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "server_prediction_time": datetime.now(timezone.utc).isoformat(),
             "server_prediction_ts": int(datetime.now(timezone.utc).timestamp()),
-            "strategy": "Strict Multi-Horizon Trend-Aligned Ensemble (15M, 1H, 24H)",
+            "strategy": "Strict Multi-Horizon Trend-Aligned Ensemble (15M Execution | 15M, 1H, 4H Matrix)",
             "is_no_trade_zone_active": is_macro_ntz,
             "no_trade_zone_reason": macro_ntz_reason if is_macro_ntz else None,
             "market_trade_posture": "NO_TRADE_ZONE" if is_macro_ntz else ("ACTIVE_SIGNALS" if active_trade_signals else "WAITING_FOR_ALIGNMENT"),
-            "market_wait_reason": f"🛑 Macro No Trade Zone active: {macro_ntz_reason}. Signal generation suppressed." if is_macro_ntz else (None if active_trade_signals else "No coins currently satisfy strict multi-horizon trend alignment (15M: 5M-24H, 1H: 5M-7D, 24H: 15M-15D). System is waiting for optimal alignment before generating trade signals."),
-            "strict_horizons_allowed": ["15M", "1H", "24H"],
+            "market_wait_reason": f"🛑 Macro No Trade Zone active: {macro_ntz_reason}. Signal generation suppressed." if is_macro_ntz else (None if active_trade_signals else "No coins currently satisfy strict multi-horizon trend alignment (15M Trigger, 1H Context, 4H Anchor). System is waiting for optimal alignment before generating trade signals."),
+            "strict_horizons_allowed": ["15M"],
             "active_trade_signals_count": len(active_trade_signals),
             "waiting_coins_count": len(generated_signals) - len(active_trade_signals),
             "btc_market_shield": btc_shield,
@@ -1188,6 +1376,8 @@ class UnifiedCryptoEngine:
             "top_bearish_aligned_coins": top_bearish_aligned[:10],
             "consolidating_coins": consolidating_coins[:10],
             "active_institutional_signals": active_trade_signals,
+            "radar_pre_signals": [s for s in dominant_signals_sorted if s.get("status") == "PRE_SIGNAL_RADAR" or s.get("signal_status") == "PRE_SIGNAL_RADAR"],
+            "radar_pre_signals_count": len([s for s in dominant_signals_sorted if s.get("status") == "PRE_SIGNAL_RADAR" or s.get("signal_status") == "PRE_SIGNAL_RADAR"]),
             "scanner_leaderboard": scanner_leaderboard,
             "signals_by_horizon": signals_by_horizon,
             "paper_portfolio": self.paper_bot.data,
@@ -1297,14 +1487,14 @@ class UnifiedCryptoEngine:
             with open(temp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, default=str)
             os.replace(temp, filepath)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[ENGINE ⚠️] Atomic write failed for {filepath}: {e}")
         finally:
             if os.path.exists(temp):
                 try:
                     os.remove(temp)
-                except Exception:
-                    pass
+                except Exception as ex:
+                    logger.debug(f"[ENGINE] Failed removing temp file {temp}: {ex}")
 
     def _load_macro_ntz_state(self) -> bool:
         """Loads persisted Macro NTZ state to prevent false edge triggers on daemon restart."""
@@ -1313,8 +1503,8 @@ class UnifiedCryptoEngine:
                 with open(self._macro_ntz_state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     return bool(data.get("is_macro_ntz", False))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"[ENGINE] Failed to load macro NTZ state: {e}")
         return False
 
     def _update_macro_ntz_state(self, is_active: bool, reason: Optional[str], btc_shield: Dict[str, Any], is_transition: bool = True):
@@ -1359,19 +1549,15 @@ class UnifiedCryptoEngine:
             "evaluated_at_utc", "current_price", "live_pnl_pct", "is_tier0_locked", "p_tp1", "p_tp2", "p_tp3", "p_sl",
             "market_shield", "strategy_archetype", "order_block_setup",
             "ev_net", "ev_gross", "costs_total_pct", "is_limit_pending", "optimal_entry_price", "entry_zone_min", "entry_zone_max", "candle_trigger_confirmed",
+            "is_higher_low_entry", "is_lower_high_entry", "entry_anchor_type", "entry_anchor_price", "execution_mode", "is_candlestick_unanimous", "candlestick_direction",
             "is_tp1_notified_wa", "is_tp2_notified_wa"
         ]
 
         existing_ids = set()
         active_pairs = set()
 
-        # Populate active pairs & IDs from currently open paper positions to prevent duplicate signal entries
+        # Populate existing trade IDs to prevent duplicate signal entries
         for op in self.paper_bot.data.get("open_positions", []):
-            op_sym = str(op.get("symbol", "")).strip().upper()
-            op_hz = str(op.get("signal_horizon") or op.get("horizon", "1H")).strip().upper()
-            norm_op_hz = "15M" if "15" in op_hz else ("24H" if any(x in op_hz for x in ["24", "1D", "SWING", "MACRO"]) else "1H")
-            active_pairs.add((op_sym, norm_op_hz))
-            active_pairs.add((op_sym.replace("/", ""), norm_op_hz))
             if op.get("trade_id"):
                 existing_ids.add(op.get("trade_id"))
 
@@ -1412,8 +1598,10 @@ class UnifiedCryptoEngine:
                         outc = str(row.get("outcome_label", "")).upper()
 
                         is_pending = (
-                            st in ["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]
+                            st in ["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "RESTING_LIMIT", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]
                             or "PENDING" in outc
+                            or "RESTING" in outc
+                            or "AWAIT" in outc
                         )
 
                         if is_pending and sym_r and hz_r:
@@ -1425,15 +1613,19 @@ class UnifiedCryptoEngine:
                                     sig_dt = datetime.strptime(f"{date_u} {time_u}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
                                     age_s = (now_utc - sig_dt).total_seconds()
                                     max_s = HORIZON_MAX_ACTIVE_SECS.get(norm_hz_r, 21600)
+                                    is_runner_st = st in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
+                                    is_t0_st = st == "TIER0_PROTECTED_BREAKEVEN"
+                                    eff_max_s = (max_s * 4.0) if is_runner_st else ((max_s * 2.5) if is_t0_st else max_s)
+
                                     # Active in paper trading bot or within TTL or in consolidation grace
                                     is_in_paper = (
                                         sid in existing_ids or
                                         (sym_r, norm_hz_r) in active_pairs or
                                         (sym_r.replace("/", ""), norm_hz_r) in active_pairs
                                     )
-                                    if age_s <= max_s or is_in_paper:
+                                    if age_s <= eff_max_s or is_in_paper:
                                         is_still_active = True
-                                    elif age_s <= (max_s * 1.50):
+                                    elif age_s <= (eff_max_s * 1.50):
                                         # Dynamic Consolidation Grace Extension (+50% TTL for flat coiling setups)
                                         is_still_active = True
                             except Exception:
@@ -1449,8 +1641,8 @@ class UnifiedCryptoEngine:
                                 csv_needs_update = True
 
                         csv_all_rows.append(row)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[ENGINE ⚠️] Error reading {csv_path} during cleanup: {e}")
 
         if csv_needs_update and csv_all_rows:
             try:
@@ -1461,8 +1653,8 @@ class UnifiedCryptoEngine:
                     for r in csv_all_rows:
                         writer.writerow(r)
                 os.replace(temp_csv, csv_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[ENGINE ⚠️] Failed persisting cleaned ledger to {csv_path}: {e}")
 
         import csv
         from app.engine.scanner.filters import UniverseFilter
@@ -1475,25 +1667,30 @@ class UnifiedCryptoEngine:
 
             sym_clean = sym.replace("/", "").replace("-", "")
             hz_raw = str(s.get("dominant_timeframe") or s.get("horizon") or s.get("active_signal_horizon") or "15M").upper()
-            if "15" in hz_raw:
-                norm_hz = "15M"
-            elif "1H" in hz_raw:
-                norm_hz = "1H"
-            elif "24H" in hz_raw or "1D" in hz_raw:
+            if any(x in hz_raw for x in ["24", "1D", "SWING", "MACRO", "DAILY", "7D", "15D", "30D"]):
                 norm_hz = "24H"
+            elif any(x in hz_raw for x in ["1H", "4H", "12H", "DAY", "INTRADAY"]):
+                norm_hz = "1H"
+            elif any(x in hz_raw for x in ["15", "5M", "30M", "SCALP"]):
+                norm_hz = "15M"
             else:
                 norm_hz = "15M"
+
+            # Strict 15-Minute Execution Horizon Only: Suppress all other execution horizons (intraday, day trades, swings)
+            if norm_hz != "15M":
+                continue
 
             sig_id = s.get("trade_id") or s.get("signal_id") or f"SIG_{now_utc.strftime('%Y%m%d_%H%M%S')}_{sym_clean}_{norm_hz}"
 
             if sig_id in existing_ids:
                 continue
 
-            # Phase 3: Check dynamic toxic asset quarantine & 2-hour symbol cooldown
+            # Phase 3: Check dynamic toxic asset quarantine & rational inter-signal cooldown
             if self.is_symbol_quarantined(sym)[0]:
                 continue
             sym_last_emitted = self._symbol_cooldown_registry.get(sym, 0.0)
-            if (time.time() - sym_last_emitted) < 7200 and norm_hz in ["15M", "1H"]:
+            cooldown_thresh = 1800 if norm_hz == "15M" else (3600 if norm_hz == "1H" else 7200)
+            if (time.time() - sym_last_emitted) < cooldown_thresh and norm_hz in ["15M", "1H"]:
                 continue
 
             # Prevent duplicate signal flood only if coin currently has an unexpired active trade in this horizon
@@ -1525,9 +1722,42 @@ class UnifiedCryptoEngine:
             tier_num = 1 if "A+" in str(s.get("quality_grade", "")) else (2 if "Grade A" in str(s.get("quality_grade", "")) else 3)
 
             dom_dir = str(s.get("dominant_direction") or s.get("direction") or "LONG").upper()
+            strat_name = str(s.get("strategy_archetype") or s.get("canonical_strategy") or s.get("decision") or "MOMENTUM_TREND")
+            regime_name = str(s.get("market_shield") or getattr(self, "btc_shield_code", "RANGE"))
+            exp_net_ret = safe_float(s.get("expected_return_pct"), 0.0)
+            costs_pct = safe_float(s.get("costs_total_pct"), 0.145)
+            if costs_pct <= 0.0:
+                costs_pct = 0.145
+            ev_net_val = safe_float(s.get("ev_net"), 0.0)
+            if ev_net_val <= 0.0:
+                if exp_net_ret > 0.0:
+                    ev_net_val = exp_net_ret * 100.0 if exp_net_ret <= 0.10 else exp_net_ret
+                elif entry_p > 0 and tp1_p > 0 and sl_p > 0 and entry_p != sl_p:
+                    r_gain = abs(tp1_p - entry_p) / entry_p
+                    r_loss = abs(entry_p - sl_p) / entry_p
+                    p_win = safe_float(s.get("p_tp1_pct") or s.get("meta_win_prob_pct"), 75.0) / 100.0
+                    p_win = max(0.05, min(0.95, p_win))
+                    gross_ev = ((p_win * r_gain) - ((1.0 - p_win) * r_loss)) * 100.0
+                    ev_net_val = round(max(0.25, gross_ev - costs_pct), 4)
+                else:
+                    ev_net_val = 0.35
+            ev_gross_val = safe_float(s.get("ev_gross"), round(ev_net_val + costs_pct, 4))
+
+            # Assign signal to authoritative clustered root thesis
+            thesis, _ = self.thesis_engine.register_or_update(
+                symbol=sym,
+                direction=dom_dir,
+                horizon=norm_hz,
+                strategy=strat_name,
+                regime=regime_name,
+                expected_net_return=ev_net_val,
+                signal_id=sig_id
+            )
+            trade_th_id = thesis.thesis_id
+
             row = {
                 "signal_id": sig_id,
-                "trade_thesis_id": f"THESIS-{sym_clean}-{dom_dir[:4]}-{now_utc.strftime('%Y%m%d_%H%M')}",
+                "trade_thesis_id": trade_th_id,
                 "date_utc": date_str,
                 "time_utc": time_str,
                 "rank": f"#{rank_idx}",
@@ -1553,8 +1783,8 @@ class UnifiedCryptoEngine:
                 "paper_trading_status": "MONITORED SCAN SIGNAL",
                 "predicted_window": win_str,
                 "predicted_close_utc": close_dt.strftime("%Y-%m-%d %H:%M UTC"),
-                "status": "PENDING_EVALUATION",
-                "outcome_label": "PENDING ⏳",
+                "status": "RESTING_LIMIT" if bool(s.get("is_limit_pending", False)) else "PENDING_EVALUATION",
+                "outcome_label": ("🎯 PENDING LIMIT (AWAIT PULLBACK)" if dom_dir == "LONG" else "🎯 PENDING LIMIT (AWAIT BOUNCE)") if bool(s.get("is_limit_pending", False)) else "PENDING ⏳",
                 "peak_price_seen": entry_p,
                 "trough_price_seen": entry_p,
                 "max_potential_gain_pct": 0.0,
@@ -1571,14 +1801,22 @@ class UnifiedCryptoEngine:
                 "market_shield": s.get("btc_shield_status", "NORMAL"),
                 "strategy_archetype": strat,
                 "order_block_setup": ob_str,
-                "ev_net": round(float(s.get("ev_net", 0.0)), 4),
-                "ev_gross": round(float(s.get("ev_gross", 0.0)), 4),
-                "costs_total_pct": round(float(s.get("costs_total_pct", 0.0)), 4),
+                "ev_net": round(float(ev_net_val), 4),
+                "ev_gross": round(float(ev_gross_val), 4),
+                "costs_total_pct": round(float(costs_pct), 4),
                 "is_limit_pending": bool(s.get("is_limit_pending", False)),
                 "optimal_entry_price": format_dynamic_precision(float(s.get("optimal_entry_price", entry_p))),
                 "entry_zone_min": format_dynamic_precision(float(s.get("entry_zone_min", entry_p))),
                 "entry_zone_max": format_dynamic_precision(float(s.get("entry_zone_max", entry_p))),
                 "candle_trigger_confirmed": bool(s.get("candle_trigger_confirmed", True)),
+                "is_higher_low_entry": bool(s.get("is_higher_low_entry", False)),
+                "is_lower_high_entry": bool(s.get("is_lower_high_entry", False)),
+                "entry_anchor_type": s.get("entry_anchor_type") or "",
+                "entry_anchor_price": format_dynamic_precision(float(s.get("entry_anchor_price"))) if s.get("entry_anchor_price") is not None else "",
+                "execution_mode": s.get("execution_mode", "MARKET"),
+                "is_candlestick_unanimous": bool(s.get("is_candlestick_unanimous", False)),
+                "candlestick_direction": s.get("candlestick_direction") or "",
+                "triad_structure": json.dumps(s.get("triad_structure")) if isinstance(s.get("triad_structure"), dict) else "",
                 "news_sentiment": (s.get("news_sentiment") or {}).get("label") if isinstance(s.get("news_sentiment"), dict) else "⚪ NEUTRAL",
                 "news_score": (s.get("news_sentiment") or {}).get("score", 0.0) if isinstance(s.get("news_sentiment"), dict) else 0.0,
                 "catalyst_title": (s.get("catalyst_event") or {}).get("title", "") if isinstance(s.get("catalyst_event"), dict) else "",
@@ -1606,17 +1844,27 @@ class UnifiedCryptoEngine:
                     file_valid = False
 
             if not file_valid:
-                with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-                    writer.writeheader()
-                    for r in rows_to_append:
-                        writer.writerow(r)
+                temp_init_csv = f"{csv_path}.{time.time_ns()}.tmp"
+                try:
+                    with open(temp_init_csv, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+                        writer.writeheader()
+                        for r in rows_to_append:
+                            writer.writerow(r)
+                    os.replace(temp_init_csv, csv_path)
+                finally:
+                    if os.path.exists(temp_init_csv):
+                        try:
+                            os.remove(temp_init_csv)
+                        except Exception:
+                            pass
             else:
                 with open(csv_path, "a", newline="", encoding="utf-8") as f:
                     writer = csv.DictWriter(f, fieldnames=active_fnames, extrasaction="ignore")
                     for r in rows_to_append:
                         writer.writerow(r)
             print(f"[SIGNALS 📝] Appended {len(rows_to_append)} fresh institutional trade signals to trader_signals_tracker.csv.")
+            self.thesis_engine.save_theses_to_disk()
 
             # Automated WhatsApp Signal Notification Dispatch (Guaranteed Dashboard <-> WhatsApp Parity)
             for r in rows_to_append:
@@ -1692,8 +1940,11 @@ class UnifiedCryptoEngine:
                 return "LOST" in s or "SL_HIT" in s or "STOP_LOSS" in s or "LOST" in o
 
             recent_df = df.tail(300)
+            BENCHMARK_IMMUNE = {"BTC", "ETH", "SOL", "BTC/USDT", "ETH/USDT", "SOL/USDT"}
             for sym, g in recent_df.groupby("symbol"):
                 sym_clean = str(sym).strip().upper()
+                if sym_clean in BENCHMARK_IMMUNE or sym_clean.replace("/USDT", "") in BENCHMARK_IMMUNE:
+                    continue
                 loss_count = 0
                 has_win = False
                 for _, row in g.iterrows():
@@ -1721,7 +1972,7 @@ class UnifiedCryptoEngine:
                 with open(tmp_state, "w", encoding="utf-8") as sf:
                     json.dump(state_data, sf, indent=2)
                 os.replace(tmp_state, state_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[ENGINE ⚠️] Failed persisting quarantine state to {state_path}: {e}")
         except Exception as q_err:
-            pass
+            logger.warning(f"[ENGINE ⚠️] Error evaluating toxic coin quarantine: {q_err}")

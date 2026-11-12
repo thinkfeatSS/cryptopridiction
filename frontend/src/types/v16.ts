@@ -35,6 +35,15 @@ export interface V16ImmutableSignal {
   status: string;
   liquidity_score?: number;
   data_quality_score?: number;
+  is_higher_low_entry?: boolean;
+  is_lower_high_entry?: boolean;
+  entry_anchor_type?: string;
+  entry_anchor_price?: number;
+  execution_mode?: string;
+  is_candlestick_unanimous?: boolean;
+  candlestick_direction?: string;
+  rectangle_upper?: number;
+  rectangle_lower?: number;
 }
 
 export interface V16DynamicTradeState {
@@ -51,6 +60,12 @@ export interface V16DynamicTradeState {
   status: string;
   outcome_label: string;
   updated_at_utc: string;
+  is_risk_free?: boolean;
+  residual_risk_usd?: number;
+  locked_profit_usd?: number;
+  trailing_runner_rr?: number | null;
+  trailing_rr_ratio?: string;
+  structural_risk_reward?: number;
 }
 
 export interface V16SignalEnvelope {

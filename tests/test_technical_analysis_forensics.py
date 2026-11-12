@@ -1141,7 +1141,7 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
         """
         from app.quant_v16.strategies import StrategyRegistry, StrategyArchetype
 
-        reg = StrategyRegistry()
+        reg = StrategyRegistry(persistence_file=":memory:")
 
         # MOMENTUM_LONG in BEAR_TREND must be blocked
         is_allowed, reason = reg.is_strategy_allowed(StrategyArchetype.MOMENTUM_LONG.value, "BEAR_TREND")
@@ -1243,7 +1243,7 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
         from app.quant_v16.strategies import StrategyRegistry, StrategyArchetype
         from app.engine.signals.signal_generator import map_canonical_strategy
 
-        reg = StrategyRegistry()
+        reg = StrategyRegistry(persistence_file=":memory:")
 
         # Check StrategyArchetype values exist
         self.assertEqual(StrategyArchetype.FVG_RETEST_LONG.value, "FVG_RETEST_LONG")
@@ -1325,7 +1325,8 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
                 "tp1_price": 103.0,
                 "tp2_price": 105.0,
                 "tp3_price": 108.0,
-                "sl_price": 98.5
+                "sl_price": 98.5,
+                "grade": "A+"
             }
             admitted = bot.admit_signal(signal)
             self.assertTrue(admitted, "Resting limit signal must be admitted")
@@ -1361,6 +1362,182 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
             self.assertEqual(filled_pos["status"], "OPEN")
             self.assertFalse(filled_pos["is_limit_resting"])
             self.assertEqual(filled_pos["entry_price"], 100.0)
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_htf_order_block_intrabar_whipsaw_mitigation(self):
+        """Forensic Test: Sub-second tick evaluation against Order Block invalidation level mitigates HTF (4H/24H) mid-candle whipsaws."""
+        import os
+        import tempfile
+        import shutil
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            bot = PaperTradingBot(ledger_file=os.path.join(tmp_dir, "test_ob_whipsaw_ledger.json"))
+
+            # 1. HTF Resting Limit Order: Cancelled immediately on live tick when invalidation level breached mid-candle
+            signal_htf_limit = {
+                "symbol": "BTC/USDT",
+                "direction": "LONG",
+                "horizon": "4H",
+                "signal_horizon": "4H",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "quality_grade": "Grade A+",
+                "current_price": 100.50,
+                "entry_price": 100.0,
+                "optimal_entry_limit": 100.0,
+                "entry_zone_min": 99.60,
+                "entry_zone_max": 100.60,
+                "is_limit_pending": True,
+                "tp1_price": 104.0,
+                "tp2_price": 107.0,
+                "tp3_price": 110.0,
+                "sl_price": 98.80,
+                "strategy": "ORDER_BLOCK_LONG",
+                "canonical_strategy": "ORDER_BLOCK_LONG",
+                "order_block_zone": [99.40, 101.20],
+                "invalidation_level": 99.20,
+                "order_block_setup": {
+                    "setup_detected": True,
+                    "order_block_zone": [99.40, 101.20],
+                    "invalidation_level": 99.20,
+                    "sl_price": 98.80,
+                    "htf_poi_tf": "4h"
+                }
+            }
+            admitted = bot.admit_signal(signal_htf_limit)
+            self.assertTrue(admitted, "HTF Order Block limit order must be admitted")
+            self.assertEqual(len(bot.data["open_positions"]), 1)
+            pos = bot.data["open_positions"][0]
+            self.assertEqual(pos["status"], "RESTING_LIMIT")
+            self.assertEqual(pos["ob_invalidation_level"], 99.20)
+
+            # Live price drops to 99.10 (only 0.90% below limit, below 1.20% blowout gate, but pierces OB invalidation 99.20)
+            bot.on_tick({"BTC/USDT": 99.10})
+            self.assertEqual(len(bot.data["open_positions"]), 0, "Resting limit must be cancelled immediately on tick when OB is invalidated")
+            self.assertEqual(len(bot.data.get("cancelled_orders", [])), 1)
+            self.assertEqual(bot.data["cancelled_orders"][0]["cancellation_reason"], "CANCELLED_ORDER_BLOCK_INVALIDATED")
+
+            # 2. HTF Open Position (Long): Exits immediately via CLOSED_ORDER_BLOCK_INTRABAR_INVALIDATION on mid-candle crush
+            signal_htf_open_long = {
+                "symbol": "ETH/USDT",
+                "direction": "LONG",
+                "horizon": "4H",
+                "signal_horizon": "4H",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "quality_grade": "Grade A+",
+                "current_price": 3000.0,
+                "entry_price": 3000.0,
+                "optimal_entry_limit": 3000.0,
+                "is_limit_pending": False,
+                "tp1_price": 3120.0,
+                "tp2_price": 3200.0,
+                "tp3_price": 3300.0,
+                "sl_price": 2940.0,
+                "strategy": "ORDER_BLOCK_LONG",
+                "canonical_strategy": "ORDER_BLOCK_LONG",
+                "order_block_zone": [2960.0, 3020.0],
+                "invalidation_level": 2950.0,
+                "order_block_setup": {
+                    "setup_detected": True,
+                    "order_block_zone": [2960.0, 3020.0],
+                    "invalidation_level": 2950.0,
+                    "sl_price": 2940.0,
+                    "htf_poi_tf": "4h"
+                }
+            }
+            admitted = bot.admit_signal(signal_htf_open_long)
+            self.assertTrue(admitted, "HTF Open Long must be admitted")
+            self.assertEqual(len(bot.data["open_positions"]), 1)
+            self.assertEqual(bot.data["open_positions"][0]["status"], "OPEN")
+
+            # Mid-candle seller crush: live bid breaches 2950.0 down to 2948.0
+            bot.on_tick({"ETH/USDT": 2948.0})
+            self.assertEqual(len(bot.data["open_positions"]), 0, "Position must exit immediately without waiting for 4H candle close")
+            self.assertEqual(len(bot.data.get("closed_trades", [])), 1)
+            closed_trade = bot.data["closed_trades"][0]
+            self.assertEqual(closed_trade["exit_reason"], "CLOSED_ORDER_BLOCK_INTRABAR_INVALIDATION")
+            self.assertEqual(closed_trade["outcome"], "LOST")
+
+            # 3. HTF Open Position (Short): Exits immediately when price rallies through Supply Block invalidation
+            signal_htf_open_short = {
+                "symbol": "SOL/USDT",
+                "direction": "SHORT",
+                "horizon": "24H",
+                "signal_horizon": "24H",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "quality_grade": "Grade A+",
+                "current_price": 200.0,
+                "entry_price": 200.0,
+                "optimal_entry_limit": 200.0,
+                "is_limit_pending": False,
+                "tp1_price": 190.0,
+                "tp2_price": 182.0,
+                "tp3_price": 170.0,
+                "sl_price": 206.0,
+                "strategy": "ORDER_BLOCK_SHORT",
+                "canonical_strategy": "ORDER_BLOCK_SHORT",
+                "order_block_zone": [198.0, 202.0],
+                "invalidation_level": 203.0,
+                "order_block_setup": {
+                    "setup_detected": True,
+                    "order_block_zone": [198.0, 202.0],
+                    "invalidation_level": 203.0,
+                    "sl_price": 206.0,
+                    "htf_poi_tf": "24h"
+                }
+            }
+            admitted = bot.admit_signal(signal_htf_open_short)
+            self.assertTrue(admitted, "HTF Open Short must be admitted")
+            self.assertEqual(len(bot.data["open_positions"]), 1)
+
+            # Mid-candle buyer surge: live ask breaches 203.0 up to 203.50
+            bot.on_tick({"SOL/USDT": 203.50})
+            self.assertEqual(len(bot.data["open_positions"]), 0, "Short position must exit immediately without waiting for 24H candle close")
+            self.assertEqual(len(bot.data.get("closed_trades", [])), 2)
+            closed_short = bot.data["closed_trades"][1]
+            self.assertEqual(closed_short["exit_reason"], "CLOSED_ORDER_BLOCK_INTRABAR_INVALIDATION")
+            self.assertEqual(closed_short["outcome"], "LOST")
+
+            # 4. Live Bid/Ask Order Book Depth Evaluation
+            signal_depth_long = {
+                "symbol": "AVAX/USDT",
+                "direction": "LONG",
+                "horizon": "4H",
+                "signal_horizon": "4H",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "quality_grade": "Grade A+",
+                "current_price": 40.0,
+                "entry_price": 40.0,
+                "optimal_entry_limit": 40.0,
+                "is_limit_pending": False,
+                "tp1_price": 44.0,
+                "tp2_price": 48.0,
+                "tp3_price": 52.0,
+                "sl_price": 38.0,
+                "strategy": "ORDER_BLOCK_LONG",
+                "order_block_zone": [39.0, 41.0],
+                "invalidation_level": 38.80
+            }
+            bot.admit_signal(signal_depth_long)
+            self.assertEqual(len(bot.data["open_positions"]), 1)
+
+            # Mid price is 39.0 (above 38.80), but live best bid from order book is 38.70 (breached)
+            ob_depths = {
+                "AVAX/USDT": {
+                    "bids": [[38.70, 100.0], [38.60, 200.0]],
+                    "asks": [[39.30, 100.0], [39.40, 200.0]]
+                }
+            }
+            bot.on_tick({"AVAX/USDT": 39.0}, order_book_depths=ob_depths)
+            self.assertEqual(len(bot.data["open_positions"]), 0, "Live bid penetration from order book depth must trigger invalidation exit")
+            self.assertEqual(bot.data["closed_trades"][-1]["exit_reason"], "CLOSED_ORDER_BLOCK_INTRABAR_INVALIDATION")
 
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1401,6 +1578,7 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
         tmp_dir = tempfile.mkdtemp()
         try:
             bot = PaperTradingBot(ledger_file=os.path.join(tmp_dir, "test_latency_ledger.json"))
+            bot.data["desks"]["scalp"]["max_slots"] = 2
 
             # Scenario 1: Sub-second WebSocket feed (latency = 150ms <= 800ms)
             # Threshold stays standard at 1.20%.
@@ -1420,7 +1598,8 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
                 "tp1_price": 103.0,
                 "tp2_price": 105.0,
                 "tp3_price": 108.0,
-                "sl_price": 98.5
+                "sl_price": 98.5,
+                "grade": "A+"
             }
             bot.admit_signal(signal1)
             self.assertEqual(len(bot.data["open_positions"]), 1)
@@ -1447,7 +1626,8 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
                 "tp1_price": 103.0,
                 "tp2_price": 105.0,
                 "tp3_price": 108.0,
-                "sl_price": 98.5
+                "sl_price": 98.5,
+                "grade": "A+"
             }
             bot.admit_signal(signal2)
             self.assertEqual(len(bot.data["open_positions"]), 2)  # 1 open BTC + 1 resting ETH
@@ -1462,8 +1642,8 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def test_bullish_and_bearish_engulfing_confirmation(self):
-        """Forensic Test: Verify Bullish & Bearish Engulfing Momentum Flip detection and confirmation."""
+    def test_bullish_and_bearish_engulfing_confirmation_with_spread(self):
+        """Forensic Test: Verify Bullish & Bearish Engulfing Momentum Flip detection and confirmation (with spread)."""
         # 1. Bullish Engulfing: Prior candle red (open=102, close=100), Trigger candle green (open=99.5, close=102.5, high=102.6, low=99.4)
         df_bull = pd.DataFrame([
             {"open": 101.0, "high": 102.0, "low": 100.5, "close": 101.5, "volume": 100.0},
@@ -1492,8 +1672,8 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
         self.assertTrue(metrics_b["is_engulfing"])
         self.assertEqual(metrics_b["pattern"], "BEARISH_ENGULFING")
 
-    def test_liquidity_sweep_and_reclaim_confirmation(self):
-        """Forensic Test: Verify Turtle Soup Liquidity Sweep & Reclaim detection and confirmation."""
+    def test_liquidity_sweep_and_reclaim_confirmation_with_spread(self):
+        """Forensic Test: Verify Turtle Soup Liquidity Sweep & Reclaim detection and confirmation (with spread)."""
         # Swing low at 98.0 in prior window; trigger candle dips to 97.2 but closes back at 98.6 with 35% lower wick
         rows = [
             {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 100.0},
@@ -1600,7 +1780,7 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
 
     def test_regime_kill_switch_allows_liquidity_reclaim_in_range_and_bear(self):
         """Forensic Test: Verify that Section 32 Kill Switch allows specialized strategies in their authorized regimes."""
-        registry = StrategyRegistry()
+        registry = StrategyRegistry(persistence_file=":memory:")
 
         # In RANGE: Generic MOMENTUM_LONG is PAUSED, but LIQUIDITY_RECLAIM_LONG and RANGE_BOUNCE_LONG must be ELIGIBLE
         mom_allowed, mom_reason = registry.is_strategy_allowed(StrategyArchetype.MOMENTUM_LONG.value, "RANGE")
@@ -1649,6 +1829,208 @@ class TestTechnicalAnalysisForensics(unittest.TestCase):
         self.assertEqual(eval_stale["code"], NoTradeZoneReason.STALE_PRICE_FEED.value)
         self.assertFalse(eval_stale["allowed_to_trade"], "Trading must be forbidden when price feed is stale")
         self.assertTrue(any("Stale Price Feed" in r for r in eval_stale["reasons"]))
+
+    def test_microstructure_resting_limit_resolution_and_fill_transition(self):
+        """Phase 2 Forensic Test: Resting Limit orders must NOT trigger premature TP/SL before fill."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+        from app.services.signal_service import SignalService
+        from app.models.signal import SignalAudit
+
+        svc = SignalService()
+        now_utc = datetime.now(timezone.utc)
+
+        # 1. Unfilled resting limit test:
+        # Long resting limit at 100.0, current price is 100.50. High touched 103.50 (above TP1 103.0),
+        # but low only pulled back to 100.20 (never touched entry limit 100.0).
+        sig_unfilled = MagicMock(spec=SignalAudit)
+        sig_unfilled.signal_id = "TEST_RESTING_001"
+        sig_unfilled.symbol = "BTC/USDT"
+        sig_unfilled.horizon = "15M"
+        sig_unfilled.direction = "LONG"
+        sig_unfilled.entry_price = 100.0
+        sig_unfilled.tp1_price = 103.0
+        sig_unfilled.tp2_price = 105.0
+        sig_unfilled.tp3_price = 108.0
+        sig_unfilled.sl_price = 98.0
+        sig_unfilled.status = "RESTING_LIMIT"
+        sig_unfilled.outcome_label = "🎯 PENDING LIMIT (AWAIT PULLBACK)"
+        sig_unfilled.decision = "🎯 LONG RESTING LIMIT (AWAIT PULLBACK)"
+        sig_unfilled.is_limit_pending = True
+        sig_unfilled.peak_price_seen = 103.50
+        sig_unfilled.trough_price_seen = 100.20
+        sig_unfilled.created_at = now_utc
+        sig_unfilled.date_utc = now_utc.strftime("%Y-%m-%d")
+        sig_unfilled.time_utc = now_utc.strftime("%H:%M:%S UTC")
+        sig_unfilled.predicted_close_utc = "N/A"
+        sig_unfilled.paper_trading_status = "RESTING LIMIT (ORDER BOOK)"
+
+        # Evaluate active signals with spot price at 102.0
+        live_prices = {"BTC/USDT": 102.0}
+        svc.evaluate_active_signals([sig_unfilled], live_prices=live_prices, now_utc=now_utc)
+
+        # Order did NOT fill: Must NOT trigger TP1 or SL; must remain resting limit!
+        self.assertEqual(sig_unfilled.status, "RESTING_LIMIT")
+        self.assertIn("AWAIT PULLBACK", sig_unfilled.outcome_label)
+
+        # 2. Filled limit test (Normal Fill with modest move below ratchet gate):
+        # Price pulls back to 99.80 (touching/penetrating limit 100.0), peak seen is 100.20 (+0.20%)
+        sig_filled = MagicMock(spec=SignalAudit)
+        sig_filled.signal_id = "TEST_RESTING_002"
+        sig_filled.symbol = "BTC/USDT"
+        sig_filled.horizon = "15M"
+        sig_filled.direction = "LONG"
+        sig_filled.entry_price = 100.0
+        sig_filled.tp1_price = 103.0
+        sig_filled.tp2_price = 105.0
+        sig_filled.tp3_price = 108.0
+        sig_filled.sl_price = 98.0
+        sig_filled.status = "RESTING_LIMIT"
+        sig_filled.outcome_label = "🎯 PENDING LIMIT (AWAIT PULLBACK)"
+        sig_filled.decision = "🎯 LONG RESTING LIMIT (AWAIT PULLBACK)"
+        sig_filled.is_limit_pending = True
+        sig_filled.peak_price_seen = 100.20
+        sig_filled.trough_price_seen = 99.80  # Low reached limit!
+        sig_filled.created_at = now_utc
+        sig_filled.date_utc = now_utc.strftime("%Y-%m-%d")
+        sig_filled.time_utc = now_utc.strftime("%H:%M:%S UTC")
+        sig_filled.predicted_close_utc = "N/A"
+        sig_filled.paper_trading_status = "RESTING LIMIT (ORDER BOOK)"
+
+        svc.evaluate_active_signals([sig_filled], live_prices={"BTC/USDT": 100.10}, now_utc=now_utc)
+
+        # Order filled: Transitions to ACTIVE and RUNNING 🚀
+        self.assertEqual(sig_filled.status, "ACTIVE")
+        self.assertEqual(sig_filled.outcome_label, "RUNNING 🚀")
+
+        # 3. Filled limit with MFE expansion beyond Tier-0 Gate:
+        # Once active, if peak gain reaches 101.50 (+1.50%), profit ratchet advances to TIER0_PROTECTED_BREAKEVEN
+        sig_filled.peak_price_seen = 101.50
+        svc.evaluate_active_signals([sig_filled], live_prices={"BTC/USDT": 101.20}, now_utc=now_utc)
+        self.assertEqual(sig_filled.status, "TIER0_PROTECTED_BREAKEVEN")
+        self.assertIn("PROFIT PROTECTED", sig_filled.outcome_label)
+
+    def test_regime_adaptive_geometric_targets_and_range_hurdle(self):
+        """Phase 3 Forensic Test: Regime-Adaptive Targets & Dynamic R:R Quality Gate."""
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+        from app.quant_v16.cross_timeframe_matrix import InstitutionalArchetype
+
+        gen = SignalGenerationSystem()
+
+        # Build 30-bar synthetic DataFrame representing a clean range box between 98.0 and 102.0
+        # Range equilibrium is at (102.0 + 98.0) / 2.0 = 100.0
+        dates = pd.date_range("2026-11-06 12:00", periods=30, freq="15min")
+        closes = [99.0 + 0.5 * np.sin(i / 2.0) for i in range(30)]
+        df_range = pd.DataFrame({
+            "open": closes,
+            "high": [c + 0.6 for c in closes],
+            "low": [c - 0.6 for c in closes],
+            "close": closes,
+            "volume": [50000.0 for _ in closes]
+        }, index=dates)
+
+        # 1. RANGE REGIME: Verify target calibration and 1:1.35 RR approval
+        shield_range = {
+            "v16_regime": "RANGE",
+            "regime": "RANGE",
+            "altcoin_longs_allowed": True,
+            "altcoin_shorts_allowed": True,
+            "is_macro_dump": False,
+            "status_code": "NORMAL"
+        }
+
+        # Candidate setup at 99.20 near range bottom
+        sig_range = gen._build_single_horizon_signal(
+            symbol="ETH/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=99.20,
+            dfs_9={"15m": df_range, "1h": df_range},
+            horizon_prediction={"predicted_change_pct": 2.5, "consensus_probability": 0.65, "predicted_target_price": 101.50},
+            btc_shield_state=shield_range,
+            aligned_horizons=["15M", "1H"],
+            volume_24h_usd=5_000_000.0,
+            spread_bps=2.0
+        )
+
+        self.assertIsNotNone(sig_range)
+        # Verify SL maintains structural buffer below range low
+        self.assertLess(sig_range["sl_price"], 99.20)
+        # Verify TP1 is dynamically calibrated within range equilibrium headroom
+        self.assertGreater(sig_range["tp1_price"], 99.20)
+        # Parse RR ratio
+        rr_float = float(sig_range["risk_reward_ratio"].split(":")[-1])
+        self.assertGreaterEqual(rr_float, 1.35, "Range regime must guarantee at least 1:1.35 R:R")
+        # In range regime, trade must NOT be rejected by the old 1:2.0 hurdle
+        self.assertNotEqual(sig_range.get("status"), "HOLD_INSUFFICIENT_RISK_REWARD")
+
+        # 2. TREND REGIME: Verify expansive target geometry and 1:2.0 RR enforcement
+        closes_trend = [90.0 + i * 0.5 for i in range(30)]
+        df_trend = pd.DataFrame({
+            "open": closes_trend,
+            "high": [c + 0.6 for c in closes_trend],
+            "low": [c - 0.4 for c in closes_trend],
+            "close": closes_trend,
+            "volume": [50000.0 for _ in closes_trend]
+        }, index=dates)
+
+        shield_trend = {
+            "v16_regime": "BULL_TREND",
+            "regime": "BULL_TREND",
+            "altcoin_longs_allowed": True,
+            "altcoin_shorts_allowed": True,
+            "is_macro_dump": False,
+            "status_code": "NORMAL"
+        }
+        current_trend_price = float(df_trend["close"].iloc[-1])
+        sig_trend = gen._build_single_horizon_signal(
+            symbol="ETH/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=current_trend_price,
+            dfs_9={"15m": df_trend, "1h": df_trend},
+            horizon_prediction={"predicted_change_pct": 3.5, "consensus_probability": 0.70, "predicted_target_price": current_trend_price + 3.0},
+            btc_shield_state=shield_trend,
+            aligned_horizons=["15M", "1H"],
+            volume_24h_usd=5_000_000.0,
+            spread_bps=2.0
+        )
+
+        self.assertIsNotNone(sig_trend)
+        trend_rr = float(sig_trend["risk_reward_ratio"].split(":")[-1])
+        self.assertGreaterEqual(trend_rr, 2.0, "Trend regime must enforce at least 1:2.00 R:R")
+
+        # 3. ARCHETYPE_C_RANGE_ROTATION: Verify Stop Loss cushion preserved (no wick tightening)
+        archetype_c_info = {
+            "archetype": InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value,
+            "htf_range_high": 102.50,
+            "htf_range_low": 97.50
+        }
+        sig_rot = gen._build_single_horizon_signal(
+            symbol="ETH/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=99.20,
+            dfs_9={"15m": df_range, "1h": df_range},
+            horizon_prediction={"predicted_change_pct": 2.5, "consensus_probability": 0.65, "predicted_target_price": 101.50},
+            btc_shield_state=shield_range,
+            aligned_horizons=["15M", "1H"],
+            archetype_info=archetype_c_info,
+            volume_24h_usd=5_000_000.0,
+            spread_bps=2.0
+        )
+        self.assertIsNotNone(sig_rot)
+        # Ensure SL cushion is at least 0.70 * ATR below entry (not compressed to 0.35 * ATR)
+        sl_cushion = 99.20 - sig_rot["sl_price"]
+        active_atr = float(np.mean(df_range["high"].values[-14:] - df_range["low"].values[-14:]))
+        self.assertGreaterEqual(sl_cushion, active_atr * 0.70, "SL cushion must be preserved in Range Rotation")
+        # Ensure targets are strictly monotonic and <= htf_range_high
+        self.assertLessEqual(sig_rot["tp3_price"], 102.50)
+        self.assertLess(sig_rot["tp1_price"], sig_rot["tp2_price"])
+        self.assertLess(sig_rot["tp2_price"], sig_rot["tp3_price"])
 
 
 if __name__ == "__main__":

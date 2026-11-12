@@ -26,7 +26,7 @@ SHADOW_002_FREEZE_TS = 1793763000.0
 
 EXPERIMENT_MANIFEST = {
     "experiment_id": EXPERIMENT_ID,
-    "status": "GRADUATED_LIMITED_LIVE_ELIGIBLE",
+    "status": "ACTIVE_SHADOW_VALIDATION",
     "git_commit": "6b27043",
     "backend_version": "16.1.0",
     "scanner_version": "16.1.0",
@@ -74,17 +74,17 @@ ARCHIVED_MANIFEST = {
     "conclusion": "VALIDATION FAILED — INVESTIGATION REQUIRED"
 }
 
-# Predefined probability bins for Expected Calibration Error (ECE)
+# Predefined uniform decile probability bins for Expected Calibration Error (ECE)
 PROBABILITY_BINS = [
-    (0.00, 0.50),
-    (0.50, 0.55),
-    (0.55, 0.60),
-    (0.60, 0.65),
-    (0.65, 0.70),
-    (0.70, 0.75),
-    (0.75, 0.80),
-    (0.80, 0.85),
-    (0.85, 0.90),
+    (0.00, 0.10),
+    (0.10, 0.20),
+    (0.20, 0.30),
+    (0.30, 0.40),
+    (0.40, 0.50),
+    (0.50, 0.60),
+    (0.60, 0.70),
+    (0.70, 0.80),
+    (0.80, 0.90),
     (0.90, 1.00)
 ]
 
@@ -157,6 +157,8 @@ class ValidationMetricsReport:
     promotion_gates: Dict[str, Any]
     conclusion: str
     raw_max_drawdown_pct: Optional[float] = None
+    raw_expected_calibration_error: Optional[float] = None
+    raw_brier_score: Optional[float] = None
 
 
 class V16ShadowValidationEngine:
@@ -185,8 +187,9 @@ class V16ShadowValidationEngine:
     def fit_and_calibrate_probabilities(predictions: List[float], outcomes: List[int]) -> List[float]:
         """
         Empirical Platt Sigmoid Calibration (Section 4.3):
-        Fits a logistic regression mapping raw logit probabilities to empirical out-of-sample win rates.
-        Brier score and ECE drop to mathematically optimal levels while preserving monotonic ranking.
+        Uses Stratified K-Fold Out-of-Fold (OOF) cross-validation to prevent in-sample
+        data leakage and artificial collapse of calibration error to zero.
+        Maps raw logit probabilities to empirical out-of-sample win rates.
         """
         if len(predictions) < 20 or len(predictions) != len(outcomes):
             return list(predictions)
@@ -194,14 +197,29 @@ class V16ShadowValidationEngine:
             import numpy as np
             from scipy.special import logit
             from sklearn.linear_model import LogisticRegression
+            from sklearn.model_selection import StratifiedKFold
+
             preds_arr = np.clip(np.array(predictions, dtype=float), 1e-4, 1.0 - 1e-4)
             logits = logit(preds_arr).reshape(-1, 1)
             y = np.array(outcomes, dtype=int)
-            if len(np.unique(y)) < 2:
+            unique_classes = np.unique(y)
+            if len(unique_classes) < 2 or min(np.bincount(y)) < 2:
                 return list(predictions)
-            clf = LogisticRegression(C=1.0, max_iter=200)
-            clf.fit(logits, y)
-            cal_p = clf.predict_proba(logits)[:, 1]
+
+            n_splits = min(5, int(min(np.bincount(y))))
+            if n_splits < 2:
+                clf = LogisticRegression(C=1.0, max_iter=200)
+                clf.fit(logits, y)
+                cal_p = clf.predict_proba(logits)[:, 1]
+                return [round(float(p), 4) for p in cal_p]
+
+            skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+            cal_p = np.zeros(len(predictions), dtype=float)
+            for train_idx, test_idx in skf.split(logits, y):
+                clf = LogisticRegression(C=1.0, max_iter=200)
+                clf.fit(logits[train_idx], y[train_idx])
+                cal_p[test_idx] = clf.predict_proba(logits[test_idx])[:, 1]
+
             return [round(float(p), 4) for p in cal_p]
         except Exception:
             return list(predictions)
@@ -666,7 +684,11 @@ class V16ShadowValidationEngine:
             raw_max_dd, risk_budgeted_max_dd, _ = self.calculate_max_drawdown(eval_returns, eval_sl_dist)
             realized_max_dd = risk_budgeted_max_dd
 
-            # Empirical Platt Sigmoid Calibration when sufficient resolved sample exists (>= 20 trades)
+            # Raw uncalibrated metrics directly from scanner predictions
+            raw_brier = self.calculate_brier_score(p_tp1_for_resolved, actual_tp1_hit)
+            raw_ece, raw_b_curve = self.calculate_ece(p_tp1_for_resolved, actual_tp1_hit)
+
+            # Empirical Out-of-Fold Platt Sigmoid Calibration (Section 4.3, >= 20 trades)
             eval_probs = (
                 self.fit_and_calibrate_probabilities(p_tp1_for_resolved, actual_tp1_hit)
                 if resolved >= 20 else p_tp1_for_resolved
@@ -696,6 +718,9 @@ class V16ShadowValidationEngine:
             ret_ci.metric_name = "Average Net Return % (95% CI)"
             bootstrap_cis["avg_return"] = asdict(ret_ci)
 
+        # Count active bins with trades
+        active_bins_count = len([b for b in calibration_curve if b.get("sample_count", 0) > 0])
+
         # Promotion Gates evaluation
         promotion_gates = {
             "gate_1_technical_validation": {
@@ -712,9 +737,15 @@ class V16ShadowValidationEngine:
                 )
             },
             "gate_3_calibration_hurdle": {
-                "status": "AWAITING_OUTCOMES" if resolved < 30 else ("PASS" if (ece is not None and ece <= 0.12) else "WARNING"),
+                "status": (
+                    "AWAITING_OUTCOMES" if resolved < 30 else
+                    ("DEGENERATE_SAMPLE" if (ece is not None and ece < 0.0001 and active_bins_count <= 1) else
+                    ("PASS" if (ece is not None and ece <= 0.12) else "WARNING"))
+                ),
                 "ece": ece,
-                "max_allowed_ece": 0.12
+                "raw_ece": raw_ece if resolved > 0 else None,
+                "max_allowed_ece": 0.12,
+                "active_bins": active_bins_count
             },
             "gate_4_economic_edge": {
                 "status": "AWAITING_OUTCOMES" if resolved < 30 else ("PASS" if realized_avg_return and realized_avg_return > 0 and realized_pf and realized_pf >= 1.20 else "FAIL"),
@@ -722,12 +753,12 @@ class V16ShadowValidationEngine:
                 "min_profit_factor": 1.20
             },
             "gate_5_risk_drawdown": {
-                "status": "PASS" if realized_max_dd is None or realized_max_dd <= 6.0 else "FAIL",
+                "status": "AWAITING_OUTCOMES" if resolved < 30 else ("PASS" if (realized_max_dd is not None and realized_max_dd <= 6.0) else "FAIL"),
                 "max_drawdown": realized_max_dd,
                 "raw_unleveraged_drawdown": raw_max_dd if resolved > 0 else 0.0,
                 "max_allowed_dd": 6.0,
                 "risk_model": "1.0% Fixed-Risk Unit Sizing (1R Normalization)",
-                "detail": f"Risk-Budgeted DD: {realized_max_dd:.1f}% (Hurdle <= 6.0%) | Raw Price DD: {raw_max_dd:.1f}%" if resolved > 0 else "N/A"
+                "detail": f"Risk-Budgeted DD: {realized_max_dd:.1f}% (Hurdle <= 6.0%) | Raw Price DD: {raw_max_dd:.1f}%" if (resolved >= 30 and realized_max_dd is not None) else "N/A"
             }
         }
 
@@ -740,9 +771,14 @@ class V16ShadowValidationEngine:
             all_pass = all(g["status"] == "PASS" for g in promotion_gates.values())
             conclusion = "VALIDATION PASSED — LIMITED LIVE ELIGIBLE (GRADUATED)" if all_pass else "VALIDATION FAILED — INVESTIGATION REQUIRED"
 
-        if target_manifest.get("experiment_id") == EXPERIMENT_ID and (resolved >= 100 and all_pass):
+        if target_manifest.get("experiment_id") == EXPERIMENT_ID:
             target_manifest = dict(target_manifest)
-            target_manifest["status"] = "GRADUATED_LIMITED_LIVE_ELIGIBLE"
+            if resolved >= 100 and all_pass:
+                target_manifest["status"] = "GRADUATED_LIMITED_LIVE_ELIGIBLE"
+            elif resolved >= 30:
+                target_manifest["status"] = "PRELIMINARY_EVIDENCE_ACCUMULATING"
+            else:
+                target_manifest["status"] = "ACTIVE_SHADOW_VALIDATION"
 
         return ValidationMetricsReport(
             experiment_id=target_exp_id,
@@ -771,5 +807,7 @@ class V16ShadowValidationEngine:
             bootstrap_intervals=bootstrap_cis,
             promotion_gates=promotion_gates,
             conclusion=conclusion,
-            raw_max_drawdown_pct=raw_max_dd if resolved > 0 else 0.0
+            raw_max_drawdown_pct=raw_max_dd if resolved > 0 else 0.0,
+            raw_expected_calibration_error=raw_ece if resolved > 0 else None,
+            raw_brier_score=raw_brier if resolved > 0 else None
         )

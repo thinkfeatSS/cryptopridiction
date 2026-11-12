@@ -187,8 +187,8 @@ class InstitutionalIntelligenceService:
                 or "FOMC" in str(nearest_event.get("category", "")).upper()
                 or "POWELL" in str(nearest_event.get("category", "")).upper()
             )
-            pre_release_window = 45.0 if is_critical else 30.0
-            post_release_window = -30.0 if is_critical else -15.0
+            pre_release_window = 20.0 if is_critical else 15.0
+            post_release_window = -15.0 if is_critical else -12.0
             if post_release_window <= nearest_diff_min <= pre_release_window:
                 is_volatility_pause_active = True
                 time_desc = f"{abs(round(nearest_diff_min, 1))}m {'until' if nearest_diff_min > 0 else 'since'} release"

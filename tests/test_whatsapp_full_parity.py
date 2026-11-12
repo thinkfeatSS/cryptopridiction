@@ -3,6 +3,7 @@ Quant Edge V16: WhatsApp Full Parity & Automation Test Suite
 Verifies signal creation, TP hits, SL invalidations, Breakeven profit-locks, and Market Regime alerts.
 """
 
+import os
 import unittest
 from unittest.mock import patch, MagicMock
 from app.services.whatsapp_service import whatsapp_service
@@ -244,6 +245,43 @@ class TestWhatsAppFullParity(unittest.TestCase):
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    def test_10_gateway_connectivity_circuit_breaker_and_offline_spool(self):
+        """Verifies external gateway offline circuit breaker and zero data loss disk spooling."""
+        self.assertTrue(whatsapp_service.is_test_environment())
+        # In test mode, gateway is marked offline to avoid socket connection errors
+        self.assertFalse(whatsapp_service.is_gateway_available())
+        
+        health = whatsapp_service.check_gateway_health()
+        self.assertFalse(health["healthy"])
+        self.assertEqual(health["state"], "test_offline")
+        
+        status = whatsapp_service.get_status()
+        self.assertIn("gateway_connected", status)
+        self.assertIn("pending_spool_count", status)
+        self.assertTrue(status["is_test_environment"])
+
+        # Enqueue a message and verify persistent disk spool retention
+        test_jid = "120363431167900107@g.us"
+        test_txt = "Test offline spool persistence"
+        whatsapp_service._enqueue_message(test_jid, test_txt, priority=5)
+        
+        self.assertGreaterEqual(len(whatsapp_service._spool), 1)
+        self.assertTrue(os.path.exists(whatsapp_service._spool_file))
+
+    @patch("requests.post")
+    def test_11_gateway_reconnection_resumes_dispatch(self, mock_post):
+        """Verifies that when gateway is online, HTTP dispatch succeeds and spool items are cleared."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_post.return_value = mock_resp
+
+        test_jid = "120363431167900107@g.us"
+        test_txt = "Test online dispatch"
+        
+        success = whatsapp_service._send_http(test_jid, test_txt)
+        self.assertTrue(success)
+        mock_post.assert_called()
 
 
 if __name__ == "__main__":

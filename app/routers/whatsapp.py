@@ -43,7 +43,7 @@ def send_test_signal(req: TestSignalRequest):
         "symbol": req.symbol,
         "direction": "LONG",
         "decision": "🎯 INSTITUTIONAL ORDER-BLOCK RETEST (LONG)",
-        "horizon": "1H Swing",
+        "horizon": "1H Day Trade",
         "quality_grade": "Grade A+ (HIGH CONVICTION)",
         "grade_tier": 1,
         "conviction_pct": 88.5,

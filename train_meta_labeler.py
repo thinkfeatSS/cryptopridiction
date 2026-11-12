@@ -22,7 +22,6 @@ except ImportError:
 
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, classification_report
 
 # Ensure output directory exists
@@ -30,21 +29,12 @@ MODELS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "models_exp
 os.makedirs(MODELS_DIR, exist_ok=True)
 META_MODEL_PATH = os.path.join(MODELS_DIR, "signal_meta_classifier.joblib")
 
-class SingleClassPriorModel:
-    """Laplace-smoothed probability model for per-coin cold starts where only one class has resolved so far."""
-    def __init__(self, target_class: int, sample_size: int):
-        self.target_class = int(target_class)
-        self.sample_size = int(sample_size)
-        if self.target_class == 1:
-            self.prob = (sample_size + 1.0) / (sample_size + 2.0)
-        else:
-            self.prob = 1.0 / (sample_size + 2.0)
-            
-    def predict_proba(self, X):
-        p1 = float(self.prob)
-        p0 = 1.0 - p1
-        n = len(X)
-        return np.array([[p0, p1]] * n)
+from app.engine.signals.meta_labeler import (
+    PurgedTimeSeriesSplit,
+    SingleClassPriorModel,
+    META_FEATURE_COLS
+)
+
 
 def extract_features(df: pd.DataFrame) -> pd.DataFrame:
     """Preprocesses and extracts quantitative meta-features from signal records without lookahead bias."""
@@ -59,7 +49,7 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
             combined_st = f"{status_str} {outcome_str}"
             
             if any(k in combined_st for k in ['PENDING', 'OPEN', 'ACTIVE', 'WAITING']):
-                continue # Skip pending or unverified
+                continue  # Skip pending or unverified
                 
             entry_p = float(row.get('entry_price', 0.0) or 0.0)
             tp1_p = float(row.get('tp1_price', 0.0) or 0.0)
@@ -80,40 +70,29 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
             else:
                 target = 0
             
-            # 2. Numeric features
-            conviction = float(row.get('conviction_pct', 70.0) or 70.0)
-            
+            # 2. Structural & Economic features
             exp_ret_raw = str(row.get('expected_return_pct', '0.0')).replace('%', '').replace('+', '').strip()
             exp_ret = float(exp_ret_raw) if exp_ret_raw not in ['', 'nan', 'None'] else 0.0
 
-            # Quality grade numeric
-            grade_str = str(row.get('quality_grade', ''))
-            is_a_plus = 1.0 if "A+" in grade_str else 0.0
-            
             # Horizon encoding aligned with institutional market structure (15M=Scalp, 1H/4H=Swing/Intraday, 24H+=Macro)
-            horizon_str = str(row.get('horizon', '')).lower()
-            is_scalp = 1.0 if any(k in horizon_str for k in ["scalp", "5m", "15m", "30m"]) else 0.0
-            is_swing = 1.0 if any(k in horizon_str for k in ["swing", "intraday", "1h", "4h", "12h"]) else 0.0
-            is_macro = 1.0 if any(k in horizon_str for k in ["macro", "24h", "1d", "2d", "3d", "4d", "7d", "15d", "30d", "week", "month", "48h", "72h"]) else 0.0
+            horizon_str = str(row.get('horizon', '')).upper()
+            is_scalp = 1.0 if any(k in horizon_str for k in ["SCALP", "5M", "15M", "30M"]) else 0.0
+            is_swing = 1.0 if any(k in horizon_str for k in ["1H", "DAY", "INTRADAY", "4H", "12H", "SWING"]) and not any(k in horizon_str for k in ["24H", "1D", "7D", "15D", "MACRO"]) else 0.0
+            is_macro = 1.0 if any(k in horizon_str for k in ["24H", "1D", "2D", "3D", "4D", "7D", "15D", "30D", "WEEK", "MONTH", "48H", "72H", "MACRO"]) else 0.0
             
             # Direction
             direction_str = str(row.get('direction', '')).upper()
-            is_long = 1.0 if direction_str == "LONG" or "BULLISH" in direction_str else 0.0
+            is_long = 1.0 if direction_str in ["LONG", "BULLISH", "BUY"] else 0.0
             
-            # Decision setup type
-            decision_str = str(row.get('decision', '')).upper()
-            is_dip_buy = 1.0 if "DIP-BUY" in decision_str else 0.0
-            is_rally_sell = 1.0 if "RALLY-SELL" in decision_str else 0.0
-            is_bottom_reversal = 1.0 if "BOTTOM-REVERSAL" in decision_str else 0.0
-            is_top_reversal = 1.0 if "TOP-REVERSAL" in decision_str else 0.0
-            is_reversal = 1.0 if (is_bottom_reversal or is_top_reversal) else 0.0
-            is_liq_sweep = 1.0 if "LIQUIDITY-SWEEP" in decision_str else 0.0
-            is_squeeze = 1.0 if "SHORT SQUEEZE" in decision_str else 0.0
-            is_order_block = 1.0 if "ORDER-BLOCK" in decision_str else 0.0
-            is_breaker_block = 1.0 if "BREAKER-BLOCK" in decision_str else 0.0
-            is_blowoff_top = 1.0 if "BLOW-OFF TOP" in decision_str else 0.0
-            is_hype_surge = 1.0 if "HYPE PUMP" in decision_str else 0.0
-            is_paper_exec = 1.0 if any(k in str(row.get('paper_trading_status', '')).upper() for k in ["EXECUTED", "ACTIVE"]) else 0.0
+            # Decision setup structural types
+            decision_str = str(row.get('decision', '') or '').upper()
+            strategy_str = str(row.get('canonical_strategy') or row.get('strategy') or '').upper()
+            combined_meta_text = f"{decision_str} {strategy_str}"
+            is_liq_sweep = 1.0 if ("LIQUIDITY-SWEEP" in combined_meta_text or "SWEEP" in combined_meta_text or "RECLAIM" in combined_meta_text or "LIQUIDITY" in combined_meta_text) else 0.0
+            is_squeeze = 1.0 if ("SHORT SQUEEZE" in combined_meta_text or "SQUEEZE" in combined_meta_text or "COILING" in combined_meta_text) else 0.0
+            is_order_block = 1.0 if (bool(row.get("is_order_block_signal")) or "ORDER-BLOCK" in combined_meta_text or "ORDER_BLOCK" in combined_meta_text or "POI" in combined_meta_text) else 0.0
+            is_breaker_block = 1.0 if ("BREAKER-BLOCK" in combined_meta_text or "BREAKER" in combined_meta_text) else 0.0
+            is_paper_exec = 1.0 if any(k in str(row.get('paper_trading_status', '')).upper() for k in ["EXECUTED", "ACTIVE", "TRUE"]) else 0.0
             
             # Rank (e.g. "#1" -> 1)
             rank_raw = str(row.get('rank', '#1')).replace('#', '').strip()
@@ -144,37 +123,89 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
 
             clean_rr = float(np.clip(round(tp_pct / max(0.05, sl_pct), 2), 0.1, 50.0))
 
-            from app.engine.config import MEME_AND_SHITCOIN_BASES
+            from app.engine.config import is_meme_coin
             sym_str = str(row.get('symbol', '')).upper()
-            clean_base_sym = sym_str.split("/")[0].split(":")[0].replace("1000", "").strip()
-            is_meme = 1.0 if (clean_base_sym in MEME_AND_SHITCOIN_BASES or any(m in clean_base_sym for m in ["SHIB", "PEPE", "BONK", "DOGE", "FLOKI", "MEME", "WIF", "BOME"])) else 0.0
+            is_meme = 1.0 if is_meme_coin(sym_str) else 0.0
+
+            # 3. 7 Validated Market Microstructure Features
+            def _get_row_num(keys, default=None):
+                for k in keys:
+                    if k in row:
+                        val = row.get(k)
+                        if val is not None and not pd.isna(val):
+                            try:
+                                return float(val)
+                            except (ValueError, TypeError):
+                                continue
+                return default
+
+            tb_num = _get_row_num(['f_taker_buy_ratio', 'taker_buy_ratio', 'taker_buy_ratio_5'], default=0.50)
+            tb = float(tb_num if tb_num is not None else 0.50)
+            cvd_num = _get_row_num(['f_cvd_divergence', 'cvd_surge_5', 'cvd_surge', 'cvd_val'])
+            if cvd_num is not None:
+                f_cvd_divergence = float(np.clip(cvd_num, -1.0, 1.0))
+            else:
+                f_cvd_divergence = float(np.clip((2.0 * tb - 1.0), -1.0, 1.0))
+
+            obi_num = _get_row_num(['f_order_book_imbalance', 'order_book_imbalance', 'book_imbalance'])
+            if obi_num is not None:
+                f_order_book_imbalance = float(np.clip(obi_num, -1.0, 1.0))
+            else:
+                f_order_book_imbalance = float(np.clip((tb - 0.50) * 2.0, -1.0, 1.0))
+
+            vr_num = _get_row_num(['f_volatility_ratio', 'volatility_ratio', 'expansion_ratio'])
+            if vr_num is not None:
+                f_volatility_ratio = float(np.clip(vr_num, 0.1, 5.0))
+            else:
+                f_volatility_ratio = float(np.clip(round((tp_pct + sl_pct) / 2.0, 2), 0.2, 5.0))
+
+            f_taker_buy_ratio = float(np.clip(tb, 0.0, 1.0))
+
+            lp_num = _get_row_num(['f_liquidity_proximity', 'liquidity_proximity', 'poi_distance_pct'])
+            if lp_num is not None:
+                f_liquidity_proximity = float(np.clip(abs(lp_num), 0.0, 10.0))
+            else:
+                f_liquidity_proximity = float(np.clip(round(min(tp_pct, sl_pct), 2), 0.1, 10.0))
+
+            fd_num = _get_row_num(['f_funding_drag', 'funding_rate', 'funding_pct'])
+            if fd_num is not None:
+                f_funding_drag = float(np.clip(fd_num * 10000.0 if abs(fd_num) < 0.1 else fd_num, -50.0, 50.0))
+            else:
+                f_funding_drag = 1.0
+
+            rvol_num = _get_row_num(['f_relative_volume', 'relative_volume', 'rvol', 'volume_surge_ratio'])
+            if rvol_num is not None:
+                f_relative_volume = float(np.clip(rvol_num, 0.05, 10.0))
+            else:
+                f_relative_volume = 1.0
 
             feat_dict = {
-                'conviction_pct': conviction,
+                # 7 Microstructure features
+                'f_cvd_divergence': f_cvd_divergence,
+                'f_order_book_imbalance': f_order_book_imbalance,
+                'f_volatility_ratio': f_volatility_ratio,
+                'f_taker_buy_ratio': f_taker_buy_ratio,
+                'f_liquidity_proximity': f_liquidity_proximity,
+                'f_funding_drag': f_funding_drag,
+                'f_relative_volume': f_relative_volume,
+                # Quantitative structural features
                 'expected_return_pct': exp_ret,
                 'risk_reward_ratio': clean_rr,
-                'is_a_plus': is_a_plus,
                 'is_scalp': is_scalp,
                 'is_swing': is_swing,
                 'is_macro': is_macro,
                 'is_long': is_long,
-                'is_dip_buy': is_dip_buy,
-                'is_rally_sell': is_rally_sell,
-                'is_bottom_reversal': is_bottom_reversal,
-                'is_top_reversal': is_top_reversal,
-                'is_reversal': is_reversal,
                 'is_liq_sweep': is_liq_sweep,
                 'is_squeeze': is_squeeze,
                 'is_order_block': is_order_block,
                 'is_breaker_block': is_breaker_block,
-                'is_blowoff_top': is_blowoff_top,
-                'is_hype_surge': is_hype_surge,
                 'is_paper_exec': is_paper_exec,
                 'is_meme': is_meme,
                 'rank': rank,
                 'tp_pct': round(tp_pct, 2),
                 'sl_pct': round(sl_pct, 2),
                 'tp_sl_ratio': clean_rr,
+                # Target
                 'target': target
             }
             data.append(feat_dict)
@@ -183,15 +214,17 @@ def extract_features(df: pd.DataFrame) -> pd.DataFrame:
             
     return pd.DataFrame(data)
 
+
 def train_and_save_meta_classifier():
-    """Loads historical CSV records, trains the Meta-Labeling model, and saves joblib artifact."""
+    """Loads historical CSV records, trains the Meta-Labeling model using Purged TimeSeriesSplit, and saves joblib artifact."""
     print("=" * 80)
-    print("[META-LABELER] Training Quantitative Secondary Meta-Labeling Classifier...")
+    print("[META-LABELER] Training Quantitative Secondary Meta-Labeling Classifier (Microstructure v16)...")
     print("=" * 80)
     
     # Collect data from available sources
     dfs = []
     candidates = [
+        "export_app_data/trader_signals_tracker.csv",
         "export_app_data/live_container_trader_signals_tracker.csv",
         "export_app_data/historical_meta_training_signals.csv",
         "latest_signals_from_container.csv",
@@ -200,8 +233,7 @@ def train_and_save_meta_classifier():
         "vps_downloaded_signals.csv",
         "downloaded_signals.csv",
         "today_trader_signals_tracker.csv",
-        "trader_signals_tracker.csv",
-        "export_app_data/trader_signals_tracker.csv"
+        "trader_signals_tracker.csv"
     ]
     for c in candidates:
         if os.path.exists(c):
@@ -225,13 +257,18 @@ def train_and_save_meta_classifier():
         print(f"[ERROR] Insufficient resolved records ({len(feat_df)}) for ML training.")
         return False
         
-    feature_cols = [c for c in feat_df.columns if c != 'target']
-    X = feat_df[feature_cols]
+    feature_cols = META_FEATURE_COLS
+    for col in feature_cols:
+        if col not in feat_df.columns:
+            feat_df[col] = 0.0
+
+    X = feat_df[feature_cols].replace([np.inf, -np.inf], 0.0).fillna(0.0)
     y = feat_df['target']
     
     print(f"[DATASET] Resolved Training Set: {len(feat_df)} trades (Wins: {sum(y==1)}, Losses: {sum(y==0)}) | Baseline Win Rate: {y.mean()*100:.1f}%")
+    print(f"[DATASET] Active Microstructure Features ({len(feature_cols)}): {feature_cols}")
     
-    # Model Selection: LightGBM with HistGradientBoosting / RandomForest Fallback
+    # Model Selection: LightGBM with HistGradientBoosting Fallback
     if HAS_LIGHTGBM:
         base_clf = lgb.LGBMClassifier(
             n_estimators=140,
@@ -256,11 +293,12 @@ def train_and_save_meta_classifier():
             random_state=42
         )
         
-    # Fit base classifier & calibrate probabilities via Sigmoid / Isotonic
-    calibrated_clf = CalibratedClassifierCV(estimator=base_clf, method='sigmoid', cv=3, n_jobs=1)
+    # Fit base classifier & calibrate probabilities via Sigmoid with Purged TimeSeriesSplit (embargo=2%)
+    cv_splitter = PurgedTimeSeriesSplit(n_splits=5, embargo_pct=0.02)
+    calibrated_clf = CalibratedClassifierCV(estimator=base_clf, method='sigmoid', cv=cv_splitter)
     calibrated_clf.fit(X, y)
     
-    # In-sample & cross-validation metrics
+    # In-sample metrics
     preds = calibrated_clf.predict(X)
     probs = calibrated_clf.predict_proba(X)[:, 1]
     
@@ -300,7 +338,9 @@ def train_and_save_meta_classifier():
                     s_y = sym_feat['target']
                     if len(s_y.unique()) > 1:
                         s_base = HistGradientBoostingClassifier(max_iter=80, max_depth=2, min_samples_leaf=2, random_state=42)
-                        s_cal = CalibratedClassifierCV(estimator=s_base, method='sigmoid', cv=2)
+                        n_coin_splits = min(3, max(2, len(s_X) // 5))
+                        s_cv = PurgedTimeSeriesSplit(n_splits=n_coin_splits, embargo_pct=0.02)
+                        s_cal = CalibratedClassifierCV(estimator=s_base, method='sigmoid', cv=s_cv)
                         s_cal.fit(s_X, s_y)
                         m_to_save = s_cal
                     else:
@@ -319,7 +359,7 @@ def train_and_save_meta_classifier():
                         'trained_at_utc': datetime.now(timezone.utc).isoformat()
                     }, coin_meta_path)
                     print(f"  └─ Trained dedicated per-coin meta-classifier for {sym} ({len(sym_feat)} samples)")
-                except Exception as e:
+                except Exception:
                     pass
 
     print()

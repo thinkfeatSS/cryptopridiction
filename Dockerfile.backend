@@ -25,15 +25,21 @@ RUN pip install --no-cache-dir --upgrade pip && \
 
 # Copy application files, ML models, and configuration
 COPY app/ ./app/
+COPY trading_ai_system/ ./trading_ai_system/
+COPY data/ ./data/
 COPY models_export_v3/ ./models_export_v3/
 COPY export_app_data/ ./export_app_data/
 COPY user_pasted_signals.csv .
 COPY test.py .
 COPY train_meta_labeler.py .
 COPY run_scanner_daemon.py .
+COPY test_v16_regression.py .
+COPY run_all_v16_tests.py .
+COPY test_suite_engine.py .
+COPY tests/ ./tests/
 
-# Create directories for app data and models
-RUN mkdir -p /app/export_app_data /app/models_export_v3
+# Create directories for app data, models, and candle cache
+RUN mkdir -p /app/export_app_data /app/models_export_v3 /app/data/cache
 
 EXPOSE 8000
 

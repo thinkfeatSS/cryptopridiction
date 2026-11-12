@@ -1,6 +1,16 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, Text
 from datetime import datetime, timezone
+import math
 from app.database import Base
+
+def _safe_float(v, fallback=0.0):
+    if v is None:
+        return fallback
+    try:
+        val = float(v)
+        return fallback if (math.isnan(val) or math.isinf(val)) else val
+    except Exception:
+        return fallback
 
 class PaperPosition(Base):
     __tablename__ = "paper_positions"
@@ -39,22 +49,22 @@ class PaperPosition(Base):
             "horizon": self.horizon,
             "direction": self.direction,
             "execution_engine": self.execution_engine or "paper",
-            "allocated_usd": self.allocated_usd,
-            "entry_price": self.entry_price,
-            "raw_entry_price": self.raw_entry_price or self.entry_price,
-            "current_price": self.current_price,
-            "tp_price": self.tp_price,
-            "tp1_price": self.tp1_price or self.tp_price,
-            "tp2_price": self.tp2_price,
-            "tp3_price": self.tp3_price,
-            "sl_price": self.sl_price,
-            "unrealized_gross_pnl_usd": self.unrealized_gross_pnl_usd or 0.0,
-            "unrealized_pnl_usd": self.unrealized_pnl_usd,
-            "unrealized_pnl_pct": self.unrealized_pnl_pct,
-            "target_progress_pct": self.target_progress_pct,
-            "buy_fee_usd": self.buy_fee_usd,
-            "est_sell_fee_usd": self.est_sell_fee_usd,
-            "unrealized_fee_usd": self.unrealized_fee_usd,
+            "allocated_usd": _safe_float(self.allocated_usd, 100.0),
+            "entry_price": _safe_float(self.entry_price, 0.0),
+            "raw_entry_price": _safe_float(self.raw_entry_price or self.entry_price, 0.0),
+            "current_price": _safe_float(self.current_price, 0.0),
+            "tp_price": _safe_float(self.tp_price, 0.0),
+            "tp1_price": _safe_float(self.tp1_price or self.tp_price, 0.0),
+            "tp2_price": _safe_float(self.tp2_price, None),
+            "tp3_price": _safe_float(self.tp3_price, None),
+            "sl_price": _safe_float(self.sl_price, 0.0),
+            "unrealized_gross_pnl_usd": _safe_float(self.unrealized_gross_pnl_usd, 0.0),
+            "unrealized_pnl_usd": _safe_float(self.unrealized_pnl_usd, 0.0),
+            "unrealized_pnl_pct": _safe_float(self.unrealized_pnl_pct, 0.0),
+            "target_progress_pct": _safe_float(self.target_progress_pct, 0.0),
+            "buy_fee_usd": _safe_float(self.buy_fee_usd, 0.0),
+            "est_sell_fee_usd": _safe_float(self.est_sell_fee_usd, 0.0),
+            "unrealized_fee_usd": _safe_float(self.unrealized_fee_usd, 0.0),
             "opened_at": self.opened_at,
             "expiry_time": self.expiry_time,
         }
@@ -91,17 +101,17 @@ class ClosedTrade(Base):
             "horizon": self.horizon,
             "direction": self.direction,
             "execution_engine": self.execution_engine or "paper",
-            "entry_price": self.entry_price,
-            "raw_entry_price": self.raw_entry_price or self.entry_price,
-            "exit_price": self.exit_price,
+            "entry_price": _safe_float(self.entry_price, 0.0),
+            "raw_entry_price": _safe_float(self.raw_entry_price or self.entry_price, 0.0),
+            "exit_price": _safe_float(self.exit_price, 0.0),
             "exit_reason": self.exit_reason,
             "outcome": self.outcome,
-            "gross_pnl_usd": self.gross_pnl_usd,
-            "buy_fee_usd": self.buy_fee_usd,
-            "sell_fee_usd": self.sell_fee_usd,
-            "binance_fee_usd": self.binance_fee_usd,
-            "realized_pnl_usd": self.realized_pnl_usd,
-            "realized_pnl_pct": self.realized_pnl_pct,
+            "gross_pnl_usd": _safe_float(self.gross_pnl_usd, 0.0),
+            "buy_fee_usd": _safe_float(self.buy_fee_usd, 0.0),
+            "sell_fee_usd": _safe_float(self.sell_fee_usd, 0.0),
+            "binance_fee_usd": _safe_float(self.binance_fee_usd, 0.0),
+            "realized_pnl_usd": _safe_float(self.realized_pnl_usd, 0.0),
+            "realized_pnl_pct": _safe_float(self.realized_pnl_pct, 0.0),
             "duration_str": self.duration_str,
             "opened_at": self.opened_at,
             "closed_at": self.closed_at,

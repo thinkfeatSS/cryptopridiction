@@ -40,7 +40,7 @@ class MultiHorizonScanner:
         t = threading.Thread(target=_worker, name="ScannerBootPrewarmer", daemon=True)
         t.start()
 
-    def scan_universe(self) -> Dict[str, Any]:
+    def scan_universe(self, limits: Optional[Dict[str, int]] = None, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Executes a complete multi-horizon scan iteration.
         Returns:
@@ -67,8 +67,10 @@ class MultiHorizonScanner:
 
         # 3. Evaluate BTC Predictive Market Shield first
         print(f"[SCANNER 🛡️] Evaluating BTC Predictive Market Beta Shield across 9 Horizons...")
-        btc_dfs = self.loader.fetch_all_9_timeframes("BTC/USDT")
-        btc_live_price = all_tickers.get("BTC/USDT", 0.0)
+        btc_dfs = self.loader.fetch_all_9_timeframes("BTC/USDT", limits=limits, force_refresh=force_refresh)
+        btc_live_price, _ = self.loader._lookup_price_with_multiplier("BTC/USDT", all_tickers)
+        if btc_live_price <= 0.0:
+            btc_live_price = all_tickers.get("BTC/USDT", 0.0)
         shield_state = self.btc_shield.evaluate_regime(btc_dfs, live_btc_price=btc_live_price)
 
         # 4. Concurrently ingest 9 charts for each of the Top 40 assets
@@ -83,19 +85,36 @@ class MultiHorizonScanner:
                     logger.info(f"[SCANNER [MEME EXCLUDED]] Symbol {sym} strictly excluded from institutional universe.")
                     return sym, None
 
-                live_p = all_tickers.get(sym, coin_meta.get("price", 0.0))
+                live_p, _ = self.loader._lookup_price_with_multiplier(sym, all_tickers)
+                if live_p <= 0.0:
+                    live_p = all_tickers.get(sym, coin_meta.get("price", 0.0))
                 vol_24h = coin_meta.get("quote_volume_usd", 0.0)
                 # Delisted / Zero / Sub-Threshold Volume Altcoin Exclusion Guard (< $250k)
                 if live_p <= 0.0001 or (vol_24h > 0 and vol_24h < 250_000.0):
                     logger.warning(f"[SCANNER [SUB-THRESHOLD ILLIQUIDITY]] Altcoin {sym} has sub-threshold volume or invalid price (price={live_p}, vol={vol_24h}). Excluded from active prediction universe.")
                     return sym, None
 
-                dfs_9 = self.loader.fetch_all_9_timeframes(sym)
-                # Sync latest candle close with instantaneous tick price
+                dfs_9 = self.loader.fetch_all_9_timeframes(sym, limits=limits, force_refresh=force_refresh)
+                # Sync latest candle close/high/low with instantaneous tick price
                 if live_p > 0:
                     for tf in dfs_9:
                         if dfs_9[tf] is not None and not dfs_9[tf].empty:
-                            dfs_9[tf].at[dfs_9[tf].index[-1], "close"] = live_p
+                            last_idx = dfs_9[tf].index[-1]
+                            dfs_9[tf].at[last_idx, "close"] = live_p
+                            if "high" in dfs_9[tf].columns:
+                                try:
+                                    cur_h = float(dfs_9[tf].at[last_idx, "high"])
+                                    if live_p > cur_h:
+                                        dfs_9[tf].at[last_idx, "high"] = live_p
+                                except Exception:
+                                    pass
+                            if "low" in dfs_9[tf].columns:
+                                try:
+                                    cur_l = float(dfs_9[tf].at[last_idx, "low"])
+                                    if cur_l <= 0 or live_p < cur_l:
+                                        dfs_9[tf].at[last_idx, "low"] = live_p
+                                except Exception:
+                                    pass
 
                 return sym, {
                     "symbol": sym,

@@ -34,9 +34,9 @@ class FiveModelDirectionClassifier:
             "random_forest": RandomForestClassifier(**cfg["random_forest"])
         }
         self.is_fitted = False
-        self.baseline_prob = 0.55
-        self.last_y_mean = 0.55
-        self.laplace_prob = 0.55
+        self.baseline_prob = 0.50
+        self.last_y_mean = 0.50
+        self.laplace_prob = 0.50
         self.is_cold_start = True
         self.sample_size = 0
         self.fitted_models: List[str] = []
@@ -45,9 +45,24 @@ class FiveModelDirectionClassifier:
         """Fits all 5 classifiers on coin-specific feature sequences with numerical sanitization.
         When new coins enter the universe (< 15 candles or single class), activates the cold-start Laplace prior model.
         """
-        if X_train is None or len(X_train) < 15 or y_train is None or len(np.unique(y_train)) < 2:
-            n_samples = len(y_train) if (y_train is not None and hasattr(y_train, "__len__")) else 0
-            k_bull = int(np.sum(y_train)) if n_samples > 0 else 0
+        y_valid = None
+        if y_train is not None:
+            try:
+                y_arr = np.asarray(y_train)
+                if np.issubdtype(y_arr.dtype, np.number):
+                    y_valid = y_arr[~np.isnan(y_arr) & ~np.isinf(y_arr)]
+                else:
+                    y_valid = y_arr
+            except Exception:
+                y_valid = np.array([])
+        else:
+            y_valid = np.array([])
+
+        n_samples = len(y_valid)
+        n_classes = len(np.unique(y_valid)) if n_samples > 0 else 0
+
+        if X_train is None or len(X_train) < 15 or y_train is None or n_samples < 15 or n_classes < 2:
+            k_bull = int(np.sum(y_valid > 0)) if n_samples > 0 else 0
             # Formal Laplace smoothing with symmetric uniform Beta(1, 1) prior: (k + 1) / (N + 2)
             self.laplace_prob = float((k_bull + 1.0) / (n_samples + 2.0))
             self.last_y_mean = self.laplace_prob
@@ -57,7 +72,7 @@ class FiveModelDirectionClassifier:
             return False
 
         X_clean = np.nan_to_num(np.asarray(X_train, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
-        y_clean = np.asarray(y_train, dtype=int)
+        y_clean = np.asarray(y_valid, dtype=int)
         
         self.fitted_models = []
         for name, model in self.models.items():
@@ -76,9 +91,12 @@ class FiveModelDirectionClassifier:
 
     def check_feature_compatibility(self, n_features: int) -> bool:
         """Verifies if fitted models match the expected input feature dimension."""
-        if not self.is_fitted or not self.fitted_models:
+        fitted_list = getattr(self, "fitted_models", None)
+        if fitted_list is None:
+            fitted_list = list(self.models.keys())
+        if not self.is_fitted or not fitted_list:
             return True
-        for name in self.fitted_models:
+        for name in fitted_list:
             m = self.models.get(name)
             if m is not None and hasattr(m, "n_features_in_"):
                 if int(m.n_features_in_) != int(n_features):
@@ -119,12 +137,18 @@ class FiveModelDirectionClassifier:
                 "is_cold_start": True,
                 "model_type": "COLD_START_LAPLACE_PRIOR",
                 "sample_size": n_sz,
-                "model_breakdown": {m: {"vote": "GREEN_BULLISH" if is_bull else "RED_BEARISH", "prob": round(baseline_p, 4)} for m in self.models}
+                "model_breakdown": {
+                    m: {
+                        "vote": "GREEN_BULLISH" if is_bull else "RED_BEARISH",
+                        "prob": round(baseline_p, 4),
+                        "prob_bullish": round(float(p_bull), 4)
+                    } for m in self.models
+                }
             }
 
-        votes = []
-        probs_bull = []
-        breakdown = {}
+        # Pass 1: Run prediction on each candidate model and collect healthy responses
+        valid_predictions: Dict[str, Optional[float]] = {}
+        model_errors: Dict[str, str] = {}
 
         for name, model in self.models.items():
             try:
@@ -141,7 +165,10 @@ class FiveModelDirectionClassifier:
                         X_input = np.pad(X_live, ((0, 0), (0, n_exp - X_live.shape[1])), mode='constant')
 
                 if hasattr(model, "predict_proba"):
-                    proba_out = model.predict_proba(X_input)
+                    proba_raw = model.predict_proba(X_input)
+                    proba_out = np.atleast_2d(proba_raw)
+                    if proba_out.size == 0 or proba_out.shape[0] == 0:
+                        raise ValueError(f"Empty proba output from {name}")
                     # Dynamically locate class 1 (bullish) index
                     if hasattr(model, "classes_") and len(model.classes_) > 0:
                         classes_list = list(model.classes_)
@@ -157,8 +184,33 @@ class FiveModelDirectionClassifier:
                 else:
                     pred_val = float(model.predict(X_input)[0])
                     prob_bull = float(np.clip(pred_val, 0.0, 1.0))
-                
+
+                if np.isnan(prob_bull) or np.isinf(prob_bull):
+                    raise ValueError(f"Model {name} produced non-finite probability {prob_bull}")
+
                 prob_bull = float(np.clip(prob_bull, 0.01, 0.99))
+                valid_predictions[name] = prob_bull
+            except Exception as e:
+                valid_predictions[name] = None
+                model_errors[name] = str(e)
+
+        # Pass 2: Dynamic Peer Consensus Fallback Resolution
+        # If at least 1 model succeeded, failing models adopt the live peer consensus probability
+        successful_probs = [p for p in valid_predictions.values() if p is not None]
+        if successful_probs:
+            peer_fallback_prob = float(np.mean(successful_probs))
+        else:
+            # When all models fail, fall back to dynamically calibrated Laplace prior
+            peer_fallback_prob = float(np.clip(getattr(self, "laplace_prob", getattr(self, "last_y_mean", 0.50)), 0.05, 0.95))
+
+        votes = []
+        probs_bull = []
+        breakdown = {}
+
+        for name in self.models.keys():
+            p_val = valid_predictions.get(name)
+            if p_val is not None:
+                prob_bull = p_val
                 vote_bull = 1 if prob_bull >= 0.50 else 0
                 votes.append(vote_bull)
                 probs_bull.append(prob_bull)
@@ -166,32 +218,40 @@ class FiveModelDirectionClassifier:
                     "vote": "GREEN_BULLISH" if vote_bull == 1 else "RED_BEARISH",
                     "prob_bullish": round(prob_bull, 4)
                 }
-            except Exception as e:
-                vote_bull = 1 if self.last_y_mean >= 0.50 else 0
+            else:
+                prob_bull = peer_fallback_prob
+                vote_bull = 1 if prob_bull >= 0.50 else 0
                 votes.append(vote_bull)
-                probs_bull.append(float(np.clip(self.last_y_mean, 0.05, 0.95)))
+                probs_bull.append(prob_bull)
                 breakdown[name] = {
                     "vote": "GREEN_BULLISH" if vote_bull == 1 else "RED_BEARISH",
-                    "prob_bullish": round(float(self.last_y_mean), 4),
-                    "fallback_note": str(e)
+                    "prob_bullish": round(prob_bull, 4),
+                    "fallback_note": model_errors.get(name, "Dynamic peer consensus fallback engaged")
                 }
 
         bull_votes = sum(votes)
         bear_votes = len(votes) - bull_votes
-        mean_bull_prob = float(np.mean(probs_bull)) if probs_bull else self.last_y_mean
 
         if bull_votes >= CONSENSUS_VOTE_THRESHOLD:
             decision = "GREEN_BULLISH"
             direction = "LONG"
             label = "🟢 GREEN BULLISH"
             tally = f"{bull_votes}/5 BULLISH CONSENSUS" if bull_votes < 5 else "5/5 UNANIMOUS BULLISH"
-            direction_confidence = float(np.clip(mean_bull_prob, 0.50, 0.95))
+            agreeing_probs = [p for p, v in zip(probs_bull, votes) if v == 1]
+            consensus_p = float(np.mean(agreeing_probs)) if agreeing_probs else 0.50
+            direction_confidence = float(np.clip(consensus_p, 0.50, 0.95))
+            final_p_bull = direction_confidence
+            final_p_bear = round(1.0 - final_p_bull, 4)
         else:
             decision = "RED_BEARISH"
             direction = "SHORT"
             label = "🔴 RED BEARISH"
             tally = f"{bear_votes}/5 BEARISH CONSENSUS" if bear_votes < 5 else "5/5 UNANIMOUS BEARISH"
-            direction_confidence = float(np.clip(1.0 - mean_bull_prob, 0.50, 0.95))
+            agreeing_probs = [1.0 - p for p, v in zip(probs_bull, votes) if v == 0]
+            consensus_p = float(np.mean(agreeing_probs)) if agreeing_probs else 0.50
+            direction_confidence = float(np.clip(consensus_p, 0.50, 0.95))
+            final_p_bear = direction_confidence
+            final_p_bull = round(1.0 - final_p_bear, 4)
 
         return {
             "decision": decision,
@@ -203,8 +263,8 @@ class FiveModelDirectionClassifier:
             "consensus_ratio": round(max(bull_votes, bear_votes) / 5.0, 2),
             "consensus_tally": tally,
             "consensus_probability": round(direction_confidence, 4),
-            "prob_bullish": round(mean_bull_prob, 4),
-            "prob_bearish": round(1.0 - mean_bull_prob, 4),
+            "prob_bullish": round(final_p_bull, 4),
+            "prob_bearish": round(final_p_bear, 4),
             "is_unanimous": (bull_votes == 5 or bear_votes == 5),
             "model_breakdown": breakdown
         }

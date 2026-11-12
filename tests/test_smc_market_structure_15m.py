@@ -1,0 +1,486 @@
+"""
+QUANT EDGE V16: Forensic Test Suite for Universal SMC, Multi-Timeframe (4H > 1H > 15M),
+Order Block Routing, Top 100 Non-Meme Universe Filter, and 15M Scalp Execution Engine.
+
+Authoritative Test Coverage:
+1. Institutional Universe Screener: Top 100 utility coins, category tags exclusion, explicit meme blacklist,
+   $10M volume floor, listing age check, stablecoin and synthetic exclusion.
+2. Vectorized Non-Repainting Fractal Swings: Left/Right confirmation windows, strict zero lookahead.
+3. BOS & CHoCH State Machine: Candle body close confirmation, structural trend shifts, HTF CHoCH precedence.
+4. Institutional Order Block Engine: FVG and displacement detection, lifecycle (ACTIVE -> TESTING -> MITIGATED),
+   and strict HTF precedence (4H OB > 1H OB > 15M OB).
+5. Pre-AI Decision Matrix:
+   - Scenario A: Active Order Block hit -> trade direction set strictly by OB.
+   - Scenario B: No Order Block hit -> trade direction kept strictly aligned with unanimous 4H + 1H + 15M trend.
+   - Divergence: Timeframe mismatch -> fails closed to NEUTRAL (NO_SIGNAL).
+   - Opposing POI Guard: Vetoes trades colliding into opposing HTF supply/demand blocks.
+6. 15-Minute Signal Engine (SignalEngine15M):
+   - Scalp horizon only (strictly 15M).
+   - Long entry at 15M HL / Bullish OB; Short entry at 15M LH / Bearish OB.
+   - Stop Loss buffer: 0.15 * ATR_15m.
+   - Strict 1:2 Risk-to-Reward ratio (TP1 = Entry +/- 2.0 * Risk).
+   - Price geometry invariants: SL < Entry < TP1 < TP2 < TP3 (Long) | SL > Entry > TP1 > TP2 > TP3 (Short).
+"""
+
+import unittest
+import numpy as np
+import pandas as pd
+
+from app.quant_v16.universe_filter import (
+    InstitutionalUniverseFilter,
+    TOP_100_UNIVERSE_SIZE,
+    MIN_INSTITUTIONAL_VOLUME_USD,
+    EXCLUDED_MEME_BLACKLIST
+)
+from app.quant_v16.market_structure import (
+    MarketStructureEngine,
+    PreAIMarketStructureDecision,
+    SwingPivot,
+    TimeframeStructureProfile,
+    OrderBlockStructure,
+    TradeDirection,
+    TrendDirection,
+    OrderBlockCategory,
+    OrderBlockStatus
+)
+from app.quant_v16.signal_engine_15m import (
+    SignalEngine15M,
+    ScalpTradeSetup15M
+)
+
+
+class TestSMCMarketStructure15M(unittest.TestCase):
+
+    def _create_synthetic_candles(
+        self,
+        n: int = 60,
+        trend: str = "BULLISH",
+        base_price: float = 100.0,
+        step: float = 0.5,
+        timeframe_secs: int = 900
+    ) -> pd.DataFrame:
+        """Generates deterministic synthetic OHLCV candles with realistic swing pivots."""
+        records = []
+        p = base_price
+        for i in range(n):
+            if trend == "BULLISH":
+                cycle = i % 8
+                if cycle in [0, 1, 2, 3, 4]:
+                    p += step
+                else:
+                    p -= (step * 0.4) # Shallow pullback forming Higher Lows
+            elif trend == "BEARISH":
+                cycle = i % 8
+                if cycle in [0, 1, 2, 3, 4]:
+                    p -= step
+                else:
+                    p += (step * 0.4) # Shallow bounce forming Lower Highs
+            else:
+                cycle = i % 6
+                p = base_price + (step if cycle < 3 else -step)
+
+            o = p - (0.1 * step) if trend == "BULLISH" else p + (0.1 * step)
+            h = max(o, p) + (0.3 * step)
+            l = min(o, p) - (0.3 * step)
+            c = p
+            v = 100_000.0 + (i * 200.0)
+            records.append({
+                "open": round(o, 4),
+                "high": round(h, 4),
+                "low": round(l, 4),
+                "close": round(c, 4),
+                "volume": v,
+                "timestamp": 1700000000 + (i * timeframe_secs)
+            })
+        return pd.DataFrame(records)
+
+    # ==========================================================================
+    # 1. INSTITUTIONAL UNIVERSE FILTER TESTS
+    # ==========================================================================
+
+    def test_01_universe_filter_rejects_all_blacklisted_memes(self):
+        """Verifies that all explicit meme coins and shitcoins are strictly rejected."""
+        test_memes = [
+            "DOGE/USDT", "SHIB/USDT", "PEPE/USDT", "WIF/USDT", "BONK/USDT", "FLOKI/USDT",
+            "BRETT/USDT", "MOG/USDT", "POPCAT/USDT", "NEIRO/USDT", "TRUMP/USDT", "FARTCOIN/USDT",
+            "PNUT/USDT", "MEME/USDT", "TURBO/USDT", "BOME/USDT", "MEW/USDT", "BABYDOGE/USDT",
+            "1000SATS/USDT"
+        ]
+        for sym in test_memes:
+            is_valid, reason = InstitutionalUniverseFilter.is_valid_utility_coin(
+                symbol=sym,
+                price=1.0,
+                volume_usd=50_000_000.0,
+                listing_age_days=100.0
+            )
+            self.assertFalse(is_valid, f"{sym} must be rejected as meme/shitcoin")
+            self.assertIn("EXCLUDED_MEME_OR_SHITCOIN", reason)
+
+    def test_02_universe_filter_rejects_prohibited_category_tags(self):
+        """Verifies rejection of assets carrying meme, pump-fun, or gambling category tags."""
+        prohibited_tags = ["memes", "pump-fun", "dog-themed", "fan-token", "gambling", "solana-meme"]
+        for tag in prohibited_tags:
+            is_valid, reason = InstitutionalUniverseFilter.is_valid_utility_coin(
+                symbol="RANDOMCOIN/USDT",
+                price=5.0,
+                volume_usd=20_000_000.0,
+                category_tags=[tag],
+                listing_age_days=60.0
+            )
+            self.assertFalse(is_valid, f"Asset with tag {tag} must be rejected")
+            self.assertIn("EXCLUDED_CATEGORY_TAG", reason)
+
+    def test_03_universe_filter_rejects_stablecoins_synthetic_and_leveraged(self):
+        """Verifies rejection of stablecoins, leveraged tokens, and synthetic equities."""
+        prohibited_tokens = ["USDT/USDT", "USDC/USDT", "FDUSD/USDT", "BTCUP/USDT", "ETH3L/USDT", "AAPLB/USDT"]
+        for sym in prohibited_tokens:
+            is_valid, _ = InstitutionalUniverseFilter.is_valid_utility_coin(
+                symbol=sym,
+                price=1.0,
+                volume_usd=100_000_000.0
+            )
+            self.assertFalse(is_valid, f"{sym} must be rejected")
+
+    def test_04_universe_filter_listing_age_and_volume_hurdles(self):
+        """Verifies minimum 30-day listing age and $10M institutional volume floor."""
+        # Brand new listing (< 30 days) must be rejected
+        is_valid_young, reason_young = InstitutionalUniverseFilter.is_valid_utility_coin(
+            symbol="NEWCOIN/USDT",
+            price=2.0,
+            volume_usd=30_000_000.0,
+            listing_age_days=14.0 # Less than 30 days
+        )
+        self.assertFalse(is_valid_young)
+        self.assertIn("INSUFFICIENT_LISTING_AGE", reason_young)
+
+        # Low volume (< $10M) must be rejected for Tier-1
+        is_valid_low_vol, reason_vol = InstitutionalUniverseFilter.is_valid_utility_coin(
+            symbol="UTILITY/USDT",
+            price=10.0,
+            volume_usd=5_000_000.0, # Below $10M
+            listing_age_days=90.0,
+            min_volume=MIN_INSTITUTIONAL_VOLUME_USD
+        )
+        self.assertFalse(is_valid_low_vol)
+        self.assertIn("VOLUME_BELOW_FLOOR", reason_vol)
+
+        # Genuine institutional asset meeting all criteria passes
+        is_valid_ok, reason_ok = InstitutionalUniverseFilter.is_valid_utility_coin(
+            symbol="SOL/USDT",
+            price=150.0,
+            volume_usd=50_000_000.0,
+            listing_age_days=500.0
+        )
+        self.assertTrue(is_valid_ok)
+        self.assertEqual(reason_ok, "PASSED")
+
+    def test_05_universe_filter_guarantees_exact_top_100_universe(self):
+        """Verifies get_top_100_universe returns exactly 100 high-volume clean utility pairs."""
+        universe = InstitutionalUniverseFilter.get_top_100_universe(top_n=100)
+        self.assertEqual(len(universe), 100, "Universe must return exactly 100 pairs")
+        for asset in universe:
+            sym = asset["symbol"]
+            base = asset.get("base", sym.split("/")[0])
+            self.assertNotIn(base, EXCLUDED_MEME_BLACKLIST, f"Meme coin {base} found in universe")
+
+    # ==========================================================================
+    # 2. VECTORIZED NON-REPAINTING FRACTALS & ZERO LOOKAHEAD
+    # ==========================================================================
+
+    def test_06_fractal_swings_require_closed_right_bars_and_never_repaint(self):
+        """Verifies swing pivots require closed confirmation bars and never alter historical values."""
+        df_bull = self._create_synthetic_candles(n=60, trend="BULLISH", base_price=100.0, step=1.0)
+
+        # Confirm at bar 40 and bar 55
+        sh_40, sl_40 = MarketStructureEngine.find_confirmed_fractals(df_bull, timeframe="15m", up_to_bar=40)
+        sh_55, sl_55 = MarketStructureEngine.find_confirmed_fractals(df_bull, timeframe="15m", up_to_bar=55)
+
+        self.assertGreater(len(sh_40), 0)
+        self.assertGreater(len(sl_40), 0)
+
+        # Pivots confirmed by bar 40 must match identically in bar 55
+        for p40 in sh_40:
+            matching = [p55 for p55 in sh_55 if p55.index == p40.index]
+            self.assertEqual(len(matching), 1, f"Pivot at index {p40.index} must remain invariant")
+            self.assertEqual(matching[0].price, p40.price, "Pivot price must not repaint")
+
+        # Zero lookahead: pivot index <= evaluation boundary - right_bars
+        _, right_bars = MarketStructureEngine.get_window_params("15m")
+        for sh in sh_40:
+            self.assertLessEqual(sh.index, 40 - right_bars)
+
+    # ==========================================================================
+    # 3. BOS & CHoCH STATE MACHINE
+    # ==========================================================================
+
+    def test_07_bos_and_choch_state_transitions(self):
+        """Verifies BOS continuation and CHoCH structural trend reversal."""
+        df_bull = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=1.0)
+        prof_bull = MarketStructureEngine.analyze_timeframe(df_bull, timeframe="15m")
+        self.assertEqual(prof_bull.trend, TrendDirection.BULLISH)
+        self.assertTrue(prof_bull.has_bos, "Bullish progression must exhibit BOS")
+
+        # Simulate acute bearish breakdown below the confirmed Higher Low (Bearish CHoCH)
+        df_choch = df_bull.copy()
+        hl_price = prof_bull.recent_hl.price if prof_bull.recent_hl else 100.0
+        # Add 3 aggressive downward breakdown candles closing decisively below HL
+        for j in range(3):
+            breakdown_price = hl_price - (j + 1) * 2.0
+            df_choch = pd.concat([df_choch, pd.DataFrame([{
+                "open": breakdown_price + 1.0,
+                "high": breakdown_price + 1.5,
+                "low": breakdown_price - 0.5,
+                "close": breakdown_price,
+                "volume": 200_000.0,
+                "timestamp": int(df_choch["timestamp"].iloc[-1]) + 900
+            }])], ignore_index=True)
+
+        prof_choch = MarketStructureEngine.analyze_timeframe(df_choch, timeframe="15m")
+        self.assertTrue(prof_choch.has_choch)
+        self.assertEqual(prof_choch.choch_type, "BEARISH_CHOCH")
+        # Invalidation forces trend away from Bullish
+        self.assertNotEqual(prof_choch.trend, TrendDirection.BULLISH)
+
+    def test_08_higher_timeframe_choch_precedence_invalidates_setups(self):
+        """Verifies that an opposing 4H or 1H CHoCH immediately invalidates lower timeframe setups."""
+        df_15m = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0)
+        df_1h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0)
+        df_4h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0)
+
+        # Baseline: All 3 timeframes bullish -> decision is LONG
+        dec_base = MarketStructureEngine.evaluate_pre_ai_structure(df_4h=df_4h, df_1h=df_1h, df_15m=df_15m)
+        self.assertTrue(dec_base.is_unanimously_aligned)
+        self.assertEqual(dec_base.trade_direction, TradeDirection.LONG)
+
+        # Inject Bearish CHoCH onto the 4H chart
+        prof_4h_base = MarketStructureEngine.analyze_timeframe(df_4h, timeframe="4h")
+        hl_4h = prof_4h_base.recent_hl.price if prof_4h_base.recent_hl else 100.0
+        df_4h_broken = df_4h.copy()
+        for j in range(2):
+            break_p = hl_4h - (j + 1) * 3.0
+            df_4h_broken = pd.concat([df_4h_broken, pd.DataFrame([{
+                "open": break_p + 1.0, "high": break_p + 1.5, "low": break_p - 0.5, "close": break_p,
+                "volume": 300_000.0, "timestamp": int(df_4h_broken["timestamp"].iloc[-1]) + 14400
+            }])], ignore_index=True)
+
+        dec_htf = MarketStructureEngine.evaluate_pre_ai_structure(df_4h=df_4h_broken, df_1h=df_1h, df_15m=df_15m)
+        self.assertFalse(dec_htf.is_unanimously_aligned)
+        self.assertEqual(dec_htf.trade_direction, TradeDirection.NEUTRAL)
+        self.assertTrue(dec_htf.has_htf_choch)
+        self.assertIn("4H Bearish", dec_htf.htf_choch_reason)
+
+    # ==========================================================================
+    # 4. ORDER BLOCK LIFECYCLE & HTF RESPECT (4H > 1H > 15M)
+    # ==========================================================================
+
+    def test_09_order_block_detection_and_mitigation_lifecycle(self):
+        """Verifies Bullish OB creation with FVG and lifecycle from ACTIVE to TESTING to MITIGATED."""
+        records = []
+        p = 100.0
+        # Form 15 base candles
+        for i in range(15):
+            records.append({
+                "open": p, "high": p + 0.5, "low": p - 0.5, "close": p + 0.1,
+                "volume": 50000.0, "timestamp": 1700000000 + (i * 900)
+            })
+
+        # Candle 15: Last down-candle (close < open) - this forms the Bullish OB
+        ob_candle = {
+            "open": 101.0, "high": 101.5, "low": 99.5, "close": 100.0,
+            "volume": 80000.0, "timestamp": 1700000000 + (15 * 900)
+        }
+        records.append(ob_candle)
+
+        # Candles 16 & 17: Aggressive displacement upward leaving FVG (Low of 17 > High of 15)
+        disp1 = {
+            "open": 100.2, "high": 104.0, "low": 100.1, "close": 103.8,
+            "volume": 250000.0, "timestamp": 1700000000 + (16 * 900)
+        }
+        disp2 = {
+            "open": 103.9, "high": 107.0, "low": 102.0, "close": 106.5, # Low 102.0 > High 101.5 (FVG created)
+            "volume": 300000.0, "timestamp": 1700000000 + (17 * 900)
+        }
+        records.extend([disp1, disp2])
+
+        # Candle 18: Price pulls back to 101.0 (inside [99.5, 101.5] zone) -> TESTING
+        pullback = {
+            "open": 105.0, "high": 105.2, "low": 100.8, "close": 101.2,
+            "volume": 120000.0, "timestamp": 1700000000 + (18 * 900)
+        }
+        records.append(pullback)
+
+        df_ob = pd.DataFrame(records)
+        obs = MarketStructureEngine.detect_institutional_order_blocks(df_ob, timeframe="15m", current_price=101.0)
+        self.assertGreater(len(obs), 0, "Must detect Bullish Order Block")
+        top_ob = obs[0]
+        self.assertEqual(top_ob.block_type, OrderBlockCategory.BULLISH)
+        self.assertEqual(top_ob.status, OrderBlockStatus.TESTING)
+        self.assertTrue(top_ob.is_touching)
+        self.assertTrue(top_ob.has_fvg)
+
+    def test_10_higher_timeframe_order_block_precedence_4h_over_15m(self):
+        """Verifies that 4H Order Block has absolute precedence over 15M Order Block."""
+        # 15M has Bullish OB, but 4H has touched Bearish OB
+        df_15m = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0)
+        df_1h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0)
+
+        # Create 4H DataFrame with active Bearish OB touching current price
+        records_4h = []
+        p = 100.0
+        for i in range(20):
+            records_4h.append({"open": p, "high": p + 1.0, "low": p - 1.0, "close": p + 0.2, "volume": 50000, "timestamp": 1700000000 + i * 14400})
+        # Up candle (Bearish OB): open 100, close 102, high 102.5, low 99.8
+        records_4h.append({"open": 100.0, "high": 102.5, "low": 99.8, "close": 102.0, "volume": 90000, "timestamp": 1700000000 + 20 * 14400})
+        # Strong downward displacement with FVG
+        records_4h.append({"open": 101.8, "high": 102.0, "low": 95.0, "close": 95.5, "volume": 400000, "timestamp": 1700000000 + 21 * 14400})
+        records_4h.append({"open": 95.5, "high": 96.0, "low": 91.0, "close": 91.5, "volume": 350000, "timestamp": 1700000000 + 22 * 14400})
+        # Pullback into 4H Bearish OB at 101.0
+        records_4h.append({"open": 92.0, "high": 101.5, "low": 91.5, "close": 101.0, "volume": 150000, "timestamp": 1700000000 + 23 * 14400})
+        df_4h = pd.DataFrame(records_4h)
+
+        dec = MarketStructureEngine.evaluate_pre_ai_structure(df_4h=df_4h, df_1h=df_1h, df_15m=df_15m, current_price=101.0)
+        # Because 4H touched Bearish OB, 4H has macro authority over LTF trend
+        self.assertEqual(dec.dominant_ob_timeframe, "4H")
+        self.assertEqual(dec.trade_direction, TradeDirection.SHORT)
+        self.assertEqual(dec.scenario, "SCENARIO_A_ORDER_BLOCK_TRIGGER")
+
+    # ==========================================================================
+    # 5. PRE-AI DECISION MATRIX: SCENARIO A vs SCENARIO B
+    # ==========================================================================
+
+    def test_11_decision_matrix_scenario_b_no_ob_preserves_unanimous_trend(self):
+        """Verifies Scenario B: When no active OB is touched, unanimous 4H+1H+15M trend sets direction."""
+        df_bull_4h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=1.5, timeframe_secs=14400)
+        df_bull_1h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=1.0, timeframe_secs=3600)
+        df_bull_15m = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=0.5, timeframe_secs=900)
+
+        # Price at new highs (away from order blocks)
+        curr_p = float(df_bull_15m['close'].iloc[-1])
+        dec = MarketStructureEngine.evaluate_pre_ai_structure(
+            df_4h=df_bull_4h, df_1h=df_bull_1h, df_15m=df_bull_15m, current_price=curr_p
+        )
+
+        self.assertTrue(dec.is_unanimously_aligned)
+        self.assertEqual(dec.trade_direction, TradeDirection.LONG)
+        self.assertEqual(dec.order_block_source, "TREND_ALIGNMENT_DEFAULT")
+        self.assertIn("unanimous Bullish trend alignment", dec.reasons[0])
+
+    def test_12_decision_matrix_timeframe_divergence_fails_closed(self):
+        """Verifies that conflicting timeframes (e.g. 4H Bearish vs 15M Bullish) fail closed to NEUTRAL."""
+        df_bear_4h = self._create_synthetic_candles(n=50, trend="BEARISH", base_price=100.0, step=1.5, timeframe_secs=14400)
+        df_bull_1h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=1.0, timeframe_secs=3600)
+        df_bull_15m = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=0.5, timeframe_secs=900)
+
+        dec = MarketStructureEngine.evaluate_pre_ai_structure(
+            df_4h=df_bear_4h, df_1h=df_bull_1h, df_15m=df_bull_15m
+        )
+
+        self.assertFalse(dec.is_unanimously_aligned)
+        self.assertEqual(dec.trade_direction, TradeDirection.NEUTRAL)
+        self.assertEqual(dec.scenario, "NO_SIGNAL")
+        self.assertIn("Timeframe divergence", dec.veto_reason)
+
+    # ==========================================================================
+    # 6. 15-MINUTE SCALP ENGINE: ENTRY, SL (0.15*ATR), & STRICT 1:2 R:R
+    # ==========================================================================
+
+    def test_13_signal_engine_15m_long_geometry_strict_1_to_2_rr(self):
+        """Verifies Long trade setup on 15M: entry at HL floor, SL buffer 0.15*ATR, and immutable 1:2 R:R."""
+        df_4h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=1.0, timeframe_secs=14400)
+        df_1h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=0.8, timeframe_secs=3600)
+        df_15m = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=0.5, timeframe_secs=900)
+
+        setup: ScalpTradeSetup15M = SignalEngine15M.evaluate_15m_scalp_setup(
+            symbol="BTC/USDT",
+            df_4h=df_4h,
+            df_1h=df_1h,
+            df_15m=df_15m
+        )
+
+        self.assertTrue(setup.is_valid)
+        self.assertEqual(setup.direction, "LONG")
+        self.assertEqual(setup.horizon, "15M")
+
+        # Verify strict price geometry: SL < Entry < TP1 < TP2 < TP3
+        self.assertLess(setup.sl_price, setup.entry_price)
+        self.assertLess(setup.entry_price, setup.tp1_price)
+        self.assertLess(setup.tp1_price, setup.tp2_price)
+        self.assertLess(setup.tp2_price, setup.tp3_price)
+
+        # Verify strict 1:2.0 Risk-to-Reward ratio
+        risk = setup.entry_price - setup.sl_price
+        reward = setup.tp1_price - setup.entry_price
+        rr_computed = round(reward / risk, 2)
+        self.assertEqual(rr_computed, 2.0, f"R:R must be strictly 1:2.0 (got {rr_computed})")
+        self.assertEqual(setup.risk_reward_ratio, 2.0)
+
+        # Verify SL buffer equals 0.15 * ATR_15m
+        expected_buffer = round(setup.atr_15m * 0.15, 4)
+        self.assertAlmostEqual(setup.sl_buffer, expected_buffer, places=3)
+
+    def test_14_signal_engine_15m_short_geometry_strict_1_to_2_rr(self):
+        """Verifies Short trade setup on 15M: entry at LH ceiling, SL buffer 0.15*ATR, and immutable 1:2 R:R."""
+        df_4h = self._create_synthetic_candles(n=50, trend="BEARISH", base_price=100.0, step=1.0, timeframe_secs=14400)
+        df_1h = self._create_synthetic_candles(n=50, trend="BEARISH", base_price=100.0, step=0.8, timeframe_secs=3600)
+        df_15m = self._create_synthetic_candles(n=50, trend="BEARISH", base_price=100.0, step=0.5, timeframe_secs=900)
+
+        setup: ScalpTradeSetup15M = SignalEngine15M.evaluate_15m_scalp_setup(
+            symbol="ETH/USDT",
+            df_4h=df_4h,
+            df_1h=df_1h,
+            df_15m=df_15m
+        )
+
+        self.assertTrue(setup.is_valid)
+        self.assertEqual(setup.direction, "SHORT")
+        self.assertEqual(setup.horizon, "15M")
+
+        # Verify strict price geometry: SL > Entry > TP1 > TP2 > TP3
+        self.assertGreater(setup.sl_price, setup.entry_price)
+        self.assertGreater(setup.entry_price, setup.tp1_price)
+        self.assertGreater(setup.tp1_price, setup.tp2_price)
+        self.assertGreater(setup.tp2_price, setup.tp3_price)
+
+        # Verify strict 1:2.0 Risk-to-Reward ratio
+        risk = setup.sl_price - setup.entry_price
+        reward = setup.entry_price - setup.tp1_price
+        rr_computed = round(reward / risk, 2)
+        self.assertEqual(rr_computed, 2.0, f"R:R must be strictly 1:2.0 (got {rr_computed})")
+        self.assertEqual(setup.risk_reward_ratio, 2.0)
+
+    def test_15_anchor_to_lh_hl_enforces_minimum_sl_noise_floor(self):
+        """
+        Regression Test (SIG_20261112_0912_HBARUSDT_15M):
+        When current_price pushes slightly past a stale LH/HL pivot before market trigger,
+        structural_ceiling + vol_cushion must NEVER produce a sub-spread 0.003% micro-SL
+        (e.g. $0.065792 vs $0.065790 / 1:267 R:R). Minimum SL distance must be >= 0.35%.
+        """
+        from app.quant_v16.entry_confirmation import EntryConfirmationEngine
+
+        df_15m = self._create_synthetic_candles(n=30, trend="BEARISH", base_price=0.0658, step=0.0001, timeframe_secs=900)
+        # Replicate HBAR/USDT: current_price = 0.065790, stale lh_pivot = 0.065500 below current_price
+        short_anc = EntryConfirmationEngine.anchor_to_lower_high_and_ob(
+            df_15m=df_15m,
+            lh_pivot_price=0.065500,
+            current_price=0.065790,
+            spread_bps=6.0,
+        )
+        short_sl_pct = (short_anc["sl_price"] - short_anc["entry_price"]) / short_anc["entry_price"]
+        self.assertGreaterEqual(short_sl_pct, 0.0034, f"SHORT SL too tight: {short_sl_pct:.6f}")
+        self.assertLessEqual(short_anc["risk_reward_ratio"], 3.0)
+
+        # Symmetric LONG check: current_price = 0.065790, stale hl_pivot = 0.066050 above current_price
+        long_anc = EntryConfirmationEngine.anchor_to_higher_low_and_ob(
+            df_15m=df_15m,
+            hl_pivot_price=0.066050,
+            current_price=0.065790,
+            spread_bps=6.0,
+        )
+        long_sl_pct = (long_anc["entry_price"] - long_anc["sl_price"]) / long_anc["entry_price"]
+        self.assertGreaterEqual(long_sl_pct, 0.0034, f"LONG SL too tight: {long_sl_pct:.6f}")
+        self.assertLessEqual(long_anc["risk_reward_ratio"], 3.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
+

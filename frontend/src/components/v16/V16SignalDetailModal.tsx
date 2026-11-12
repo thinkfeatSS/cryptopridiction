@@ -254,6 +254,14 @@ export default function V16SignalDetailModal({ signal, onClose }: Props) {
                 <span className="text-slate-500">Thesis Exposure Cap</span>
                 <div className="font-bold text-emerald-400 mt-0.5">1 Position Max ✓</div>
               </div>
+              {Boolean(imm.rectangle_upper && imm.rectangle_lower) && (
+                <div className="col-span-2 sm:col-span-4 p-2.5 rounded-xl bg-cyan-950/40 border border-cyan-800/60 flex items-center justify-between">
+                  <span className="text-cyan-400 font-bold">1M Rectangle Zone (Anees Mehdi)</span>
+                  <span className="font-mono text-cyan-200 font-bold">
+                    [Low: ${imm.rectangle_lower?.toLocaleString()} ↔ High: ${imm.rectangle_upper?.toLocaleString()}]
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         </div>

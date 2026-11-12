@@ -1,6 +1,16 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Index
 from datetime import datetime, timezone
+import math
 from app.database import Base
+
+def _safe_float(v, fallback=None):
+    if v is None:
+        return fallback
+    try:
+        val = float(v)
+        return fallback if (math.isnan(val) or math.isinf(val)) else val
+    except Exception:
+        return fallback
 
 class SignalAudit(Base):
     __tablename__ = "signals_tracker"
@@ -13,7 +23,7 @@ class SignalAudit(Base):
     quality_grade = Column(String(255), index=True)
     grade_tier = Column(Integer, default=2, index=True)  # 1: A+, 2: A, 3: B+, 4: C
     symbol = Column(String(32), index=True, nullable=False)
-    horizon = Column(String(32), index=True)  # SCALP (15M), SWING (1H), MACRO (24H)
+    horizon = Column(String(32), index=True)  # SCALP (15M), DAY (1H), SWING (24H)
     direction = Column(String(16), index=True)  # LONG / SHORT
     conviction_pct = Column(Float, default=50.0)
     entry_price = Column(Float, nullable=False)
@@ -21,6 +31,7 @@ class SignalAudit(Base):
     tp2_price = Column(Float)
     tp3_price = Column(Float)
     sl_price = Column(Float)
+    sl_original = Column(Float, nullable=True)
     risk_reward_ratio = Column(String(16), default="1:2.0")
     expected_return_pct = Column(Float, default=0.0)
     decision = Column(String(255))
@@ -59,7 +70,7 @@ class SignalAudit(Base):
         except Exception:
             st = str(self.status or "").strip().upper()
             out = str(self.outcome_label or "").strip().upper()
-            if any(k in st for k in ["PENDING", "ACTIVE"]) or "PENDING" in out or "AWAIT" in out:
+            if any(k in st for k in ["PENDING", "ACTIVE", "RESTING"]) or "PENDING" in out or "AWAIT" in out or "RESTING" in out:
                 return "PENDING"
             if any(k in st for k in ["BREAKEVEN", "TIER0", "_BE"]) or "BREAKEVEN" in out or "TIER-0" in out:
                 return "BREAKEVEN"
@@ -88,21 +99,25 @@ class SignalAudit(Base):
         p_tp3 = round(p_tp2 * 0.55, 1)
 
         canonical_outcome = self._resolve_canonical_outcome()
-        ret_val = self.realized_return_pct
-        exit_p = self.exit_price
+        ret_val = _safe_float(self.realized_return_pct, None)
+        exit_p = _safe_float(self.exit_price, None)
+        entry_p = _safe_float(self.entry_price, 0.0)
 
         # Robust Dynamic Accounting (Quant Edge Rule 1, 6 & 9):
         # Resolved/terminal trades must never show null return or evaluating state.
         if ret_val is None and canonical_outcome != "PENDING":
-            if exit_p is not None and self.entry_price and self.entry_price > 0:
+            if exit_p is not None and entry_p and entry_p > 0:
                 if str(self.direction or "").upper() == "SHORT":
-                    ret_val = round(((self.entry_price - exit_p) / self.entry_price) * 100.0, 2)
+                    ret_val = round(((entry_p - exit_p) / entry_p) * 100.0, 2)
                 else:
-                    ret_val = round(((exit_p - self.entry_price) / self.entry_price) * 100.0, 2)
+                    ret_val = round(((exit_p - entry_p) / entry_p) * 100.0, 2)
             else:
                 ret_val = 0.0
                 if exit_p is None:
-                    exit_p = self.entry_price
+                    exit_p = entry_p
+
+        curr_p = _safe_float(getattr(self, "current_price", None), None) or (exit_p if any(k in str(self.status or "") for k in ["WON", "LOST", "EXP", "CANCEL", "CLOSE"]) else entry_p)
+        live_pnl = _safe_float(getattr(self, "live_pnl_pct", None), None)
 
         return {
             "id": self.id,
@@ -115,12 +130,12 @@ class SignalAudit(Base):
             "symbol": self.symbol,
             "horizon": self.horizon,
             "direction": self.direction,
-            "conviction_pct": self.conviction_pct,
+            "conviction_pct": _safe_float(self.conviction_pct, 50.0),
             "win_p": win_p,
             "win_prob": win_p,
-            "meta_win_prob": win_p / 100.0,
+            "meta_win_prob": round(win_p / 100.0, 4),
             "meta_win_prob_pct": win_p,
-            "meta_win_probability": win_p / 100.0,
+            "meta_win_probability": round(win_p / 100.0, 4),
             "meta_win_probability_pct": win_p,
             "path_probabilities": {
                 "tp1": p_tp1,
@@ -132,13 +147,13 @@ class SignalAudit(Base):
             "p_tp2_pct": p_tp2,
             "p_tp3_pct": p_tp3,
             "p_sl_pct": p_sl,
-            "entry_price": self.entry_price,
-            "tp1_price": self.tp1_price,
-            "tp2_price": self.tp2_price,
-            "tp3_price": self.tp3_price,
-            "sl_price": self.sl_price,
+            "entry_price": entry_p,
+            "tp1_price": _safe_float(self.tp1_price, None),
+            "tp2_price": _safe_float(self.tp2_price, None),
+            "tp3_price": _safe_float(self.tp3_price, None),
+            "sl_price": _safe_float(self.sl_price, None),
             "risk_reward_ratio": self.risk_reward_ratio,
-            "expected_return_pct": self.expected_return_pct,
+            "expected_return_pct": _safe_float(self.expected_return_pct, 0.0),
             "decision": self.decision,
             "paper_trading_status": self.paper_trading_status,
             "predicted_window": self.predicted_window,
@@ -146,19 +161,19 @@ class SignalAudit(Base):
             "status": self.status,
             "outcome": canonical_outcome,
             "outcome_label": self.outcome_label,
-            "peak_price_seen": self.peak_price_seen,
-            "trough_price_seen": self.trough_price_seen,
-            "max_potential_gain_pct": self.max_potential_gain_pct,
+            "peak_price_seen": _safe_float(self.peak_price_seen, None),
+            "trough_price_seen": _safe_float(self.trough_price_seen, None),
+            "max_potential_gain_pct": _safe_float(self.max_potential_gain_pct, 0.0),
             "exit_price": exit_p,
             "realized_return_pct": f"{ret_val:+.2f}%" if ret_val is not None else "",
             "realized_return_num": ret_val,
             "evaluated_at_utc": self.evaluated_at_utc or "",
-            "volume_24h_usd": getattr(self, "volume_24h_usd", None),
-            "spread_bps": getattr(self, "spread_bps", None),
+            "volume_24h_usd": _safe_float(getattr(self, "volume_24h_usd", None), None),
+            "spread_bps": _safe_float(getattr(self, "spread_bps", None), None),
             "tf_metrics_json": self.tf_metrics_json,
             "card": self.card_text,
             "trade_id": self.signal_id,
-            "current_price": getattr(self, "current_price", None) or (exit_p if any(k in str(self.status or "") for k in ["WON", "LOST", "EXP", "CANCEL", "CLOSE"]) else self.entry_price),
-            "pnl_pct": getattr(self, "live_pnl_pct", None) if self.status == "ACTIVE" else (ret_val if ret_val is not None else 0.0),
-            "live_pnl_pct": getattr(self, "live_pnl_pct", None),
+            "current_price": curr_p,
+            "pnl_pct": live_pnl if self.status == "ACTIVE" else (ret_val if ret_val is not None else 0.0),
+            "live_pnl_pct": live_pnl,
         }

@@ -42,7 +42,7 @@ export default function RadarTable() {
           <h2 className="text-lg font-black tracking-tight text-white flex flex-wrap items-center gap-2">
             🛰️ Multi-Horizon Opportunity Radar
             <span className="rounded-md bg-cyan-950 px-2 py-0.5 text-xs font-semibold text-cyan-400 border border-cyan-800">
-              15M / 1H / 1D Multi-Horizon Alignment
+              15M / 1H / 4H Multi-Horizon Alignment
             </span>
           </h2>
           <p className="text-xs text-slate-400 mt-0.5">

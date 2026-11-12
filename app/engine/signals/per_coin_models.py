@@ -176,8 +176,29 @@ class PerCoinModelRegistry:
         return loaded_count
 
     def get_clean_symbol(self, symbol: str) -> str:
-        """Standardizes pair symbol to safe filesystem name (e.g., BTC/USDT -> BTC_USDT)."""
-        return symbol.replace("/", "_").replace(":USDT", "").replace(":", "_").strip()
+        """
+        Standardizes pair symbol to safe filesystem name (e.g., BTC/USDT -> BTC_USDT).
+        Dynamically resolves contract multiplier aliases (e.g. 1000000MOG_USDT <-> MOG_USDT,
+        10000LADYS_USDT <-> LADYS_USDT, 1000PEPE_USDT <-> PEPE_USDT) against available models on disk.
+        """
+        clean = symbol.replace("/", "_").replace(":USDT", "").replace(":", "_").replace("-", "_").strip()
+        if os.path.exists(os.path.join(self.per_coin_dir, clean)):
+            return clean
+
+        from app.engine.config import resolve_symbol_aliases, strip_contract_multiplier
+        for a in resolve_symbol_aliases(symbol):
+            a_clean = a.replace("/", "_").replace(":USDT", "").replace(":", "_").replace("-", "_").strip()
+            if os.path.exists(os.path.join(self.per_coin_dir, a_clean)):
+                return a_clean
+
+        # If no existing model on disk, standardize to un-prefixed core base so spot and futures share one model
+        core_base, mult = strip_contract_multiplier(clean)
+        if core_base and core_base != clean and mult > 1.0:
+            candidate_core = f"{core_base}_USDT"
+            if os.path.exists(os.path.join(self.per_coin_dir, candidate_core)):
+                return candidate_core
+
+        return clean
 
     def get_coin_dir(self, symbol: str) -> str:
         """Returns dedicated disk directory for a given coin, creating it if needed."""
@@ -209,7 +230,7 @@ class PerCoinModelRegistry:
         clean_sym = self.get_clean_symbol(symbol)
         cache_key = f"{clean_sym}_{tf}"
         now_ts = time.time()
-        n_samples = len(X_train) if X_train is not None else 0
+        n_samples = len(X_train) if X_train is not None else (len(y_train_dir) if y_train_dir is not None else 0)
         n_feats = X_train.shape[1] if (X_train is not None and getattr(X_train, "ndim", 1) > 1) else 0
 
         # 1. Check in-memory cache
@@ -262,7 +283,7 @@ class PerCoinModelRegistry:
             classifiers=clf_ensemble,
             regressors=reg_ensemble,
             last_candle_ts=last_candle_ts,
-            train_samples=len(X_train) if X_train is not None else 0,
+            train_samples=n_samples,
             fit_timestamp=now_ts
         )
 
@@ -308,6 +329,20 @@ class PerCoinModelRegistry:
                 except Exception:
                     pass
             return False
+
+    def purge_legacy_meta_models(self) -> int:
+        """Purges any legacy meta_classifier.joblib files from per-coin directories."""
+        purged = 0
+        if os.path.exists(self.per_coin_dir):
+            for root, dirs, files in os.walk(self.per_coin_dir):
+                for f in files:
+                    if f == "meta_classifier.joblib" or (f.startswith("meta_classifier.joblib.") and f.endswith(".tmp")):
+                        try:
+                            os.remove(os.path.join(root, f))
+                            purged += 1
+                        except Exception:
+                            pass
+        return purged
 
     def get_coin_status(self, symbol: str) -> Dict[str, Any]:
         """Returns disk inspection metadata for all models trained for this coin."""
