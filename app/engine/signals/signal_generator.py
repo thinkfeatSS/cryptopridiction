@@ -2668,8 +2668,8 @@ class SignalGenerationSystem:
     def evaluate_asset_multi_horizon(
         self,
         symbol: str,
-        dfs_9: Dict[str, pd.DataFrame],
-        btc_shield_state: Dict[str, Any],
+        dfs_9: Optional[Dict[str, pd.DataFrame]] = None,
+        btc_shield_state: Optional[Dict[str, Any]] = None,
         live_price: float = None,
         volume_24h_usd: float = 0.0,
         bid_price: float = 0.0,
@@ -2683,6 +2683,32 @@ class SignalGenerationSystem:
         # Institutional Policy: Zero Meme Coins in prediction system
         if is_meme_coin(symbol):
             return None
+
+        if dfs_9 is None:
+            loader = self.data_loader
+            if loader is None:
+                from app.engine.scanner.data_loader import MultiHorizonDataLoader
+                loader = MultiHorizonDataLoader()
+            try:
+                dfs_9 = loader.fetch_all_9_timeframes(symbol)
+            except Exception as e:
+                logger.error(f"[SIGNAL GENERATOR] Failed to fetch 9 timeframes for {symbol}: {e}")
+                return None
+
+        if btc_shield_state is None:
+            try:
+                from app.engine.scanner.btc_shield import BtcPredictiveMarketShield
+                btc_shield_state = BtcPredictiveMarketShield().assess_market_regime()
+            except Exception as e:
+                logger.warning(f"[SIGNAL GENERATOR] Failed to assess btc shield state: {e}")
+                btc_shield_state = {
+                    "regime": "NEUTRAL",
+                    "action": "NORMAL",
+                    "altcoin_longs_allowed": True,
+                    "altcoin_shorts_allowed": True,
+                    "market_stress_level": "LOW",
+                    "drawdown_pct": 0.0
+                }
 
         if not dfs_9 or "15m" not in dfs_9 or dfs_9["15m"] is None:
             return None
