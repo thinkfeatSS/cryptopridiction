@@ -555,26 +555,14 @@ class PaperTradingBot:
                 print(f"[PAPER BOT 🛑 SPREAD DEGRADED R:R] Blocked entry for {sym}: Spread widening ({spread_bps:.1f} bps) degraded effective R:R ({effective_rr:.2f} < 1.20).")
                 return False
 
-            # Canonical V16 Market Opportunity Hurdle Gating
-            if desk_key == "scalp":
-                # Scalp Desk: Accepts Grade A+, Grade A, and Grade B with EVnet >= 0.25%
-                is_acceptable_grade = any(g in quality_grade for g in ["A+", "GRADE A", "GRADE B", "A", "B"]) and "GRADE C" not in quality_grade
-                if not is_acceptable_grade:
-                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Ineligible grade ({quality_grade})")
-                    return False
-                if ev_net < 0.25:
-                    print(f"[PAPER BOT [QUALITY GATE]] Scalp rejected for {symbol}: Requires EVnet >= 0.25% (got {ev_net:.2f}%)")
-                    return False
-            elif desk_key == "day":
-                # Day Desk: EVnet >= 0.25%
-                if ev_net < 0.25:
-                    print(f"[PAPER BOT [QUALITY GATE]] Day Desk rejected for {symbol}: Requires EVnet >= 0.25% (got {ev_net:.2f}%)")
-                    return False
-            elif desk_key == "swing":
-                # Swing Desk: EVnet >= 0.20%
-                if ev_net < 0.20:
-                    print(f"[PAPER BOT [QUALITY GATE]] Swing Desk rejected for {symbol}: Requires EVnet >= 0.20% (got {ev_net:.2f}%)")
-                    return False
+            # Canonical V16 Market Opportunity Hurdle Gating (EVnet > 0.00% hurdle strictly enforced)
+            is_acceptable_grade = any(g in quality_grade for g in ["A+", "GRADE A", "GRADE B", "A", "B"]) and "GRADE C" not in quality_grade
+            if not is_acceptable_grade:
+                print(f"[PAPER BOT [QUALITY GATE]] Rejected for {symbol}: Ineligible grade ({quality_grade})")
+                return False
+            if ev_net <= 0.00:
+                print(f"[PAPER BOT [QUALITY GATE]] Rejected for {symbol}: Requires positive EVnet > 0.00% (got {ev_net:.2f}%)")
+                return False
 
             # Desk Allocation & Runner Fractional Slot Accounting (Fix 4)
             desk_positions = [p for p in self.data.get("open_positions", []) if p.get("desk") == desk_key]

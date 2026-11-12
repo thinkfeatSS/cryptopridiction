@@ -1381,6 +1381,32 @@ class SignalGenerationSystem:
         friction_drag = total_friction_pct * exec_entry_price
         gross_reward = abs(cand_tp1 - exec_entry_price)
         gross_risk = abs(exec_entry_price - cand_sl)
+
+        # Quantitative Hurdle Invariant: Ensure target dynamically accounts for friction so net R:R >= 2.00
+        min_net_target_rr = 2.00
+        needed_gross_reward = (min_net_target_rr * gross_risk) + ((min_net_target_rr + 1.0) * friction_drag)
+        max_safe_tp_dist = active_atr * 2.80
+        if gross_reward < needed_gross_reward and needed_gross_reward <= max_safe_tp_dist:
+            gross_reward = needed_gross_reward
+            if direction == "LONG":
+                cand_tp1 = format_dynamic_precision(exec_entry_price + gross_reward)
+            else:
+                cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - gross_reward))
+            actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, gross_risk), 2)
+            cand_rr = f"1:{actual_rr:.1f}"
+            # Re-evaluate net expectation with updated TP1 target
+            exp_res = self.expectancy_engine.evaluate(
+                entry=exec_entry_price,
+                sl=cand_sl,
+                tp1=cand_tp1,
+                tp2=cand_tp2,
+                tp3=cand_tp3,
+                direction=direction,
+                path_probs=path_probs,
+                costs=cost_breakdown
+            )
+            ev_result = exp_res
+
         net_reward = max(0.0, gross_reward - friction_drag)
         net_risk = gross_risk + friction_drag
         effective_rr = round(net_reward / max(1e-8, net_risk), 2)
@@ -1619,6 +1645,8 @@ class SignalGenerationSystem:
                 is_sub_threshold_illiquid = True
                 illiquidity_reason = f"Tail pair spread {spread_bps:.1f} bps > 20.0 bps limit on ${volume_24h_usd/1e6:.2f}M volume"
 
+        is_radar_eligible = False
+
         if is_sub_threshold_illiquid:
             status = "HOLD_VETOED_BY_SUB_THRESHOLD_ILLIQUIDITY"
             trade_active = False
@@ -1763,7 +1791,7 @@ class SignalGenerationSystem:
             tp3_price = cand_tp3
             sl_price = cand_sl
             rr_ratio = cand_rr
-        elif not ev_result.passes_ev_hurdle:
+        elif not ev_result.passes_ev_hurdle or ev_result.expected_net_return_pct <= 0.0:
             status = "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY" if ev_result.expected_net_return_pct <= 0.0 else "HOLD_UNFAVORABLE_RISK_REWARD"
             trade_active = False
             grade = f"Grade C ({ev_result.decision_reason})"
@@ -1773,6 +1801,7 @@ class SignalGenerationSystem:
             tp3_price = cand_tp3
             sl_price = cand_sl
             rr_ratio = cand_rr
+            is_radar_eligible = True
         elif is_volatility_headroom_vetoed:
             status = "HOLD_VETOED_BY_VOLATILITY_HEADROOM"
             trade_active = False
@@ -1783,27 +1812,17 @@ class SignalGenerationSystem:
             tp3_price = cand_tp3
             sl_price = cand_sl
             rr_ratio = cand_rr
-        elif effective_rr < 1.20:
-            status = "HOLD_SPREAD_DEGRADED_RR"
+        elif effective_rr < 1.20 or actual_rr < 2.00:
+            status = "HOLD_INSUFFICIENT_RISK_REWARD" if actual_rr < 2.00 else "HOLD_SPREAD_DEGRADED_RR"
             trade_active = False
-            grade = f"Grade C (SPREAD DEGRADED R:R: Effective 1:{effective_rr:.2f} < 1:1.20 due to {effective_spread_bps:.1f} bps spread / {cost_breakdown.slippage_pct:.3f}% slippage)"
-            conviction = max(35.0, float(meta_eval.get("win_probability_pct", 65.0)) * 0.5)
-            tp1_price = cand_tp1
-            tp2_price = cand_tp2
-            tp3_price = cand_tp3
-            sl_price = cand_sl
-            rr_ratio = f"1:{effective_rr:.1f}"
-        elif actual_rr < (1.25 if is_range_regime else (1.50 if (meta_eval.get("win_probability_pct", 50.0) >= 65.0 or ev_result.expected_net_return_pct >= 0.50) else 1.80)):
-            min_required_rr = 1.25 if is_range_regime else (1.50 if (meta_eval.get("win_probability_pct", 50.0) >= 65.0 or ev_result.expected_net_return_pct >= 0.50) else 1.80)
-            status = "HOLD_INSUFFICIENT_RISK_REWARD"
-            trade_active = False
-            grade = f"Grade C (INSUFFICIENT RISK-REWARD: 1:{actual_rr:.2f} < 1:{min_required_rr:.2f} required)"
+            grade = f"Grade C (INSUFFICIENT RISK-REWARD: Effective 1:{effective_rr:.2f} / Actual 1:{actual_rr:.2f} < 1:2.00 required)"
             conviction = float(meta_eval.get("win_probability_pct", 65.0))
             tp1_price = cand_tp1
             tp2_price = cand_tp2
             tp3_price = cand_tp3
             sl_price = cand_sl
-            rr_ratio = cand_rr
+            rr_ratio = f"1:{effective_rr:.1f}"
+            is_radar_eligible = True
         else:
             status = "ACTIVE_SIGNAL"
             trade_active = True
@@ -1983,7 +2002,9 @@ class SignalGenerationSystem:
             "effective_spread_bps": round(effective_spread_bps, 2),
             "spread_bps": round(effective_spread_bps, 2),
             "effective_rr": effective_rr,
+            "actual_rr": actual_rr,
             "gross_rr": actual_rr,
+            "is_radar_eligible": is_radar_eligible,
             "execution_assumption": exec_assumption.value,
             "costs_total_pct": ev_result.costs_total_pct,
             "cost_breakdown": {
@@ -3451,6 +3472,7 @@ class SignalGenerationSystem:
 
         # Check macro NTZ status: Flash Dump halts all signals; Squeeze/Micro-volatility exempts boundary & coiling alpha
         is_macro_ntz, macro_ntz_reason = self.is_macro_no_trade_zone(btc_shield_state)
+        is_partition_stale = bool(btc_shield_state.get("is_partition_stale", False) or btc_shield_state.get("is_global_outage", False))
         is_macro_dump = (
             btc_shield_state.get("regime") == "FLASH_DUMP" or
             btc_shield_state.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "ALERT_DUMP", "FLASH_DUMP"] or
@@ -3522,7 +3544,14 @@ class SignalGenerationSystem:
 
         radar_candidates = [
             s for s in all_candidate_signals.values()
-            if s.get("signal_status") == "HOLD_AWAITING_CANDLE_TRIGGER_CONFIRMATION"
+            if s.get("signal_status") in [
+                "HOLD_AWAITING_CANDLE_TRIGGER_CONFIRMATION",
+                "HOLD_INSUFFICIENT_RISK_REWARD",
+                "HOLD_SPREAD_DEGRADED_RR",
+                "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY",
+                "PRE_SIGNAL_RADAR"
+            ]
+            or s.get("is_radar_eligible", False)
             or (float(s.get("ev_net", 0.0) or 0.0) > 0.0 and float(s.get("conviction", 0.0) or 0.0) >= 55.0)
             or s.get("is_shadow_eligible")
         ]
@@ -3549,10 +3578,10 @@ class SignalGenerationSystem:
             meta_verdict = dom_sig.get("meta_verdict", "APPROVED")
             meta_model_type = dom_sig.get("meta_model_type", "PER_COIN_DEDICATED")
             meta_sample_size = dom_sig.get("meta_sample_size", 0)
-        elif is_asset_in_ntz:
+        elif is_macro_dump or is_partition_stale:
             dominant_direction = "NO_TRADE"
             active_signal_horizon = None
-            grade = f"Grade C (NO TRADE ZONE ACTIVE: {ntz_active_reason})"
+            grade = f"Grade C (MACRO BLACKOUT ACTIVE: {ntz_active_reason})"
             conviction = 0.0
             tp1_price = current_price
             tp2_price = current_price
@@ -3562,7 +3591,7 @@ class SignalGenerationSystem:
             pred_target = current_price
             pred_pct = 0.0
             status = "HOLD_VETOED_BY_NO_TRADE_ZONE"
-            wait_reason = f"🛑 NO TRADE ZONE ACTIVE: {ntz_active_reason}. Signal generation suppressed for capital preservation."
+            wait_reason = f"🛑 MACRO BLACKOUT ACTIVE: {ntz_active_reason}. Signal generation suppressed for capital preservation."
             dominant_timeframe = "NO_TRADE_ZONE"
             classifier_votes = ""
             regressor_votes = ""
@@ -3613,7 +3642,20 @@ class SignalGenerationSystem:
             pred_target = radar_sig.get("predicted_target_price", current_price)
             pred_pct = radar_sig.get("expected_return_pct", 0.0)
             status = "PRE_SIGNAL_RADAR"
-            wait_reason = radar_sig.get("wait_reason") or f"⏳ Setup qualified for {radar_sig['direction']} ({radar_sig['horizon']}). Awaiting institutional candle trigger confirmation (Order Block reaction / Liquidity Sweep reclaim / VWAP bounce)."
+
+            # Dynamic 1:2.00 Limit Price Anchor
+            tp1_v = float(tp1_price) if tp1_price > 0 else current_price
+            sl_v = float(sl_price) if sl_price > 0 else current_price
+            rr_target_entry = round((tp1_v + 2.0 * sl_v) / 3.0, 6) if (tp1_v > 0 and sl_v > 0) else current_price
+
+            sig_st = radar_sig.get("signal_status", "")
+            if sig_st in ["HOLD_INSUFFICIENT_RISK_REWARD", "HOLD_SPREAD_DEGRADED_RR"]:
+                wait_reason = f"⏳ PRE-SIGNAL RADAR: Setup qualified for {dominant_direction} ({active_signal_horizon}). Awaiting price retracement to ${rr_target_entry:g} to achieve R:R >= 1:2.00 (current: {rr_ratio})."
+            elif sig_st == "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY":
+                wait_reason = f"⏳ PRE-SIGNAL RADAR: Setup qualified for {dominant_direction} ({active_signal_horizon}). Awaiting favorable price geometry to achieve positive Net EV (current: {float(radar_sig.get('ev_net', 0.0)):+.2f}% after costs)."
+            else:
+                wait_reason = radar_sig.get("wait_reason") or f"⏳ PRE-SIGNAL RADAR: Setup qualified for {dominant_direction} ({active_signal_horizon}). Awaiting institutional candle trigger confirmation (Order Block reaction / Liquidity Sweep reclaim / VWAP bounce)."
+
             dominant_timeframe = radar_sig["horizon"]
             classifier_votes = radar_sig.get("classifier_votes", "")
             regressor_votes = radar_sig.get("regressor_votes", "")
@@ -3622,6 +3664,28 @@ class SignalGenerationSystem:
             meta_verdict = "RADAR_HOTLIST"
             meta_model_type = radar_sig.get("meta_model_type", "PER_COIN_DEDICATED")
             meta_sample_size = radar_sig.get("meta_sample_size", 0)
+        elif is_asset_in_ntz:
+            dominant_direction = "NO_TRADE"
+            active_signal_horizon = None
+            grade = f"Grade C (NO TRADE ZONE ACTIVE: {ntz_active_reason})"
+            conviction = 0.0
+            tp1_price = current_price
+            tp2_price = current_price
+            tp3_price = current_price
+            sl_price = current_price
+            rr_ratio = "1:1.0"
+            pred_target = current_price
+            pred_pct = 0.0
+            status = "HOLD_VETOED_BY_NO_TRADE_ZONE"
+            wait_reason = f"🛑 NO TRADE ZONE ACTIVE: {ntz_active_reason}. Signal generation suppressed for capital preservation."
+            dominant_timeframe = "NO_TRADE_ZONE"
+            classifier_votes = ""
+            regressor_votes = ""
+            meta_win_prob = 0.50
+            meta_win_prob_pct = 50.0
+            meta_verdict = "VETOED_BY_NTZ"
+            meta_model_type = "PRIMARY_ENSEMBLE"
+            meta_sample_size = 0
         else:
             dominant_direction = "NO_TRADE"
             active_signal_horizon = None
@@ -3694,19 +3758,23 @@ class SignalGenerationSystem:
             "trend_alignment": trend_alignment_info,
             "quality_grade": grade,
             "conviction": conviction,
-            "entry_price": dom_sig["entry_price"] if dom_sig else current_price,
-            "optimal_entry_price": dom_sig.get("optimal_entry_price", current_price) if dom_sig else current_price,
-            "optimal_entry_limit": dom_sig.get("optimal_entry_limit", current_price) if dom_sig else current_price,
-            "entry_zone_min": dom_sig.get("entry_zone_min", current_price) if dom_sig else current_price,
-            "entry_zone_max": dom_sig.get("entry_zone_max", current_price) if dom_sig else current_price,
-            "is_limit_pending": dom_sig.get("is_limit_pending", False) if dom_sig else False,
-            "entry_mode": dom_sig.get("entry_mode", "MARKET") if dom_sig else "MARKET",
+            "entry_price": dom_sig["entry_price"] if dom_sig else (radar_sig.get("entry_price", current_price) if status == "PRE_SIGNAL_RADAR" else current_price),
+            "optimal_entry_price": dom_sig.get("optimal_entry_price", current_price) if dom_sig else (radar_sig.get("optimal_entry_price", current_price) if status == "PRE_SIGNAL_RADAR" else current_price),
+            "optimal_entry_limit": dom_sig.get("optimal_entry_limit", current_price) if dom_sig else (rr_target_entry if status == "PRE_SIGNAL_RADAR" else current_price),
+            "entry_target_for_rr20": rr_target_entry if status == "PRE_SIGNAL_RADAR" else current_price,
+            "entry_zone_min": dom_sig.get("entry_zone_min", current_price) if dom_sig else (radar_sig.get("entry_zone_min", current_price) if status == "PRE_SIGNAL_RADAR" else current_price),
+            "entry_zone_max": dom_sig.get("entry_zone_max", current_price) if dom_sig else (radar_sig.get("entry_zone_max", current_price) if status == "PRE_SIGNAL_RADAR" else current_price),
+            "is_limit_pending": dom_sig.get("is_limit_pending", False) if dom_sig else (True if status == "PRE_SIGNAL_RADAR" else False),
+            "entry_mode": dom_sig.get("entry_mode", "MARKET") if dom_sig else ("LIMIT" if status == "PRE_SIGNAL_RADAR" else "MARKET"),
             "tp1_price": tp1_price,
             "tp2_price": tp2_price,
             "tp3_price": tp3_price,
             "sl_price": sl_price,
             "risk_reward_ratio": rr_ratio,
             "expected_return_pct": pred_pct,
+            "ev_net": dom_sig.get("ev_net", 0.0) if dom_sig else (radar_sig.get("ev_net", 0.0) if status == "PRE_SIGNAL_RADAR" else 0.0),
+            "actual_rr": dom_sig.get("actual_rr", 0.0) if dom_sig else (radar_sig.get("actual_rr", 0.0) if status == "PRE_SIGNAL_RADAR" else 0.0),
+            "effective_rr": dom_sig.get("effective_rr", 0.0) if dom_sig else (radar_sig.get("effective_rr", 0.0) if status == "PRE_SIGNAL_RADAR" else 0.0),
             "dominant_timeframe": dominant_timeframe,
             "classifier_votes": classifier_votes,
             "regressor_votes": regressor_votes,

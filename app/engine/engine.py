@@ -395,8 +395,8 @@ class UnifiedCryptoEngine:
                                 "is_ntz_active": False,
                                 "signal_status": "VALID_EXECUTION",
                                 "created_at": now_iso,
-                                "allocation_pct": 100.0,
-                                "sizing_multiplier": 1.0,
+                                "allocation_pct": round(100.0 * float(btc_shield.get("sizing_multiplier", 1.0) or 1.0), 1),
+                                "sizing_multiplier": float(btc_shield.get("sizing_multiplier", 1.0) or 1.0),
                                 "ev_net": round(exp_res.ev_net * 100.0, 2),
                                 "ev_gross": round(exp_res.ev_gross * 100.0, 2),
                                 "costs_total_pct": round(rect_costs.total_pct * 100.0, 2),
@@ -484,7 +484,13 @@ class UnifiedCryptoEngine:
                     if s.get("is_decoupled_trend") or s.get("is_trade_active"):
                         # Keep active decoupled altcoin signal intact
                         continue
-                    elif s.get("signal_status") in ["PRE_SIGNAL_RADAR", "HOLD_AWAITING_CANDLE_TRIGGER_CONFIRMATION"]:
+                    elif s.get("signal_status") in [
+                        "PRE_SIGNAL_RADAR",
+                        "HOLD_AWAITING_CANDLE_TRIGGER_CONFIRMATION",
+                        "HOLD_INSUFFICIENT_RISK_REWARD",
+                        "HOLD_SPREAD_DEGRADED_RR",
+                        "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY"
+                    ] or s.get("is_radar_eligible"):
                         # Preserve diagnostic Radar status and wait_reason
                         continue
                     else:
@@ -498,6 +504,7 @@ class UnifiedCryptoEngine:
         # Extract strictly active trade signals (gated by strict multi-horizon alignment & No Trade Zone)
         active_trade_signals = []
         if not (is_macro_dump or is_partition_stale):
+            shield_mult = float(btc_shield.get("sizing_multiplier", 1.0) or 1.0)
             active_trade_signals = [
                 s for s in generated_signals
                 if s.get("is_trade_active") and s.get("dominant_direction") in ["LONG", "SHORT"]
@@ -505,6 +512,11 @@ class UnifiedCryptoEngine:
                 and "NO_TRADE_ZONE" not in s.get("signal_status", "")
                 and str(s.get("horizon") or s.get("dominant_timeframe") or "15M").upper() in ["15M", "15M SCALP", "SCALP"]
             ]
+            for s in active_trade_signals:
+                curr_sm = float(s.get("sizing_multiplier", 1.0) or 1.0)
+                if shield_mult < 1.0 and curr_sm > shield_mult:
+                    s["sizing_multiplier"] = round(curr_sm * shield_mult, 2)
+                    s["allocation_pct"] = round(float(s.get("allocation_pct", 100.0)) * shield_mult, 1)
             def _signal_sort_rank(s):
                 qg = str(s.get("quality_grade", "")).upper()
                 grade_rank = 1 if "A+" in qg else (2 if "GRADE A" in qg else 3)
