@@ -40,6 +40,7 @@ class PaperTradingBot:
         else:
             self.ledger_file = os.path.join(EXPORT_DIR, "paper_trading_ledger.json")
         self.taker_fee_rate = 0.000405 # 0.045% with 10% BNB discount
+        self.blackout_ceiling_ms: float = float(os.getenv("BLACKOUT_CEILING_MS", "8000.0"))
         self.MAX_SAFEGUARD_VOID_HOLD_SECONDS: float = 1800.0  # 30m maximum safeguard hold before auto-liquidation
         self.ABANDONED_MICRO_CAP_VOID_TIMEOUT: float = 60.0  # 60s fast auto-liquidation on abandoned/depleted micro-caps
         self._lock = threading.RLock()
@@ -1345,9 +1346,9 @@ class PaperTradingBot:
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
 
-                    # Extreme Network Blackout Sentinel (Fix 7): If latency exceeds blackout safety ceiling (default 2000ms in unit tests, 8000ms in daemon),
+                    # Extreme Network Blackout Sentinel (Fix 7): If latency exceeds blackout safety ceiling (default 8000ms),
                     # pre-emptively cancel resting limit orders to eliminate blind knife-catch fills:
-                    blackout_ceiling = float(getattr(self, "blackout_ceiling_ms", 2000.0))
+                    blackout_ceiling = float(getattr(self, "blackout_ceiling_ms", 8000.0))
                     if tick_latency_ms >= blackout_ceiling:
                         canc_rec = self._create_cancellation_record(
                             pos,
@@ -1383,7 +1384,7 @@ class PaperTradingBot:
 
                     # B. Chase Buffer Exceeded / Structure Invalidated vs Runaway Reversal Conversion
                     # In runaway parabolic markets, if price reverses before retesting the LH/HL zone
-                    # and begins expanding in the trade direction with institutional R:R (>= 1.20), convert to market fill
+                    # and begins expanding in the trade direction with institutional R:R (>= 1.00), convert to market fill
                     admission_p = float(pos.get("admission_price", pos.get("current_price", limit_p)))
                     chase_thresh = float(pos.get("chase_threshold_pct", 0.40))
                     max_allowed_long = max(float(pos.get("entry_zone_max", 0.0)), admission_p * (1.0 + chase_thresh / 100.0))
@@ -1409,7 +1410,7 @@ class PaperTradingBot:
                                 is_limit=False
                             )
 
-                        if tp_not_reached and eff_rr >= 1.10:
+                        if tp_not_reached and eff_rr >= 1.00:
                             pos["status"] = "OPEN"
                             pos["is_limit_resting"] = False
                             pos["entry_price"] = curr_p
@@ -1422,7 +1423,7 @@ class PaperTradingBot:
                             remaining_positions.append(pos)
                             continue
                         else:
-                            canc_detail = "Price expanded beyond chase threshold without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.10) without limit fill"
+                            canc_detail = "Price expanded beyond chase threshold without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.00) without limit fill"
                             canc_rec = self._create_cancellation_record(pos, "CANCELLED_CHASE_EXCEEDED", canc_detail)
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
@@ -3053,15 +3054,22 @@ class PaperTradingBot:
                         r_norm_hz = "15M" if "15" in r_hz else ("24H" if any(x in r_hz for x in ["24", "1D", "SWING", "MACRO"]) else "1H")
                         r_st = str(row.get("status", "")).strip().upper()
 
+                        r_date = str(row.get("date_utc", "")).strip()
+                        r_time = str(row.get("time_utc", "")).strip()
+                        sig_time = f"{r_date} {r_time}".strip()
+                        is_time_ok = (not sig_time) or (str(cancelled_at).replace(" UTC", "") >= sig_time.replace(" UTC", ""))
+
                         is_match = (
                             (sig_id and r_sid == sig_id)
                             or (
-                                (r_sym == sym or r_sym.replace("/", "") == sym.replace("/", ""))
+                                not sig_id
+                                and (r_sym == sym or r_sym.replace("/", "") == sym.replace("/", ""))
                                 and (r_norm_hz == norm_hz)
-                                and r_st in ["PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"]
+                                and is_time_ok
                             )
                         )
-                        if is_match and not csv_changed:
+                        # Never overwrite active running trades or protected breakeven trades with resting cancellations
+                        if is_match and r_st in ["PENDING_LIMIT", "RESTING_LIMIT", "PENDING_EVALUATION"] and not csv_changed:
                             row["status"] = audit_status
                             row["outcome_label"] = outcome_label
                             if live_exit_p > 0:

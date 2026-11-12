@@ -3772,6 +3772,7 @@ class PaperTradingLedger:
 
         new_pos = {
             "trade_id": f"PAPER_{sym.replace('/', '_')}_{desk_key}_{int(time.time()*1000)}",
+            "signal_id": cand.get("signal_id") or cand.get("trade_id"),
             "symbol": sym,
             "desk": desk_key,
             "desk_name": desk_cfg["name"],
@@ -5301,6 +5302,7 @@ class SignalAuditTracker:
         # 1. Paper Trading Execution Reconciliation Bridge:
         # Cross-check closed trades from paper_trading_ledger.json to guarantee 0ms synchronization
         closed_paper_map = {}
+        closed_paper_id_map = {}
         try:
             pt_path = os.path.join(self.export_dir, "paper_trading_ledger.json")
             if os.path.exists(pt_path):
@@ -5313,6 +5315,10 @@ class SignalAuditTracker:
                     norm_hz = "15M" if "15" in pt_hz else ("24H" if ("24" in pt_hz or "1D" in pt_hz) else "1H")
                     closed_paper_map[(pt_sym, norm_hz)] = pt
                     closed_paper_map[(pt_sym.replace("/", "").replace(":USDT", ""), norm_hz)] = pt
+                    if pt.get("signal_id"):
+                        closed_paper_id_map[str(pt.get("signal_id")).strip()] = pt
+                    if pt.get("trade_id"):
+                        closed_paper_id_map[str(pt.get("trade_id")).strip()] = pt
         except Exception:
             pass
 
@@ -5330,8 +5336,26 @@ class SignalAuditTracker:
                 r_hz = str(r.get('horizon', '15M')).strip().upper()
                 norm_hz = "15M" if "15" in r_hz else ("24H" if ("24" in r_hz or "1D" in r_hz) else "1H")
 
-                # Match against paper trading closed trades
-                pt_match = closed_paper_map.get((r_sym, norm_hz)) or closed_paper_map.get((r_sym.replace("/", ""), norm_hz))
+                # Match against paper trading closed trades (strictly require signal_id match or closed_at >= signal_created_at)
+                r_sid = str(r.get('signal_id', '')).strip()
+                pt_match = None
+                if r_sid and r_sid in closed_paper_id_map:
+                    pt_match = closed_paper_id_map[r_sid]
+
+                if not pt_match:
+                    cand_match = closed_paper_map.get((r_sym, norm_hz)) or closed_paper_map.get((r_sym.replace("/", ""), norm_hz))
+                    if cand_match:
+                        closed_time = str(cand_match.get("closed_at_utc") or cand_match.get("closed_at") or "")
+                        sig_date = str(r.get('date_utc', '')).strip()
+                        sig_time_str = str(r.get('time_utc', '')).strip()
+                        sig_time = f"{sig_date} {sig_time_str}".strip()
+                        if closed_time and sig_time:
+                            c_iso = closed_time.replace(" UTC", "").strip()
+                            s_iso = sig_time.replace(" UTC", "").strip()
+                            if c_iso >= s_iso:
+                                pt_match = cand_match
+                        elif not sig_time:
+                            pt_match = cand_match
                 if pt_match:
                     exit_reason = str(pt_match.get("exit_reason", ""))
                     exit_p = float(pt_match.get("exit_price") or r.get("entry_price") or 0.0)
