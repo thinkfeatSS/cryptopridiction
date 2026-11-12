@@ -35,33 +35,96 @@ export default function V16SignalCard({ signal, onSelect, isSelected = false }: 
   const gradeBadge = getGradeBadge(imm.grade);
   const regimeTheme = getRegimeTheme(imm.regime);
 
-  // Status determination
+  // Status determination strictly aligned with app/quant_v16/audit.py
   const statusCategory = useMemo(() => {
-    const st = (dyn?.status || imm?.status || "").toUpperCase();
-    const out = (dyn?.outcome_label || "").toUpperCase();
+    const st = (dyn?.status || imm?.status || "").trim().toUpperCase();
+    const out = (dyn?.outcome_label || "").trim().toUpperCase();
 
-    if (st.includes("TP") || out.includes("TP1") || out.includes("TP2") || out.includes("TP3")) {
-      return { label: "TP HIT (WON)", color: "text-emerald-400 bg-emerald-950/70 border-emerald-500/50", isWon: true };
+    // 1. Pending / Active trades (Strict Gate: must be evaluated first per Rule 9)
+    const pendingStatuses = [
+      "PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "RESTING_LIMIT",
+      "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"
+    ];
+    if (
+      pendingStatuses.includes(st) ||
+      st === "ACTIVE" ||
+      out.includes("ACTIVE") ||
+      out.includes("PENDING") ||
+      out.includes("RUNNING") ||
+      out.includes("AWAIT") ||
+      out.includes("RESTING")
+    ) {
+      if (st.includes("RESTING") || st.includes("LIMIT") || out.includes("LIMIT")) {
+        return { label: dyn?.outcome_label || "RESTING LIMIT", color: "text-cyan-300 bg-cyan-950/70 border-cyan-500/50 animate-pulse", isActive: true };
+      }
+      return { label: dyn?.outcome_label || "ACTIVE SIGNAL", color: "text-emerald-300 bg-emerald-950/70 border-emerald-500/40 animate-pulse", isActive: true };
     }
-    if (st.includes("EXP_PROFIT") || st.includes("PROFIT_EXPIRED") || out.includes("EXP PROFIT") || out.includes("PROFIT EXPIRE")) {
-      return { label: "PROFIT (EXPIRY)", color: "text-teal-400 bg-teal-950/70 border-teal-500/50", isWon: true };
+
+    // 2. Breakeven outcomes
+    const beStatuses = [
+      "WON_TIER0_BE", "WON_TP1_BE", "EXPIRED_BREAKEVEN",
+      "BREAKEVEN_EXP", "TIER0_BE_HIT", "BREAKEVEN", "BREAKEVEN_GUARD",
+      "STOP_LOSS_BREAKEVEN", "TIER0_GUARD"
+    ];
+    if (
+      beStatuses.includes(st) ||
+      st.includes("BREAKEVEN") ||
+      st.includes("BE_") ||
+      st.includes("TIER0_BE") ||
+      st.includes("SOFT_BE") ||
+      out.includes("BREAKEVEN") ||
+      out.includes("TIER-0") ||
+      out.includes("BE RUNNER") ||
+      out.includes("(BE")
+    ) {
+      return { label: dyn?.outcome_label || "BREAKEVEN GUARD", color: "text-amber-400 bg-amber-950/70 border-amber-500/50", isBe: true };
     }
-    if (st.includes("WON") || out.includes("WON") || st.includes("PROFIT")) {
-      return { label: "CLOSED IN PROFIT", color: "text-emerald-400 bg-emerald-950/70 border-emerald-500/50", isWon: true };
+
+    // 3. Won outcomes
+    const wonStatuses = [
+      "WON_TP3", "WON_TP2_TRAIL", "WON_TP2", "WON_TP1",
+      "WON_TP2_EXP", "WON_TP1_EXP", "WON_EXP_PROFIT", "WON_PROFIT_EXPIRED", "WON",
+      "WON_PROFIT_RATCHET"
+    ];
+    if (
+      wonStatuses.includes(st) ||
+      st.includes("WON") ||
+      (out.includes("WON") && !out.includes("LOST")) ||
+      out.includes("TP HIT") ||
+      out.includes("TP1 HIT") ||
+      out.includes("TP2 HIT") ||
+      out.includes("TP3 HIT") ||
+      st.includes("PROFIT_EXPIRED") ||
+      out.includes("PROFIT")
+    ) {
+      return { label: dyn?.outcome_label || "TP HIT (WON)", color: "text-emerald-400 bg-emerald-950/70 border-emerald-500/50", isWon: true };
     }
-    if (st.includes("LOST") || out.includes("LOST") || st.includes("STOP") || out.includes("STOP")) {
-      return { label: "STOPPED (LOST)", color: "text-rose-400 bg-rose-950/70 border-rose-500/50", isLost: true };
+
+    // 4. Lost outcomes
+    const lostStatuses = ["LOST_SL", "LOST_EXP", "LOST_EXPIRED", "LOST"];
+    if (
+      lostStatuses.includes(st) ||
+      st.includes("LOST") ||
+      (out.includes("LOST") && !out.includes("WON")) ||
+      st.includes("STOP_LOSS") ||
+      out.includes("SL HIT") ||
+      out.includes("STOPPED")
+    ) {
+      return { label: dyn?.outcome_label || "STOPPED (LOST)", color: "text-rose-400 bg-rose-950/70 border-rose-500/50", isLost: true };
     }
-    if (st.includes("BREAKEVEN") || st.includes("BE_") || st.includes("SOFT_BE") || out.includes("BREAKEVEN") || out.includes("BE") || st.includes("TIER0_BE")) {
-      return { label: "BREAKEVEN GUARD", color: "text-amber-400 bg-amber-950/70 border-amber-500/50", isBe: true };
+
+    // 5. Expired outcomes
+    if (
+      st.includes("EXP") ||
+      out.includes("EXPIRED") ||
+      out.includes("MISSED") ||
+      out.includes("TIMEOUT") ||
+      st.includes("STAGNATION")
+    ) {
+      return { label: dyn?.outcome_label || "EXPIRED", color: "text-slate-400 bg-slate-900 border-slate-700", isExpired: true };
     }
-    if (st.includes("EXP") || out.includes("EXP") || st.includes("STAGNATION") || out.includes("TIMEOUT")) {
-      return { label: "EXPIRED", color: "text-slate-400 bg-slate-900 border-slate-700", isExpired: true };
-    }
-    if (st.includes("RESTING") || st.includes("LIMIT")) {
-      return { label: "RESTING LIMIT", color: "text-cyan-300 bg-cyan-950/70 border-cyan-500/50 animate-pulse", isActive: true };
-    }
-    return { label: "ACTIVE SIGNAL", color: "text-emerald-300 bg-emerald-950/70 border-emerald-500/40", isActive: true };
+
+    return { label: dyn?.outcome_label || "ACTIVE SIGNAL", color: "text-emerald-300 bg-emerald-950/70 border-emerald-500/40", isActive: true };
   }, [dyn?.status, dyn?.outcome_label, imm?.status]);
 
   // Current price and live PnL calculation

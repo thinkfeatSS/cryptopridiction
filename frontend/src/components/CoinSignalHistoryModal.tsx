@@ -87,13 +87,13 @@ export default function CoinSignalHistoryModal({
 
   // Memoize Coin-level stats unconditionally
   const { total, wonCount, lostCount, pendingCount, winRate } = useMemo(() => {
-    if (!signals) return { total: 0, wonCount: 0, lostCount: 0, pendingCount: 0, winRate: "0.0" };
+    if (!signals) return { total: 0, wonCount: 0, lostCount: 0, pendingCount: 0, winRate: "—" };
     const tot = signals.length;
     const won = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("WON")).length;
     const lost = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("LOST")).length;
     const pending = signals.filter((s) => (s.outcome_label || s.status || "").toUpperCase().includes("PENDING")).length;
     const decisive = won + lost;
-    const wr = decisive > 0 ? ((won / decisive) * 100).toFixed(1) : "0.0";
+    const wr = decisive > 0 ? `${((won / decisive) * 100).toFixed(1)}%` : "—";
     return { total: tot, wonCount: won, lostCount: lost, pendingCount: pending, winRate: wr };
   }, [signals]);
 
@@ -243,7 +243,7 @@ export default function CoinSignalHistoryModal({
             </div>
             <div className="rounded-xl bg-dark-950/80 p-2.5 sm:p-3 border border-slate-800 col-span-2 sm:col-span-1">
               <span className="text-[10px] uppercase font-bold text-cyan-400">Decisive Win Rate</span>
-              <p className="text-base sm:text-lg font-black text-white">{winRate}%</p>
+              <p className="text-base sm:text-lg font-black text-white">{winRate}</p>
             </div>
           </div>
 

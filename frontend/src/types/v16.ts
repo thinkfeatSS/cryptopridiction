@@ -60,6 +60,8 @@ export interface V16DynamicTradeState {
   status: string;
   outcome_label: string;
   updated_at_utc: string;
+  exit_price?: number | null;
+  realized_return_pct?: number | null;
   is_risk_free?: boolean;
   residual_risk_usd?: number;
   locked_profit_usd?: number;

@@ -60,23 +60,100 @@ export default function V16SignalsAuditLedger() {
     });
   }, [allSignals]);
 
-  // Deterministic status classifier
+  // Deterministic status classifier strictly aligned with app/quant_v16/audit.py
   const getSignalStatus = (item: V16SignalEnvelope): "ACTIVE" | "WON" | "LOST" | "BREAKEVEN" | "EXPIRED" => {
-    const st = (item.dynamic?.status || item.immutable?.status || "").toUpperCase();
-    const out = (item.dynamic?.outcome_label || "").toUpperCase();
+    const st = (item.dynamic?.status || item.immutable?.status || "").trim().toUpperCase();
+    const out = (item.dynamic?.outcome_label || "").trim().toUpperCase();
 
-    if (st.includes("WON") || out.includes("WON") || out.includes("TP1") || out.includes("TP2") || out.includes("TP3") || st.includes("PROFIT")) {
-      return "WON";
+    // 1. Pending / Active trades (Strict Gate: must be evaluated first per Rule 9)
+    const pendingStatuses = [
+      "PENDING_EVALUATION", "ACTIVE", "PENDING_LIMIT", "RESTING_LIMIT",
+      "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"
+    ];
+    if (
+      pendingStatuses.includes(st) ||
+      st === "ACTIVE" ||
+      out.includes("ACTIVE") ||
+      out.includes("PENDING") ||
+      out.includes("RUNNING") ||
+      out.includes("AWAIT") ||
+      out.includes("RESTING")
+    ) {
+      return "ACTIVE";
     }
-    if (st.includes("LOST") || out.includes("LOST") || st.includes("STOP") || out.includes("STOP")) {
-      return "LOST";
-    }
-    if (st.includes("BREAKEVEN") || st.includes("BE_") || st.includes("SOFT_BE") || out.includes("BREAKEVEN") || out.includes("BE") || st.includes("TIER0_BE")) {
+
+    // 2. Breakeven outcomes
+    const beStatuses = [
+      "WON_TIER0_BE", "WON_TP1_BE", "EXPIRED_BREAKEVEN",
+      "BREAKEVEN_EXP", "TIER0_BE_HIT", "BREAKEVEN", "BREAKEVEN_GUARD",
+      "STOP_LOSS_BREAKEVEN", "TIER0_GUARD"
+    ];
+    if (
+      beStatuses.includes(st) ||
+      st.includes("BREAKEVEN") ||
+      st.includes("BE_") ||
+      st.includes("TIER0_BE") ||
+      st.includes("SOFT_BE") ||
+      out.includes("BREAKEVEN") ||
+      out.includes("TIER-0") ||
+      out.includes("BE RUNNER") ||
+      out.includes("(BE")
+    ) {
       return "BREAKEVEN";
     }
-    if (st.includes("EXP") || out.includes("EXP") || st.includes("STAGNATION") || out.includes("TIMEOUT")) {
+
+    // 3. Won outcomes
+    const wonStatuses = [
+      "WON_TP3", "WON_TP2_TRAIL", "WON_TP2", "WON_TP1",
+      "WON_TP2_EXP", "WON_TP1_EXP", "WON_EXP_PROFIT", "WON_PROFIT_EXPIRED", "WON",
+      "WON_PROFIT_RATCHET"
+    ];
+    if (
+      wonStatuses.includes(st) ||
+      st.includes("WON") ||
+      (out.includes("WON") && !out.includes("LOST")) ||
+      out.includes("TP HIT") ||
+      out.includes("TP1 HIT") ||
+      out.includes("TP2 HIT") ||
+      out.includes("TP3 HIT") ||
+      st.includes("PROFIT_EXPIRED") ||
+      out.includes("PROFIT")
+    ) {
+      return "WON";
+    }
+
+    // 4. Lost outcomes
+    const lostStatuses = ["LOST_SL", "LOST_EXP", "LOST_EXPIRED", "LOST"];
+    if (
+      lostStatuses.includes(st) ||
+      st.includes("LOST") ||
+      (out.includes("LOST") && !out.includes("WON")) ||
+      st.includes("STOP_LOSS") ||
+      out.includes("SL HIT") ||
+      out.includes("STOPPED")
+    ) {
+      return "LOST";
+    }
+
+    // 5. Expired outcomes
+    if (
+      st.includes("EXP") ||
+      out.includes("EXPIRED") ||
+      out.includes("MISSED") ||
+      out.includes("TIMEOUT") ||
+      st.includes("STAGNATION")
+    ) {
       return "EXPIRED";
     }
+
+    // Fallback: if realized return is recorded and non-zero
+    const ret = item.dynamic?.realized_return_pct;
+    if (ret !== undefined && ret !== null && !isNaN(ret)) {
+      if (ret > 0.05) return "WON";
+      if (ret < -0.05) return "LOST";
+      return "BREAKEVEN";
+    }
+
     return "ACTIVE";
   };
 
@@ -97,7 +174,19 @@ export default function V16SignalsAuditLedger() {
       else active++;
     });
 
-    return { active, won, lost, breakeven, expired, total: v16Signals.length };
+    const evaluatedTotal = won + lost + breakeven + expired;
+    const decisiveTotal = won + lost;
+
+    return {
+      active,
+      won,
+      lost,
+      breakeven,
+      expired,
+      evaluatedTotal,
+      decisiveTotal,
+      total: v16Signals.length
+    };
   }, [v16Signals]);
 
   // Executive V16 KPI Metrics
@@ -106,9 +195,19 @@ export default function V16SignalsAuditLedger() {
     if (total === 0) {
       return {
         totalSignals: 0,
-        decisiveWinRate: 0,
-        totalWinRate: 0,
-        gradeAPlusWinRate: 0,
+        activeSignals: 0,
+        evaluatedTotal: 0,
+        decisiveTotal: 0,
+        won: 0,
+        lost: 0,
+        breakeven: 0,
+        expired: 0,
+        decisiveWinRate: null as number | null,
+        totalWinRate: null as number | null,
+        gradeAPlusWinRate: null as number | null,
+        gradeAPlusCount: 0,
+        gradeAPlusWon: 0,
+        gradeAPlusDecisive: 0,
         avgNetEv: 0,
         avgPtp1: 0,
         cumulativeReturn: 0,
@@ -117,35 +216,57 @@ export default function V16SignalsAuditLedger() {
 
     const won = counts.won;
     const lost = counts.lost;
-    const decisiveTotal = won + lost;
-    const decisiveWinRate = decisiveTotal > 0 ? (won / decisiveTotal) * 100 : 0;
-    const totalWinRate = total > 0 ? (won / total) * 100 : 0;
+    const decisiveTotal = counts.decisiveTotal; // won + lost
+    const evaluatedTotal = counts.evaluatedTotal; // won + lost + breakeven + expired
+
+    // Decisive Win Rate: Won / (Won + Lost)
+    // When decisiveTotal === 0, win rate is mathematically undefined (null -> display '—')
+    const decisiveWinRate = decisiveTotal > 0 ? (won / decisiveTotal) * 100 : null;
+
+    // Total Closed/Evaluated Win Rate: Won / All Evaluated Signals (per Section 4.1 & test_suite_engine.py:781)
+    // Active/Pending signals MUST NEVER dilute evaluated win rate!
+    // When evaluatedTotal === 0, win rate is null (display '—')
+    const totalWinRate = evaluatedTotal > 0 ? (won / evaluatedTotal) * 100 : null;
 
     // Grade A+ Win Rate
     const gradeAPlusSignals = v16Signals.filter((s) => (s.immutable.grade || "").toUpperCase().includes("A+"));
     const gradeAPlusWon = gradeAPlusSignals.filter((s) => getSignalStatus(s) === "WON").length;
     const gradeAPlusLost = gradeAPlusSignals.filter((s) => getSignalStatus(s) === "LOST").length;
     const gradeAPlusDecisive = gradeAPlusWon + gradeAPlusLost;
-    const gradeAPlusWinRate = gradeAPlusDecisive > 0 ? (gradeAPlusWon / gradeAPlusDecisive) * 100 : (gradeAPlusSignals.length > 0 ? (gradeAPlusWon / gradeAPlusSignals.length) * 100 : 0);
+    const gradeAPlusEvaluated = gradeAPlusSignals.filter((s) => getSignalStatus(s) !== "ACTIVE").length;
+    const gradeAPlusWinRate = gradeAPlusDecisive > 0
+      ? (gradeAPlusWon / gradeAPlusDecisive) * 100
+      : (gradeAPlusEvaluated > 0 ? (gradeAPlusWon / gradeAPlusEvaluated) * 100 : null);
 
-    // Averages
+    // Averages across all audited signals
     const sumNetEv = v16Signals.reduce((acc, s) => acc + (s.immutable.expected_net_return || 0), 0);
     const sumPtp1 = v16Signals.reduce((acc, s) => {
       const p = s.immutable.p_tp1 || 0;
       return acc + (p > 1.0 ? p / 100.0 : p);
     }, 0);
 
-    // Cumulative Return %
-    const sumReturn = v16Signals.reduce((acc, s) => {
-      const pnl = s.dynamic?.unrealized_net_pnl_pct || 0;
+    // Cumulative Return %: sum of realized returns of resolved/evaluated signals ONLY (Rule 9)
+    const evaluatedSignals = v16Signals.filter((s) => getSignalStatus(s) !== "ACTIVE");
+    const sumReturn = evaluatedSignals.reduce((acc, s) => {
+      const pnl = s.dynamic?.realized_return_pct ?? 0;
       return acc + pnl;
     }, 0);
 
     return {
       totalSignals: total,
+      activeSignals: counts.active,
+      evaluatedTotal,
+      decisiveTotal,
+      won,
+      lost,
+      breakeven: counts.breakeven,
+      expired: counts.expired,
       decisiveWinRate,
       totalWinRate,
       gradeAPlusWinRate,
+      gradeAPlusCount: gradeAPlusSignals.length,
+      gradeAPlusWon,
+      gradeAPlusDecisive,
       avgNetEv: sumNetEv / total,
       avgPtp1: (sumPtp1 / total) * 100,
       cumulativeReturn: sumReturn,
@@ -333,41 +454,51 @@ export default function V16SignalsAuditLedger() {
           <div className="text-lg sm:text-xl font-black text-white mt-1">
             {kpis.totalSignals}
           </div>
-          <span className="text-[10px] text-cyan-400 font-bold">100% V16 Qualified</span>
+          <span className="text-[10px] text-cyan-400 font-bold">
+            {kpis.activeSignals > 0 ? `${kpis.activeSignals} Active · ${kpis.evaluatedTotal} Evaluated` : "100% V16 Qualified"}
+          </span>
         </div>
 
         {/* Decisive Win Rate */}
         <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 font-mono">
           <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Decisive Win Rate</span>
-          <div className="text-lg sm:text-xl font-black text-emerald-400 mt-1">
-            {kpis.decisiveWinRate.toFixed(1)}%
+          <div className={`text-lg sm:text-xl font-black mt-1 ${kpis.decisiveWinRate !== null ? (kpis.decisiveWinRate >= 50 ? "text-emerald-400" : "text-amber-400") : "text-slate-400"}`}>
+            {kpis.decisiveWinRate !== null ? `${kpis.decisiveWinRate.toFixed(1)}%` : "—"}
           </div>
-          <span className="text-[10px] text-slate-400">Won / (Won + Lost)</span>
+          <span className="text-[10px] text-slate-400">
+            {kpis.decisiveTotal > 0 ? `${kpis.won} Won / ${kpis.decisiveTotal} Decisive` : "0 / 0 Decisive (Pending)"}
+          </span>
         </div>
 
         {/* Total Win Rate */}
         <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 font-mono">
           <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Total Win Rate</span>
-          <div className="text-lg sm:text-xl font-black text-cyan-300 mt-1">
-            {kpis.totalWinRate.toFixed(1)}%
+          <div className={`text-lg sm:text-xl font-black mt-1 ${kpis.totalWinRate !== null ? (kpis.totalWinRate >= 50 ? "text-cyan-300" : "text-amber-300") : "text-slate-400"}`}>
+            {kpis.totalWinRate !== null ? `${kpis.totalWinRate.toFixed(1)}%` : "—"}
           </div>
-          <span className="text-[10px] text-slate-400">All Evaluated Signals</span>
+          <span className="text-[10px] text-slate-400">
+            {kpis.evaluatedTotal > 0 ? `${kpis.won} Won / ${kpis.evaluatedTotal} Evaluated` : "0 Evaluated Signals"}
+          </span>
         </div>
 
         {/* Grade A+ Win Rate */}
         <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 font-mono">
           <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Grade A+ Win Rate</span>
-          <div className="text-lg sm:text-xl font-black text-amber-300 mt-1">
-            {kpis.gradeAPlusWinRate.toFixed(1)}%
+          <div className={`text-lg sm:text-xl font-black mt-1 ${kpis.gradeAPlusWinRate !== null ? "text-amber-300" : "text-slate-400"}`}>
+            {kpis.gradeAPlusWinRate !== null ? `${kpis.gradeAPlusWinRate.toFixed(1)}%` : "—"}
           </div>
-          <span className="text-[10px] text-slate-400">Top Tier Setups</span>
+          <span className="text-[10px] text-slate-400">
+            {kpis.gradeAPlusDecisive > 0
+              ? `${kpis.gradeAPlusWon} Won / ${kpis.gradeAPlusDecisive} Decisive`
+              : (kpis.gradeAPlusCount > 0 ? `${kpis.gradeAPlusCount} Active (0 Decisive)` : "0 A+ Setups Audited")}
+          </span>
         </div>
 
         {/* Average Net EV */}
         <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 font-mono">
           <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Avg Expected Edge</span>
-          <div className="text-lg sm:text-xl font-black text-cyan-400 mt-1">
-            +{kpis.avgNetEv.toFixed(2)}%
+          <div className={`text-lg sm:text-xl font-black mt-1 ${kpis.avgNetEv >= 0 ? "text-cyan-400" : "text-rose-400"}`}>
+            {kpis.totalSignals > 0 ? `${kpis.avgNetEv >= 0 ? "+" : ""}${kpis.avgNetEv.toFixed(2)}%` : "—"}
           </div>
           <span className="text-[10px] text-slate-400">Net EV After Friction</span>
         </div>
@@ -376,7 +507,7 @@ export default function V16SignalsAuditLedger() {
         <div className="p-3.5 rounded-2xl bg-slate-900/60 border border-slate-800/80 font-mono">
           <span className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Avg Win Prob</span>
           <div className="text-lg sm:text-xl font-black text-emerald-400 mt-1">
-            {kpis.avgPtp1.toFixed(1)}%
+            {kpis.totalSignals > 0 ? `${kpis.avgPtp1.toFixed(1)}%` : "—"}
           </div>
           <span className="text-[10px] text-slate-400">Calibrated P(TP1)</span>
         </div>

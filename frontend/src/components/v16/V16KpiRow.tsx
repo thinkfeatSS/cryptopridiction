@@ -72,7 +72,7 @@ export default function V16KpiRow({
         </div>
         <div className="mt-3 flex items-baseline gap-2">
           <span className="text-3xl font-black font-mono tracking-tight text-emerald-400">
-            {avgNetEv !== null ? formatPercent(avgNetEv) : "+0.38%"}
+            {avgNetEv !== null ? formatPercent(avgNetEv) : "—"}
           </span>
           <span className="text-[10px] text-emerald-400/90 font-mono font-bold">POST-COST</span>
         </div>
@@ -93,7 +93,7 @@ export default function V16KpiRow({
         </div>
         <div className="mt-3 flex items-baseline gap-2">
           <span className="text-3xl font-black font-mono tracking-tight text-indigo-300">
-            {avgPtp1 !== null ? formatProbability(avgPtp1) : "62.4%"}
+            {avgPtp1 !== null ? formatProbability(avgPtp1) : "—"}
           </span>
           <span className="text-[10px] text-indigo-400 font-mono font-bold">CALIBRATED</span>
         </div>
