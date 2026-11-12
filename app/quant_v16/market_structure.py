@@ -777,31 +777,37 @@ class MarketStructureEngine:
         # ----------------------------------------------------------------------
         # HIGHER TIMEFRAME CHoCH STRUCTURAL GUARD (MACRO PRECEDENCE)
         # ----------------------------------------------------------------------
-        # If 4H or 1H experienced an opposing or structural CHoCH, it takes macro authority
-        # and immediately invalidates lower timeframe setups
+        # If 4H or 1H experienced an opposing structural CHoCH, it takes macro authority
+        # and immediately invalidates candidate setups.
+        # - A Bearish CHoCH on 4H/1H breaks Higher Low floor -> vetoes LONG
+        # - A Bullish CHoCH on 4H/1H breaks Lower High ceiling -> vetoes SHORT
         has_htf_choch = False
         htf_choch_reason = ""
 
-        if t_15m == TrendDirection.BULLISH:
+        is_eval_long = (t_15m == TrendDirection.BULLISH or (t_4h == TrendDirection.BULLISH and t_15m != TrendDirection.BEARISH))
+        is_eval_short = (t_15m == TrendDirection.BEARISH or (t_4h == TrendDirection.BEARISH and t_15m != TrendDirection.BULLISH))
+
+        if is_eval_long:
             if prof_4h and prof_4h.has_choch and prof_4h.choch_type == "BEARISH_CHOCH":
                 has_htf_choch = True
                 htf_choch_reason = f"4H Bearish Change of Character (CHoCH) broke Higher Low floor at ${prof_4h.choch_price}"
             elif prof_1h and prof_1h.has_choch and prof_1h.choch_type == "BEARISH_CHOCH":
                 has_htf_choch = True
                 htf_choch_reason = f"1H Bearish Change of Character (CHoCH) broke Higher Low floor at ${prof_1h.choch_price}"
-        elif t_15m == TrendDirection.BEARISH:
+        elif is_eval_short:
             if prof_4h and prof_4h.has_choch and prof_4h.choch_type == "BULLISH_CHOCH":
                 has_htf_choch = True
                 htf_choch_reason = f"4H Bullish Change of Character (CHoCH) broke Lower High ceiling at ${prof_4h.choch_price}"
             elif prof_1h and prof_1h.has_choch and prof_1h.choch_type == "BULLISH_CHOCH":
                 has_htf_choch = True
                 htf_choch_reason = f"1H Bullish Change of Character (CHoCH) broke Lower High ceiling at ${prof_1h.choch_price}"
-        elif prof_4h and prof_4h.has_choch:
-            has_htf_choch = True
-            htf_choch_reason = f"4H {prof_4h.choch_type} broke structural level at ${prof_4h.choch_price}"
-        elif prof_1h and prof_1h.has_choch:
-            has_htf_choch = True
-            htf_choch_reason = f"1H {prof_1h.choch_type} broke structural level at ${prof_1h.choch_price}"
+        elif t_4h == TrendDirection.CHOP and t_1h == TrendDirection.CHOP:
+            if prof_4h and prof_4h.has_choch:
+                has_htf_choch = True
+                htf_choch_reason = f"4H {prof_4h.choch_type} broke structural level at ${prof_4h.choch_price}"
+            elif prof_1h and prof_1h.has_choch:
+                has_htf_choch = True
+                htf_choch_reason = f"1H {prof_1h.choch_type} broke structural level at ${prof_1h.choch_price}"
 
         if has_htf_choch:
             reasons.append(htf_choch_reason)
@@ -855,8 +861,8 @@ class MarketStructureEngine:
                 trade_dir = TradeDirection.SHORT
                 reasons.append(f"Price tapped active {chosen_ob_tf} Bearish Order Block at [${top_ob.ob_low:.4f} - ${top_ob.ob_high:.4f}] -> Bias set to SHORT")
         else:
-            # SCENARIO B: No active Order Block hit
-            # Direction kept strictly aligned with unanimous 4H + 1H + 15M trend
+            # SCENARIO B & C: No active Order Block hit
+            # Path B: Unanimous Breakout Expansion (All 3 timeframes aligned)
             is_bullish_unanimous = (t_4h == TrendDirection.BULLISH and t_1h == TrendDirection.BULLISH and t_15m == TrendDirection.BULLISH)
             is_bearish_unanimous = (t_4h == TrendDirection.BEARISH and t_1h == TrendDirection.BEARISH and t_15m == TrendDirection.BEARISH)
 
@@ -868,12 +874,32 @@ class MarketStructureEngine:
                 is_bullish_unanimous = (t_15m == TrendDirection.BULLISH and prof_15m.recent_hl is not None)
                 is_bearish_unanimous = (t_15m == TrendDirection.BEARISH and prof_15m.recent_lh is not None)
 
+            # Path C: Trend Pullback Re-entry (Macro 4H & 1H aligned, 15M in consolidation/pullback without adverse break)
+            is_bullish_pullback = (
+                not is_bullish_unanimous and
+                (t_4h == TrendDirection.BULLISH and t_1h != TrendDirection.BEARISH and t_15m != TrendDirection.BEARISH)
+            )
+            is_bearish_pullback = (
+                not is_bearish_unanimous and
+                (t_4h == TrendDirection.BEARISH and t_1h != TrendDirection.BULLISH and t_15m != TrendDirection.BULLISH)
+            )
+
             if is_bullish_unanimous:
+                scenario = "SCENARIO_B_TREND_ALIGNMENT"
                 trade_dir = TradeDirection.LONG
                 reasons.append(f"No active order block hit; unanimous Bullish trend alignment (4H={t_4h.value}, 1H={t_1h.value}, 15M={t_15m.value}) -> Bias set to LONG")
             elif is_bearish_unanimous:
+                scenario = "SCENARIO_B_TREND_ALIGNMENT"
                 trade_dir = TradeDirection.SHORT
                 reasons.append(f"No active order block hit; unanimous Bearish trend alignment (4H={t_4h.value}, 1H={t_1h.value}, 15M={t_15m.value}) -> Bias set to SHORT")
+            elif is_bullish_pullback:
+                scenario = "SCENARIO_C_TREND_PULLBACK_ENTRY"
+                trade_dir = TradeDirection.LONG
+                reasons.append(f"Trend Pullback Re-entry: 4H & 1H Bullish trend with 15M pullback consolidation (4H={t_4h.value}, 1H={t_1h.value}, 15M={t_15m.value}) -> Bias set to LONG")
+            elif is_bearish_pullback:
+                scenario = "SCENARIO_C_TREND_PULLBACK_ENTRY"
+                trade_dir = TradeDirection.SHORT
+                reasons.append(f"Trend Pullback Re-entry: 4H & 1H Bearish trend with 15M pullback consolidation (4H={t_4h.value}, 1H={t_1h.value}, 15M={t_15m.value}) -> Bias set to SHORT")
             else:
                 trade_dir = TradeDirection.NEUTRAL
                 scenario = "NO_SIGNAL"
@@ -904,18 +930,50 @@ class MarketStructureEngine:
             for ob in (obs_4h + obs_1h + obs_15m):
                 if ob.block_type == OrderBlockCategory.BEARISH and ob.status in (OrderBlockStatus.ACTIVE, OrderBlockStatus.TESTING):
                     if curr_p >= (ob.ob_low - 0.001 * ob.ob_low) and curr_p <= (ob.ob_high + 0.001 * ob.ob_high):
-                        opposing_ob_veto = True
-                        veto_reason = f"Opposing Bearish Supply Block Collision on {ob.timeframe.upper()} [{ob.ob_low:.4f} - {ob.ob_high:.4f}]"
-                        reasons.append(veto_reason)
-                        break
+                        is_absorbed = False
+                        if df_15m is not None and len(df_15m) >= 2:
+                            c_last = df_15m.iloc[-1]
+                            c_p = float(c_last.get("close", curr_p))
+                            l_p = float(c_last.get("low", curr_p))
+                            h_p = float(c_last.get("high", curr_p))
+                            rng = max(1e-10, h_p - l_p)
+                            close_pos = (c_p - l_p) / rng
+                            if "taker_buy_vol" in df_15m.columns and "volume" in df_15m.columns:
+                                tb = float(df_15m["taker_buy_vol"].iloc[-3:].sum())
+                                tot_v = float(df_15m["volume"].iloc[-3:].sum())
+                                if tot_v > 0 and (tb / tot_v) >= 0.60 and close_pos >= 0.55:
+                                    is_absorbed = True
+                        if is_absorbed:
+                            reasons.append(f"Opposing Bearish Supply Block on {ob.timeframe.upper()} is being absorbed by institutional taker flow -> Converted to TP Target")
+                        else:
+                            opposing_ob_veto = True
+                            veto_reason = f"Opposing Bearish Supply Block Collision on {ob.timeframe.upper()} [{ob.ob_low:.4f} - {ob.ob_high:.4f}]"
+                            reasons.append(veto_reason)
+                            break
         elif trade_dir == TradeDirection.SHORT:
             for ob in (obs_4h + obs_1h + obs_15m):
                 if ob.block_type == OrderBlockCategory.BULLISH and ob.status in (OrderBlockStatus.ACTIVE, OrderBlockStatus.TESTING):
                     if curr_p >= (ob.ob_low - 0.001 * ob.ob_low) and curr_p <= (ob.ob_high + 0.001 * ob.ob_high):
-                        opposing_ob_veto = True
-                        veto_reason = f"Opposing Bullish Demand Block Collision on {ob.timeframe.upper()} [{ob.ob_low:.4f} - {ob.ob_high:.4f}]"
-                        reasons.append(veto_reason)
-                        break
+                        is_absorbed = False
+                        if df_15m is not None and len(df_15m) >= 2:
+                            c_last = df_15m.iloc[-1]
+                            c_p = float(c_last.get("close", curr_p))
+                            l_p = float(c_last.get("low", curr_p))
+                            h_p = float(c_last.get("high", curr_p))
+                            rng = max(1e-10, h_p - l_p)
+                            close_pos = (c_p - l_p) / rng
+                            if "taker_buy_vol" in df_15m.columns and "volume" in df_15m.columns:
+                                tb = float(df_15m["taker_buy_vol"].iloc[-3:].sum())
+                                tot_v = float(df_15m["volume"].iloc[-3:].sum())
+                                if tot_v > 0 and (tb / tot_v) <= 0.40 and close_pos <= 0.45:
+                                    is_absorbed = True
+                        if is_absorbed:
+                            reasons.append(f"Opposing Bullish Demand Block on {ob.timeframe.upper()} is being absorbed by institutional taker flow -> Converted to TP Target")
+                        else:
+                            opposing_ob_veto = True
+                            veto_reason = f"Opposing Bullish Demand Block Collision on {ob.timeframe.upper()} [{ob.ob_low:.4f} - {ob.ob_high:.4f}]"
+                            reasons.append(veto_reason)
+                            break
 
         if opposing_ob_veto:
             return PreAIMarketStructureDecision(
@@ -946,8 +1004,42 @@ class MarketStructureEngine:
                 # Strictly select a confirmed Higher Low (HL), never an invalid Lower Low (LL)
                 hl_candidates = [s for s in prof_15m.recent_swing_lows if s.structure_type == "HL"]
                 entry_anchor = hl_candidates[-1] if hl_candidates else None
+            # Dynamic Technical Support Fallback when rapid momentum leaves no 3-bar fractal HL
+            if entry_anchor is None and df_15m is not None and len(df_15m) >= 5:
+                c_vals = df_15m['close'].values.astype(float)
+                l_vals = df_15m['low'].values.astype(float)
+                h_vals = df_15m['high'].values.astype(float)
+                tr_vals = np.maximum(h_vals[1:] - l_vals[1:], np.maximum(np.abs(h_vals[1:] - c_vals[:-1]), np.abs(l_vals[1:] - c_vals[:-1])))
+                atr_val = float(np.mean(tr_vals[-14:])) if len(tr_vals) >= 5 else (curr_p * 0.01)
+
+                ema21 = float(pd.Series(c_vals).ewm(span=21, adjust=False).mean().iloc[-1])
+                vwap_val = ema21
+                if 'volume' in df_15m.columns:
+                    v_vals = df_15m['volume'].iloc[-20:].values.astype(float)
+                    if np.sum(v_vals) > 0:
+                        typ_p = (h_vals[-20:] + l_vals[-20:] + c_vals[-20:]) / 3.0
+                        vwap_val = float(np.sum(typ_p * v_vals) / np.sum(v_vals))
+
+                anchor_px = min(ema21 - 0.5 * atr_val, vwap_val - 0.5 * atr_val, curr_p - 1.5 * atr_val)
+                anchor_px = min(anchor_px, curr_p * 0.985)
+                entry_anchor = SwingPivot(
+                    index=len(df_15m) - 1,
+                    timestamp=int(df_15m['timestamp'].iloc[-1]) if 'timestamp' in df_15m.columns else 0,
+                    price=round(anchor_px, 6),
+                    point_type="SWING_LOW",
+                    structure_type="HL"
+                )
+
             if prof_15m.recent_swing_highs:
                 opposing_target = max(prof_15m.recent_swing_highs, key=lambda s: s.price)
+            elif entry_anchor is not None:
+                opposing_target = SwingPivot(
+                    index=len(df_15m) - 1,
+                    timestamp=int(df_15m['timestamp'].iloc[-1]) if 'timestamp' in df_15m.columns else 0,
+                    price=round(curr_p + 2.0 * abs(curr_p - entry_anchor.price), 6),
+                    point_type="SWING_HIGH",
+                    structure_type="HH"
+                )
 
         elif trade_dir == TradeDirection.SHORT:
             entry_anchor = prof_15m.recent_lh
@@ -955,8 +1047,42 @@ class MarketStructureEngine:
                 # Strictly select a confirmed Lower High (LH), never an invalid Higher High (HH)
                 lh_candidates = [s for s in prof_15m.recent_swing_highs if s.structure_type == "LH"]
                 entry_anchor = lh_candidates[-1] if lh_candidates else None
+            # Dynamic Technical Resistance Fallback when rapid momentum leaves no 3-bar fractal LH
+            if entry_anchor is None and df_15m is not None and len(df_15m) >= 5:
+                c_vals = df_15m['close'].values.astype(float)
+                l_vals = df_15m['low'].values.astype(float)
+                h_vals = df_15m['high'].values.astype(float)
+                tr_vals = np.maximum(h_vals[1:] - l_vals[1:], np.maximum(np.abs(h_vals[1:] - c_vals[:-1]), np.abs(l_vals[1:] - c_vals[:-1])))
+                atr_val = float(np.mean(tr_vals[-14:])) if len(tr_vals) >= 5 else (curr_p * 0.01)
+
+                ema21 = float(pd.Series(c_vals).ewm(span=21, adjust=False).mean().iloc[-1])
+                vwap_val = ema21
+                if 'volume' in df_15m.columns:
+                    v_vals = df_15m['volume'].iloc[-20:].values.astype(float)
+                    if np.sum(v_vals) > 0:
+                        typ_p = (h_vals[-20:] + l_vals[-20:] + c_vals[-20:]) / 3.0
+                        vwap_val = float(np.sum(typ_p * v_vals) / np.sum(v_vals))
+
+                anchor_px = max(ema21 + 0.5 * atr_val, vwap_val + 0.5 * atr_val, curr_p + 1.5 * atr_val)
+                anchor_px = max(anchor_px, curr_p * 1.015)
+                entry_anchor = SwingPivot(
+                    index=len(df_15m) - 1,
+                    timestamp=int(df_15m['timestamp'].iloc[-1]) if 'timestamp' in df_15m.columns else 0,
+                    price=round(anchor_px, 6),
+                    point_type="SWING_HIGH",
+                    structure_type="LH"
+                )
+
             if prof_15m.recent_swing_lows:
                 opposing_target = min(prof_15m.recent_swing_lows, key=lambda s: s.price)
+            elif entry_anchor is not None:
+                opposing_target = SwingPivot(
+                    index=len(df_15m) - 1,
+                    timestamp=int(df_15m['timestamp'].iloc[-1]) if 'timestamp' in df_15m.columns else 0,
+                    price=round(curr_p - 2.0 * abs(entry_anchor.price - curr_p), 6),
+                    point_type="SWING_LOW",
+                    structure_type="LL"
+                )
 
         ob_src = f"{chosen_ob_tf}_ORDER_BLOCK" if chosen_ob_tf else "TREND_ALIGNMENT_DEFAULT"
 

@@ -871,6 +871,40 @@ class TestSMCMarketStructure15M(unittest.TestCase):
         self.assertIn("WON (PROFIT RATCHET", closed_night["outcome_label"], "Outcome label must be green WON profit ratchet")
         self.assertGreater(closed_night["return_pct"], 1.50, "Must have locked in substantial positive profit")
 
+    def test_21_scenario_c_trend_pullback_entry_and_dynamic_anchor(self):
+        """Verifies Phase 1: Scenario C Trend Pullback Re-entry and dynamic structural anchor fallback."""
+        df_bull_4h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=1.5, timeframe_secs=14400)
+        df_bull_1h = self._create_synthetic_candles(n=50, trend="BULLISH", base_price=100.0, step=1.0, timeframe_secs=3600)
+        # 15M is in CHOP (consolidation / pullback)
+        df_chop_15m = self._create_synthetic_candles(n=50, trend="CHOP", base_price=100.0, step=0.0, timeframe_secs=900)
+
+        curr_p = float(df_chop_15m['close'].iloc[-1])
+        dec = MarketStructureEngine.evaluate_pre_ai_structure(
+            df_4h=df_bull_4h, df_1h=df_bull_1h, df_15m=df_chop_15m, current_price=curr_p
+        )
+
+        self.assertTrue(dec.is_unanimously_aligned, "Scenario C pullback must be aligned with macro trend")
+        self.assertEqual(dec.trade_direction, TradeDirection.LONG, "Must preserve Long bias from 4H/1H")
+        self.assertEqual(dec.scenario, "SCENARIO_C_TREND_PULLBACK_ENTRY", "Must be classified as Scenario C Pullback Entry")
+        self.assertIsNotNone(dec.entry_anchor_pivot, "Must dynamically synthesize structural entry anchor pivot")
+        self.assertLess(dec.entry_anchor_pivot.price, curr_p, "Anchor price must be below current price for Long")
+
+        # Now test 15M Signal Engine evaluation on this setup
+        setup = SignalEngine15M.evaluate_15m_scalp_setup(
+            symbol="BTC/USDT",
+            df_4h=df_bull_4h,
+            df_1h=df_bull_1h,
+            df_15m=df_chop_15m,
+            current_price=curr_p,
+            pre_ai_decision=dec
+        )
+        self.assertTrue(setup.is_valid, "15M Scalp setup must be valid under Scenario C")
+        self.assertEqual(setup.direction, "LONG")
+        self.assertEqual(setup.scenario, "SCENARIO_C_TREND_PULLBACK_ENTRY")
+        self.assertLess(setup.sl_price, setup.entry_price)
+        self.assertGreater(setup.tp1_price, setup.entry_price)
+        self.assertGreaterEqual(setup.risk_reward_ratio, 2.0, "Must maintain strict 1:2.0 R:R")
+
 
 if __name__ == "__main__":
     unittest.main()

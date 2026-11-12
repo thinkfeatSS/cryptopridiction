@@ -2259,8 +2259,15 @@ class SignalGenerationSystem:
             or (
                 trend_matrix.get("15m") == "BULLISH"
                 and trend_matrix.get("1h") != "BEARISH"
-                and desk_bear_cnt_15m == 0
+                and desk_bear_cnt_15m <= 1
                 and (desk_bull_cnt_15m >= 2 or bull_cnt_15m >= 2)
+                and bear_cnt_15m <= 1
+            )
+            or (
+                # Trend Pullback Re-entry: 4H and 1H Bullish, 15M in consolidation/pullback
+                trend_matrix.get("4h") == "BULLISH"
+                and trend_matrix.get("1h") == "BULLISH"
+                and trend_matrix.get("15m") != "BEARISH"
                 and bear_cnt_15m <= 1
             )
         )
@@ -2269,8 +2276,15 @@ class SignalGenerationSystem:
             or (
                 trend_matrix.get("15m") == "BEARISH"
                 and trend_matrix.get("1h") != "BULLISH"
-                and desk_bull_cnt_15m == 0
+                and desk_bull_cnt_15m <= 1
                 and (desk_bear_cnt_15m >= 2 or bear_cnt_15m >= 2)
+                and bull_cnt_15m <= 1
+            )
+            or (
+                # Trend Pullback Re-entry: 4H and 1H Bearish, 15M in consolidation/pullback
+                trend_matrix.get("4h") == "BEARISH"
+                and trend_matrix.get("1h") == "BEARISH"
+                and trend_matrix.get("15m") != "BULLISH"
                 and bull_cnt_15m <= 1
             )
         )
@@ -2330,7 +2344,7 @@ class SignalGenerationSystem:
                 is_htf_conflict_15m = True
             elif is_range_rotation and (t_15m_str == "BULLISH" or t_1h_str == "BULLISH" or htf_4h_str == "BULLISH"):
                 is_htf_conflict_15m = True
-            elif not has_valid_institutional_trigger_15m and t_15m_str == "BULLISH":
+            elif not (has_valid_institutional_trigger_15m or (triad_structure and getattr(triad_structure, "scenario", "") == "SCENARIO_C_TREND_PULLBACK_ENTRY")) and t_15m_str == "BULLISH":
                 is_htf_conflict_15m = True
         elif cand_15m_dir == "LONG":
             if htf_4h_str == "BEARISH":
@@ -2339,7 +2353,7 @@ class SignalGenerationSystem:
                 is_htf_conflict_15m = True
             elif is_range_rotation and (t_15m_str == "BEARISH" or t_1h_str == "BEARISH" or htf_4h_str == "BEARISH"):
                 is_htf_conflict_15m = True
-            elif not has_valid_institutional_trigger_15m and t_15m_str == "BEARISH":
+            elif not (has_valid_institutional_trigger_15m or (triad_structure and getattr(triad_structure, "scenario", "") == "SCENARIO_C_TREND_PULLBACK_ENTRY")) and t_15m_str == "BEARISH":
                 is_htf_conflict_15m = True
 
         # Macro Pullback Exhaustion Trap (Phase 4):
@@ -2383,7 +2397,7 @@ class SignalGenerationSystem:
                     if (triad_dir == "LONG" and htf_4h_str != "BEARISH" and t_1h_str != "BEARISH") or (triad_dir == "SHORT" and htf_4h_str != "BULLISH" and t_1h_str != "BULLISH"):
                         cand_15m_dir = triad_dir
                         if not cold_start_tfs_15m:
-                            if not is_middle_chop_veto or getattr(triad_structure, "has_order_block", False):
+                            if not is_middle_chop_veto or getattr(triad_structure, "has_order_block", False) or getattr(triad_structure, "scenario", "") == "SCENARIO_C_TREND_PULLBACK_ENTRY":
                                 q_15m_qualified = True
                         if q_15m_qualified:
                             q_15m_direction = triad_dir
@@ -2462,8 +2476,8 @@ class SignalGenerationSystem:
             or (
                 trend_matrix.get("1h") == "BULLISH"
                 and trend_matrix.get("4h") != "BEARISH"
-                and desk_bear_cnt_1h == 0
-                and (desk_bull_cnt_1h >= 2 or bull_cnt_1h >= 4)
+                and desk_bear_cnt_1h <= 1
+                and (desk_bull_cnt_1h >= 2 or bull_cnt_1h >= 3)
                 and bear_cnt_1h <= 1
             )
         )
@@ -2472,8 +2486,8 @@ class SignalGenerationSystem:
             or (
                 trend_matrix.get("1h") == "BEARISH"
                 and trend_matrix.get("4h") != "BULLISH"
-                and desk_bull_cnt_1h == 0
-                and (desk_bear_cnt_1h >= 2 or bear_cnt_1h >= 4)
+                and desk_bull_cnt_1h <= 1
+                and (desk_bear_cnt_1h >= 2 or bear_cnt_1h >= 3)
                 and bull_cnt_1h <= 1
             )
         )

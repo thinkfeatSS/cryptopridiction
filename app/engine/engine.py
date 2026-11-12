@@ -484,6 +484,9 @@ class UnifiedCryptoEngine:
                     if s.get("is_decoupled_trend") or s.get("is_trade_active"):
                         # Keep active decoupled altcoin signal intact
                         continue
+                    elif s.get("signal_status") in ["PRE_SIGNAL_RADAR", "HOLD_AWAITING_CANDLE_TRIGGER_CONFIRMATION"]:
+                        # Preserve diagnostic Radar status and wait_reason
+                        continue
                     else:
                         s["is_trade_active"] = False
                         s["is_ntz_active"] = True
