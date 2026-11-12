@@ -1016,8 +1016,8 @@ class EntryConfirmationEngine:
                 else:
                     hl_price = float(floor_bound)
 
-        zone_floor = hl_price - (0.10 * atr_15m)
-        zone_ceiling = hl_price + (0.35 * atr_15m)
+        zone_floor = hl_price - (0.15 * atr_15m)
+        zone_ceiling = hl_price + (0.50 * atr_15m)
         if bullish_ob_high is not None and bullish_ob_high > hl_price and bullish_ob_high <= current_price:
             zone_ceiling = max(zone_ceiling, float(bullish_ob_high))
 
@@ -1170,8 +1170,8 @@ class EntryConfirmationEngine:
                 else:
                     lh_price = float(ceil_bound)
 
-        zone_ceiling = lh_price + (0.10 * atr_15m)
-        zone_floor = lh_price - (0.35 * atr_15m)
+        zone_ceiling = lh_price + (0.15 * atr_15m)
+        zone_floor = lh_price - (0.50 * atr_15m)
         if bearish_ob_low is not None and bearish_ob_low < lh_price and bearish_ob_low >= current_price:
             zone_floor = min(zone_floor, float(bearish_ob_low))
 

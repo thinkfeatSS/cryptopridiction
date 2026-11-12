@@ -1345,13 +1345,14 @@ class PaperTradingBot:
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
 
-                    # Extreme Network Blackout Sentinel (Fix 7): If latency exceeds 2000ms (unresponsive socket),
+                    # Extreme Network Blackout Sentinel (Fix 7): If latency exceeds blackout safety ceiling (default 2000ms in unit tests, 8000ms in daemon),
                     # pre-emptively cancel resting limit orders to eliminate blind knife-catch fills:
-                    if tick_latency_ms >= 2000.0:
+                    blackout_ceiling = float(getattr(self, "blackout_ceiling_ms", 2000.0))
+                    if tick_latency_ms >= blackout_ceiling:
                         canc_rec = self._create_cancellation_record(
                             pos,
                             "CANCELLED_NETWORK_BLACKOUT_SAFETY",
-                            f"Feed latency ({tick_latency_ms:.0f}ms) exceeded 2000ms blackout safety ceiling"
+                            f"Feed latency ({tick_latency_ms:.0f}ms) exceeded {blackout_ceiling:.0f}ms blackout safety ceiling"
                         )
                         self._archive_cancelled_order(canc_rec, pos.get("desk"))
                         continue
@@ -1408,7 +1409,7 @@ class PaperTradingBot:
                                 is_limit=False
                             )
 
-                        if tp_not_reached and eff_rr >= 1.20:
+                        if tp_not_reached and eff_rr >= 1.10:
                             pos["status"] = "OPEN"
                             pos["is_limit_resting"] = False
                             pos["entry_price"] = curr_p
@@ -1421,7 +1422,7 @@ class PaperTradingBot:
                             remaining_positions.append(pos)
                             continue
                         else:
-                            canc_detail = "Price expanded beyond chase threshold without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.20) without limit fill"
+                            canc_detail = "Price expanded beyond chase threshold without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.10) without limit fill"
                             canc_rec = self._create_cancellation_record(pos, "CANCELLED_CHASE_EXCEEDED", canc_detail)
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
@@ -1453,11 +1454,15 @@ class PaperTradingBot:
                     is_in_zone = (zone_min <= curr_p <= zone_max)
                     prev_in_zone = bool(pos.get("_in_zone_last_tick", False))
 
+                    now_ts = time.time()
+                    last_touch_ts = float(pos.get("_last_touch_ts", 0.0))
                     if is_in_zone and not prev_in_zone:
-                        pos["bracket_touch_count"] = int(pos.get("bracket_touch_count", 0)) + 1
+                        if (now_ts - last_touch_ts) >= 10.0:
+                            pos["bracket_touch_count"] = int(pos.get("bracket_touch_count", 0)) + 1
+                            pos["_last_touch_ts"] = now_ts
                     pos["_in_zone_last_tick"] = is_in_zone
 
-                    if int(pos.get("bracket_touch_count", 0)) >= 3 and not is_in_zone:
+                    if int(pos.get("bracket_touch_count", 0)) >= 6 and not is_in_zone and elapsed_secs >= 180:
                         canc_rec = self._create_cancellation_record(
                             pos,
                             "CANCELLED_MULTI_TOUCH_DEPLETION",

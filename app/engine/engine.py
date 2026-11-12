@@ -70,6 +70,9 @@ class UnifiedCryptoEngine:
         # Start decoupled 24/7 real-time WebSocket market data feed
         self.data_loader.start_websocket_feed()
 
+        # Configure production latency blackout ceiling (8000ms for REST/WS fallback)
+        self.paper_bot.blackout_ceiling_ms = 8000.0
+
         # Start decoupled 24/7 high-speed sub-second tick loop with latency, depth, and partition awareness
         self.paper_bot.start_tick_daemon(
             ticker_fetch_fn=self.scanner.loader.fetch_all_tickers,
@@ -1702,14 +1705,17 @@ class UnifiedCryptoEngine:
             strat = s.get("canonical_strategy") or s.get("strategy") or s.get("strategy_playbook") or (ob_setup.get("strategy") if ob_setup else "MULTI_HORIZON_TREND")
 
             if norm_hz == "15M":
-                close_dt = now_utc + timedelta(minutes=15)
-                win_str = f"{date_str} {now_utc.strftime('%H:%M')} UTC ➔ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC (15 Min)"
+                close_dt = now_utc + timedelta(hours=2)
+                win_str = f"{date_str} {now_utc.strftime('%H:%M')} UTC ➔ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC (2 Hours)"
             elif norm_hz == "1H":
-                close_dt = now_utc + timedelta(hours=1)
-                win_str = f"{date_str} {now_utc.strftime('%H:%M')} UTC ➔ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC (1 Hour)"
+                close_dt = now_utc + timedelta(hours=6)
+                win_str = f"{date_str} {now_utc.strftime('%H:%M')} UTC ➔ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC (6 Hours)"
+            elif norm_hz == "4H":
+                close_dt = now_utc + timedelta(hours=12)
+                win_str = f"{date_str} {now_utc.strftime('%H:%M')} UTC ➔ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC (12 Hours)"
             else:
-                close_dt = now_utc + timedelta(days=1)
-                win_str = f"{date_str} {now_utc.strftime('%H:%M')} UTC ➔ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC (24 Hours)"
+                close_dt = now_utc + timedelta(hours=48)
+                win_str = f"{date_str} {now_utc.strftime('%H:%M')} UTC ➔ {close_dt.strftime('%Y-%m-%d %H:%M')} UTC (48 Hours)"
 
             raw_entry = safe_float(s.get("entry_price") or s.get("current_price"), 0.0)
             entry_p = format_dynamic_precision(raw_entry)

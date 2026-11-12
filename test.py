@@ -349,7 +349,7 @@ CONFIG = {
         "scalp": {
             "name": "⚡ Scalp (15M)",
             "anchor_tf": "15m",
-            "bars": 1,
+            "bars": 4,
             "duration_label": "15-60 Mins Scalp",
             "tp_mult": 2.0,
             "sl_mult": 1.0
@@ -357,7 +357,7 @@ CONFIG = {
         "swing": {
             "name": "⏳ Day Trade (1H)",
             "anchor_tf": "1h",
-            "bars": 1,
+            "bars": 6,
             "duration_label": "1-8 Hours Day Trade",
             "tp_mult": 2.5,
             "sl_mult": 1.2
@@ -8003,7 +8003,7 @@ class HybridQuantEngine:
         horizons = item.get('horizons', {})
         display_horizon_cfgs = dict(self.config.get('horizons', {}))
         if 'scalp' not in display_horizon_cfgs:
-            display_horizon_cfgs['scalp'] = {"anchor_tf": "15m", "bars": 1, "duration_label": "15m Micro"}
+            display_horizon_cfgs['scalp'] = {"anchor_tf": "15m", "bars": 4, "duration_label": "15-60 Mins Scalp"}
         if 'macro' not in display_horizon_cfgs:
             display_horizon_cfgs['macro'] = {"anchor_tf": "1d", "bars": 1, "duration_label": "24h Macro"}
         for h_key, h_cfg in display_horizon_cfgs.items():
