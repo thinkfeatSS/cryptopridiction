@@ -943,14 +943,18 @@ class MarketStructureEngine:
         if trade_dir == TradeDirection.LONG:
             entry_anchor = prof_15m.recent_hl
             if entry_anchor is None and prof_15m.recent_swing_lows:
-                entry_anchor = prof_15m.recent_swing_lows[-1]
+                # Strictly select a confirmed Higher Low (HL), never an invalid Lower Low (LL)
+                hl_candidates = [s for s in prof_15m.recent_swing_lows if s.structure_type == "HL"]
+                entry_anchor = hl_candidates[-1] if hl_candidates else None
             if prof_15m.recent_swing_highs:
                 opposing_target = max(prof_15m.recent_swing_highs, key=lambda s: s.price)
 
         elif trade_dir == TradeDirection.SHORT:
             entry_anchor = prof_15m.recent_lh
             if entry_anchor is None and prof_15m.recent_swing_highs:
-                entry_anchor = prof_15m.recent_swing_highs[-1]
+                # Strictly select a confirmed Lower High (LH), never an invalid Higher High (HH)
+                lh_candidates = [s for s in prof_15m.recent_swing_highs if s.structure_type == "LH"]
+                entry_anchor = lh_candidates[-1] if lh_candidates else None
             if prof_15m.recent_swing_lows:
                 opposing_target = min(prof_15m.recent_swing_lows, key=lambda s: s.price)
 

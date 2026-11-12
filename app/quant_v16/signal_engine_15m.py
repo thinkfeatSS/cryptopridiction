@@ -208,16 +208,20 @@ class SignalEngine15M:
                 zone_ceiling = anchor_price + (0.50 * atr_15m)
                 structural_floor = anchor_price
 
-            # Anti-chase check: If price has extended > 3.0 * ATR away from structural floor,
+            # Anti-chase check: If price has extended above Higher Low zone,
             # execute resting limit near pullback zone rather than chasing at highs
-            dist_from_floor = curr_p - structural_floor
-            if dist_from_floor > (3.0 * atr_15m):
+            if curr_p > zone_ceiling:
                 execution_mode = "RESTING_LIMIT"
                 entry_price = format_dynamic_precision(zone_ceiling)
-                reasons.append(f"Price extended {dist_from_floor / atr_15m:.1f}x ATR from 15M floor; resting limit placed at entry zone ${entry_price}")
+                reasons.append(f"Price extended above 15M Higher Low zone (${zone_floor:.4f}-${zone_ceiling:.4f}); resting limit placed at entry zone ${entry_price}")
+            elif curr_p < zone_floor:
+                execution_mode = "RESTING_LIMIT"
+                entry_price = format_dynamic_precision(structural_floor)
+                reasons.append(f"Price below 15M Higher Low floor (${zone_floor:.4f}); resting limit placed at structural floor ${entry_price}")
             else:
                 execution_mode = "MARKET_CONFIRMED"
                 entry_price = format_dynamic_precision(curr_p)
+                reasons.append(f"Price within 15M Higher Low zone (${zone_floor:.4f}-${zone_ceiling:.4f}); market confirmed entry at ${entry_price}")
 
             # SL: Structural floor minus 0.15 * ATR buffer
             sl_candidate = structural_floor - sl_buffer
@@ -273,15 +277,20 @@ class SignalEngine15M:
                 zone_ceiling = anchor_price
                 structural_ceiling = anchor_price
 
-            # Anti-chase check
-            dist_from_ceiling = structural_ceiling - curr_p
-            if dist_from_ceiling > (3.0 * atr_15m):
+            # Anti-chase check: If price has extended below Lower High zone,
+            # execute resting limit near pullback zone rather than selling at lows
+            if curr_p < zone_floor:
                 execution_mode = "RESTING_LIMIT"
                 entry_price = format_dynamic_precision(zone_floor)
-                reasons.append(f"Price extended {dist_from_ceiling / atr_15m:.1f}x ATR from 15M ceiling; resting limit placed at entry zone ${entry_price}")
+                reasons.append(f"Price extended below 15M Lower High zone (${zone_floor:.4f}-${zone_ceiling:.4f}); resting limit placed at entry zone ${entry_price}")
+            elif curr_p > zone_ceiling:
+                execution_mode = "RESTING_LIMIT"
+                entry_price = format_dynamic_precision(structural_ceiling)
+                reasons.append(f"Price above 15M Lower High ceiling (${zone_ceiling:.4f}); resting limit placed at structural ceiling ${entry_price}")
             else:
                 execution_mode = "MARKET_CONFIRMED"
                 entry_price = format_dynamic_precision(curr_p)
+                reasons.append(f"Price within 15M Lower High zone (${zone_floor:.4f}-${zone_ceiling:.4f}); market confirmed entry at ${entry_price}")
 
             # SL: Structural ceiling plus 0.15 * ATR buffer
             sl_candidate = structural_ceiling + sl_buffer

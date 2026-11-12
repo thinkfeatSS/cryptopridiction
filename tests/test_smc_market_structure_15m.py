@@ -693,6 +693,102 @@ class TestSMCMarketStructure15M(unittest.TestCase):
         self.assertEqual(len(bot.data["cancelled_orders"]), 1)
         self.assertEqual(bot.data["cancelled_orders"][0]["cancellation_reason"], "CANCELLED_CHASE_EXCEEDED")
 
+    def test_19_strictly_higher_low_long_and_lower_high_short_anchoring(self):
+        """
+        Forensic Verification Test:
+        Verifies that:
+        1. Long entries are strictly anchored to confirmed Higher Lows (HL), never Lower Lows (LL) or Higher Highs.
+        2. Short entries are strictly anchored to confirmed Lower Highs (LH), never Higher Highs (HH) or Lower Lows.
+        3. If price is extended beyond the HL/LH retest zone, RESTING_LIMIT is placed at the structural pivot.
+        4. If price is strictly inside the retest zone [zone_floor, zone_ceiling], MARKET_TRIGGER/MARKET_CONFIRMED is allowed.
+        """
+        from app.quant_v16.entry_confirmation import EntryConfirmationEngine
+        # 1. LONG: Extended price above Higher Low zone -> Must be RESTING_LIMIT at HL
+        df_15m_long = pd.DataFrame({
+            "open": [100.0, 101.0, 102.0, 101.5, 103.0, 104.0, 105.0],
+            "high": [101.5, 102.5, 103.0, 102.0, 104.0, 105.5, 106.0],
+            "low": [99.5, 100.5, 101.0, 101.0, 102.5, 103.5, 104.5],
+            "close": [101.0, 102.0, 101.5, 102.0, 103.8, 105.0, 105.8],
+            "volume": [1000] * 7,
+            "timestamp": list(range(7))
+        })
+        hl_price = 101.0  # Confirmed Higher Low
+        current_price_high = 105.8  # Price expanded well above HL
+
+        long_extended = EntryConfirmationEngine.anchor_to_higher_low_and_ob(
+            df_15m=df_15m_long,
+            hl_pivot_price=hl_price,
+            current_price=current_price_high,
+            spread_bps=5.0
+        )
+        self.assertTrue(long_extended["is_extended"], "Price above zone ceiling must be flagged as extended")
+        self.assertEqual(long_extended["execution_mode"], "RESTING_LIMIT", "Extended price must place resting limit at Higher Low")
+        self.assertAlmostEqual(long_extended["entry_price"], hl_price, places=2)
+        self.assertLess(long_extended["sl_price"], long_extended["entry_price"])
+        self.assertGreater(long_extended["tp1_price"], long_extended["entry_price"])
+
+        # 2. LONG: Price directly inside Higher Low retest zone with green bounce -> MARKET_TRIGGER
+        df_15m_bounce = pd.DataFrame({
+            "open": [100.0, 101.0, 102.0, 101.5, 101.1],
+            "high": [101.5, 102.5, 103.0, 102.0, 101.8],
+            "low": [99.5, 100.5, 101.0, 101.0, 101.0],
+            "close": [101.0, 102.0, 101.5, 101.1, 101.6], # Green candle bounce from 101.0 low
+            "volume": [1000] * 5,
+            "timestamp": list(range(5))
+        })
+        long_at_hl = EntryConfirmationEngine.anchor_to_higher_low_and_ob(
+            df_15m=df_15m_bounce,
+            hl_pivot_price=101.0,
+            current_price=101.4, # Inside [101.0 - 0.10*atr, 101.0 + 0.50*atr]
+            spread_bps=5.0
+        )
+        self.assertFalse(long_at_hl["is_extended"])
+        self.assertEqual(long_at_hl["execution_mode"], "MARKET_TRIGGER")
+        self.assertAlmostEqual(long_at_hl["entry_price"], 101.4, places=2)
+
+        # 3. SHORT: Extended price below Lower High zone -> Must be RESTING_LIMIT at LH
+        df_15m_short = pd.DataFrame({
+            "open": [100.0, 99.0, 98.0, 98.5, 97.0, 96.0, 95.0],
+            "high": [100.5, 99.5, 99.0, 99.0, 97.5, 96.5, 95.5],
+            "low": [98.5, 97.5, 97.0, 98.0, 96.0, 94.5, 94.0],
+            "close": [99.0, 98.0, 98.5, 98.0, 96.2, 95.0, 94.2],
+            "volume": [1000] * 7,
+            "timestamp": list(range(7))
+        })
+        lh_price = 99.0  # Confirmed Lower High
+        current_price_low = 94.2  # Price dumped well below LH
+
+        short_extended = EntryConfirmationEngine.anchor_to_lower_high_and_ob(
+            df_15m=df_15m_short,
+            lh_pivot_price=lh_price,
+            current_price=current_price_low,
+            spread_bps=5.0
+        )
+        self.assertTrue(short_extended["is_extended"], "Price below zone floor must be flagged as extended")
+        self.assertEqual(short_extended["execution_mode"], "RESTING_LIMIT", "Dumping price must place resting limit at Lower High")
+        self.assertAlmostEqual(short_extended["entry_price"], lh_price, places=2)
+        self.assertGreater(short_extended["sl_price"], short_extended["entry_price"])
+        self.assertLess(short_extended["tp1_price"], short_extended["entry_price"])
+
+        # 4. SHORT: Price directly inside Lower High retest zone with red rejection -> MARKET_TRIGGER
+        df_15m_rejection = pd.DataFrame({
+            "open": [100.0, 99.0, 98.0, 98.5, 98.9],
+            "high": [100.5, 99.5, 99.0, 99.0, 99.1],
+            "low": [98.5, 97.5, 97.0, 98.0, 98.2],
+            "close": [99.0, 98.0, 98.5, 98.8, 98.4], # Red rejection candle from 99.0
+            "volume": [1000] * 5,
+            "timestamp": list(range(5))
+        })
+        short_at_lh = EntryConfirmationEngine.anchor_to_lower_high_and_ob(
+            df_15m=df_15m_rejection,
+            lh_pivot_price=99.0,
+            current_price=98.6, # Inside retest zone
+            spread_bps=5.0
+        )
+        self.assertFalse(short_at_lh["is_extended"])
+        self.assertEqual(short_at_lh["execution_mode"], "MARKET_TRIGGER")
+        self.assertAlmostEqual(short_at_lh["entry_price"], 98.6, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

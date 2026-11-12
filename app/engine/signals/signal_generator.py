@@ -709,7 +709,17 @@ class SignalGenerationSystem:
                     sh_list, sl_list = MarketStructureEngine.find_confirmed_fractals(df_active, timeframe="15m")
                     if direction == "LONG":
                         hl_candidates = [s for s in sl_list if s.structure_type == "HL" and not s.is_broken]
-                        hl_pivot_px = hl_candidates[-1].price if hl_candidates else (sl_list[-1].price if sl_list else float(df_active["low"].iloc[-15:].min()))
+                        if not hl_candidates:
+                            hl_candidates = [s for s in sl_list if s.structure_type == "HL"]
+                        if hl_candidates:
+                            hl_pivot_px = hl_candidates[-1].price
+                        elif len(sl_list) >= 2 and sl_list[-1].price > min(s.price for s in sl_list[:-1]):
+                            hl_pivot_px = sl_list[-1].price
+                        else:
+                            recent_lows = df_active["low"].iloc[-15:].astype(float).values
+                            min_l = float(np.min(recent_lows))
+                            emergent_hl = [float(p) for p in recent_lows if float(p) > min_l]
+                            hl_pivot_px = float(emergent_hl[-1]) if emergent_hl else min_l
                         opp_sh_px = sh_list[-1].price if sh_list else recent_high
                         ob_l = float(order_block_setup["order_block_zone"][0]) if (order_block_setup and order_block_setup.get("order_block_zone") and len(order_block_setup["order_block_zone"]) >= 2) else None
                         ob_h = float(order_block_setup["order_block_zone"][1]) if (order_block_setup and order_block_setup.get("order_block_zone") and len(order_block_setup["order_block_zone"]) >= 2) else None
@@ -737,7 +747,17 @@ class SignalGenerationSystem:
                         structural_anchor_info = anchored
                     elif direction == "SHORT":
                         lh_candidates = [s for s in sh_list if s.structure_type == "LH" and not s.is_broken]
-                        lh_pivot_px = lh_candidates[-1].price if lh_candidates else (sh_list[-1].price if sh_list else float(df_active["high"].iloc[-15:].max()))
+                        if not lh_candidates:
+                            lh_candidates = [s for s in sh_list if s.structure_type == "LH"]
+                        if lh_candidates:
+                            lh_pivot_px = lh_candidates[-1].price
+                        elif len(sh_list) >= 2 and sh_list[-1].price < max(s.price for s in sh_list[:-1]):
+                            lh_pivot_px = sh_list[-1].price
+                        else:
+                            recent_highs = df_active["high"].iloc[-15:].astype(float).values
+                            max_h = float(np.max(recent_highs))
+                            emergent_lh = [float(p) for p in recent_highs if float(p) < max_h]
+                            lh_pivot_px = float(emergent_lh[-1]) if emergent_lh else max_h
                         opp_sl_px = sl_list[-1].price if sl_list else recent_low
                         ob_l = float(order_block_setup["order_block_zone"][0]) if (order_block_setup and order_block_setup.get("order_block_zone") and len(order_block_setup["order_block_zone"]) >= 2) else None
                         ob_h = float(order_block_setup["order_block_zone"][1]) if (order_block_setup and order_block_setup.get("order_block_zone") and len(order_block_setup["order_block_zone"]) >= 2) else None

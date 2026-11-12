@@ -1002,8 +1002,13 @@ class EntryConfirmationEngine:
                         if hl_price < recent_lows[idx] < (current_price - 0.15 * atr_15m):
                             local_hl = float(recent_lows[idx])
                             break
-                ema9_val = float(df_15m["close"].iloc[-16:].astype(float).ewm(span=9, adjust=False).mean().iloc[-1])
-                candidate_hl = local_hl if local_hl is not None else min(ema9_val, current_price - 0.35 * atr_15m)
+                if local_hl is not None:
+                    candidate_hl = local_hl
+                elif bullish_ob_high is not None and float(bullish_ob_high) > 0 and float(bullish_ob_high) < current_price:
+                    candidate_hl = float(bullish_ob_high)
+                else:
+                    ema9_val = float(df_15m["close"].iloc[-16:].astype(float).ewm(span=9, adjust=False).mean().iloc[-1])
+                    candidate_hl = min(ema9_val, current_price - 0.35 * atr_15m)
                 floor_bound = max(hl_price, current_price - max_hl_dist)
                 ceil_bound = current_price - (0.20 * atr_15m)
                 if ceil_bound > floor_bound:
@@ -1029,26 +1034,22 @@ class EntryConfirmationEngine:
             if is_dumping_red:
                 candle_has_bounce = False
 
-        # Anti-chase logic: If price is already extended > 1.2 ATR above the Higher Low, use RESTING LIMIT
-        is_extended = current_price > (hl_price + 1.20 * atr_15m)
+        # Strict Higher Low Anchoring:
+        # A Long entry must be strictly executed AT the Higher Low (within the confirmed Higher Low zone).
+        # If price has extended above the Higher Low zone (current_price > zone_ceiling), it must NEVER market chase.
+        # It must execute as RESTING_LIMIT anchored to the Higher Low.
+        is_extended = current_price > zone_ceiling
         if is_extended:
             execution_mode = "RESTING_LIMIT"
-            entry_price = format_dynamic_precision(hl_price + 0.20 * atr_15m)
+            entry_price = format_dynamic_precision(hl_price)
             decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO HL @ ${entry_price})"
         elif current_price < zone_floor or not candle_has_bounce:
-            # Price is retesting deep below the HL or candle is still dumping red: Place resting limit
+            # Price is retesting deep below the HL or candle is still dumping red: Place resting limit at HL
             execution_mode = "RESTING_LIMIT"
-            if current_price > hl_price:
-                # Dynamic retest entry: Anchor to Bullish OB high or 50% Mean Threshold of pullback zone
-                # to prevent resting limits expiring unfilled when price reverses early in runaway markets
-                ob_entry = float(bullish_ob_high) if (bullish_ob_high is not None and hl_price <= float(bullish_ob_high) <= current_price) else None
-                mean_entry = (current_price + hl_price) / 2.0
-                target_limit = ob_entry if ob_entry is not None else mean_entry
-                entry_price = format_dynamic_precision(max(hl_price, min(current_price, target_limit)))
-            else:
-                entry_price = format_dynamic_precision(hl_price)
+            entry_price = format_dynamic_precision(hl_price)
             decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO HL @ ${entry_price})"
         else:
+            # Price is strictly AT THE HIGHER LOW (zone_floor <= current_price <= zone_ceiling) with confirmed bounce
             execution_mode = "MARKET_TRIGGER"
             entry_price = format_dynamic_precision(current_price)
             decision_label = f"🟢 BUY 15M (HIGHER LOW RETEST @ ${entry_price})"
@@ -1155,8 +1156,13 @@ class EntryConfirmationEngine:
                         if (current_price + 0.15 * atr_15m) < recent_highs[idx] < lh_price:
                             local_lh = float(recent_highs[idx])
                             break
-                ema9_val = float(df_15m["close"].iloc[-16:].astype(float).ewm(span=9, adjust=False).mean().iloc[-1])
-                candidate_lh = local_lh if local_lh is not None else max(ema9_val, current_price + 0.35 * atr_15m)
+                if local_lh is not None:
+                    candidate_lh = local_lh
+                elif bearish_ob_low is not None and float(bearish_ob_low) > 0 and float(bearish_ob_low) > current_price:
+                    candidate_lh = float(bearish_ob_low)
+                else:
+                    ema9_val = float(df_15m["close"].iloc[-16:].astype(float).ewm(span=9, adjust=False).mean().iloc[-1])
+                    candidate_lh = max(ema9_val, current_price + 0.35 * atr_15m)
                 floor_bound = current_price + (0.20 * atr_15m)
                 ceil_bound = min(lh_price, current_price + max_lh_dist)
                 if ceil_bound > floor_bound:
@@ -1182,26 +1188,22 @@ class EntryConfirmationEngine:
             if is_pumping_green:
                 candle_has_rejection = False
 
-        # Anti-chase logic: If price is already dumped > 1.2 ATR below the Lower High, use RESTING LIMIT
-        is_extended = current_price < (lh_price - 1.20 * atr_15m)
+        # Strict Lower High Anchoring:
+        # A Short entry must be strictly executed AT the Lower High (within the confirmed Lower High zone).
+        # If price has dumped below the Lower High zone (current_price < zone_floor), it must NEVER sell the bottom.
+        # It must execute as RESTING_LIMIT anchored to the Lower High.
+        is_extended = current_price < zone_floor
         if is_extended:
             execution_mode = "RESTING_LIMIT"
-            entry_price = format_dynamic_precision(lh_price - 0.20 * atr_15m)
+            entry_price = format_dynamic_precision(lh_price)
             decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO LH @ ${entry_price})"
         elif current_price > zone_ceiling or not candle_has_rejection:
-            # Price is retesting deep above the LH or candle is still driving green: Place resting limit
+            # Price is retesting deep above the LH or candle is still driving green: Place resting limit at LH
             execution_mode = "RESTING_LIMIT"
-            if current_price < lh_price:
-                # Dynamic retest entry: Anchor to Order Block low or 50% Mean Threshold of retest zone
-                # to prevent resting limits expiring unfilled when price reverses early in runaway markets
-                ob_entry = float(bearish_ob_low) if (bearish_ob_low is not None and current_price <= float(bearish_ob_low) <= lh_price) else None
-                mean_entry = (current_price + lh_price) / 2.0
-                target_limit = ob_entry if ob_entry is not None else mean_entry
-                entry_price = format_dynamic_precision(min(lh_price, max(current_price, target_limit)))
-            else:
-                entry_price = format_dynamic_precision(lh_price)
+            entry_price = format_dynamic_precision(lh_price)
             decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO LH @ ${entry_price})"
         else:
+            # Price is strictly AT THE LOWER HIGH (zone_floor <= current_price <= zone_ceiling) with confirmed rejection
             execution_mode = "MARKET_TRIGGER"
             entry_price = format_dynamic_precision(current_price)
             decision_label = f"🔴 SELL 15M (LOWER HIGH REJECTION @ ${entry_price})"
