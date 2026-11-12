@@ -311,6 +311,7 @@ class SignalGenerationSystem:
 
     def _get_timeframe_ttl(self, tf: str, active_atr_pct: Optional[float] = None) -> float:
         ttls = {
+            "1m": 45.0,     # 45 sec (Microstructure)
             "5m": 90.0,     # 1.5 min
             "15m": 240.0,   # 4 min
             "1h": 1200.0,   # 20 min
@@ -327,6 +328,173 @@ class SignalGenerationSystem:
             vol_multiplier = float(np.clip(1.50 / max(0.50, active_atr_pct), 0.40, 1.25))
             return round(base_ttl * vol_multiplier, 1)
         return base_ttl
+
+    def evaluate_tri_horizon_regression_alignment(
+        self,
+        symbol: str,
+        direction: str,
+        current_price: float,
+        dfs_9: Optional[Dict[str, pd.DataFrame]],
+        horizon_prediction_15m: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Phase 3: Tri-Horizon (1M, 5M, 15M) Price Prediction Alignment & Unanimous 5-Model Convergence Gate.
+        Enforces strict quantitative confluence:
+        1. 5-Model Unanimous Consensus at 1M, 5M, and 15M (CatBoost, XGBoost, HistGB, ExtraTrees, RandomForest).
+        2. Directional Sign Concordance across all three horizons.
+        3. Microstructural Adverse Rebound Veto.
+        4. Temporal Target Excursion Progression.
+        """
+        if current_price <= 0 or not dfs_9:
+            return {
+                "is_aligned": True,
+                "unanimous_5_models_satisfied": True,
+                "directional_sign_concordance": True,
+                "has_adverse_rebound": False,
+                "temporal_progression_valid": True,
+                "unaligned_reason": "BYPASS_MISSING_CONTEXT"
+            }
+
+        exp_dir = str(direction or "LONG").upper()
+
+        # 1. 15M Regression Metrics
+        p_15m = current_price
+        chg_15m = 0.0
+        v_15m = 5
+        outliers_15m = []
+        if horizon_prediction_15m and horizon_prediction_15m.get("predicted_target_price", 0) > 0:
+            p_15m = float(horizon_prediction_15m["predicted_target_price"])
+            chg_15m = float(horizon_prediction_15m.get("predicted_change_pct", 0.0) or 0.0)
+            v_15m = int(horizon_prediction_15m.get("winning_vote_count", 5) or 5)
+            outliers_15m = list(horizon_prediction_15m.get("outlier_models", []))
+        else:
+            df_15m = dfs_9.get("15m")
+            if df_15m is not None and len(df_15m) >= 5:
+                feats_15m = self.feature_extractor.extract_features(df_15m, prefix="15m")
+                if not feats_15m.empty:
+                    X_live_15m = feats_15m.iloc[-1:].values
+                    raw_atr_15m = float(np.mean(np.abs(df_15m["high"].values[-14:] - df_15m["low"].values[-14:]))) if len(df_15m) >= 14 else (current_price * 0.01)
+                    _, reg_15m, _ = self.model_registry.get_or_train_coin_models(
+                        symbol=symbol, tf="15m", X_train=None, y_train_dir=None, y_train_ret=None,
+                        last_candle_ts=int(df_15m["timestamp"].iloc[-1]) if "timestamp" in df_15m.columns else 0,
+                        ttl_seconds=240.0
+                    )
+                    res_15m = reg_15m.predict_price_live(X_live_15m, current_price, raw_atr=raw_atr_15m, expected_direction=exp_dir)
+                    p_15m = float(res_15m["predicted_target_price"])
+                    chg_15m = float(res_15m["predicted_change_pct"])
+                    v_15m = int(res_15m["winning_vote_count"])
+                    outliers_15m = list(res_15m.get("outlier_models", []))
+
+        # 2. 5M Regression Metrics
+        p_5m = current_price
+        chg_5m = 0.0
+        v_5m = 5
+        outliers_5m = []
+        df_5m = dfs_9.get("5m")
+        if df_5m is not None and len(df_5m) >= 5:
+            feats_5m = self.feature_extractor.extract_features(df_5m, prefix="5m")
+            if not feats_5m.empty:
+                X_live_5m = feats_5m.iloc[-1:].values
+                raw_atr_5m = float(np.mean(np.abs(df_5m["high"].values[-14:] - df_5m["low"].values[-14:]))) if len(df_5m) >= 14 else (current_price * 0.005)
+                _, reg_5m, _ = self.model_registry.get_or_train_coin_models(
+                    symbol=symbol, tf="5m", X_train=None, y_train_dir=None, y_train_ret=None,
+                    last_candle_ts=int(df_5m["timestamp"].iloc[-1]) if "timestamp" in df_5m.columns else 0,
+                    ttl_seconds=90.0
+                )
+                res_5m = reg_5m.predict_price_live(X_live_5m, current_price, raw_atr=raw_atr_5m, expected_direction=exp_dir)
+                p_5m = float(res_5m["predicted_target_price"])
+                chg_5m = float(res_5m["predicted_change_pct"])
+                v_5m = int(res_5m["winning_vote_count"])
+                outliers_5m = list(res_5m.get("outlier_models", []))
+        else:
+            chg_5m = 0.25 if exp_dir == "LONG" else -0.25
+            p_5m = round(current_price * (1.0 + (chg_5m / 100.0)), 6)
+
+        # 3. 1M Regression Metrics
+        p_1m = current_price
+        chg_1m = 0.0
+        v_1m = 5
+        outliers_1m = []
+        df_1m = dfs_9.get("1m")
+        if df_1m is not None and len(df_1m) >= 5:
+            feats_1m = self.feature_extractor.extract_features(df_1m, prefix="1m")
+            if not feats_1m.empty:
+                X_live_1m = feats_1m.iloc[-1:].values
+                raw_atr_1m = float(np.mean(np.abs(df_1m["high"].values[-14:] - df_1m["low"].values[-14:]))) if len(df_1m) >= 14 else (current_price * 0.002)
+                _, reg_1m, _ = self.model_registry.get_or_train_coin_models(
+                    symbol=symbol, tf="1m", X_train=None, y_train_dir=None, y_train_ret=None,
+                    last_candle_ts=int(df_1m["timestamp"].iloc[-1]) if "timestamp" in df_1m.columns else 0,
+                    ttl_seconds=45.0
+                )
+                res_1m = reg_1m.predict_price_live(X_live_1m, current_price, raw_atr=raw_atr_1m, expected_direction=exp_dir)
+                p_1m = float(res_1m["predicted_target_price"])
+                chg_1m = float(res_1m["predicted_change_pct"])
+                v_1m = int(res_1m["winning_vote_count"])
+                outliers_1m = list(res_1m.get("outlier_models", []))
+        else:
+            chg_1m = 0.10 if exp_dir == "LONG" else -0.10
+            p_1m = round(current_price * (1.0 + (chg_1m / 100.0)), 6)
+
+        # Unanimous 5-Model Satisfaction across all 3 horizons:
+        is_1m_conv = bool(v_1m >= 5 and len(outliers_1m) == 0)
+        is_5m_conv = bool(v_5m >= 5 and len(outliers_5m) == 0)
+        is_15m_conv = bool(v_15m >= 5 and len(outliers_15m) == 0)
+        unanimous_5_models = bool(is_1m_conv and is_5m_conv and is_15m_conv)
+
+        # Directional Sign Concordance:
+        if exp_dir == "LONG":
+            dir_concordance = bool(chg_1m > -0.01 and chg_5m > -0.01 and chg_15m > -0.01)
+            has_adverse_rebound = bool(chg_1m < -0.05 or chg_5m < -0.05)
+            # Temporal excursion progression: P_live <= P_1m <= P_5m <= P_15m (with 0.05% margin)
+            progression_valid = bool((p_1m >= current_price * 0.9995) and (p_5m >= p_1m * 0.9995) and (p_15m >= p_5m * 0.9995))
+        else:
+            dir_concordance = bool(chg_1m < 0.01 and chg_5m < 0.01 and chg_15m < 0.01)
+            has_adverse_rebound = bool(chg_1m > 0.05 or chg_5m > 0.05)
+            # Temporal excursion progression: P_live >= P_1m >= P_5m >= P_15m (with 0.05% margin)
+            progression_valid = bool((p_1m <= current_price * 1.0005) and (p_5m <= p_1m * 1.0005) and (p_15m <= p_5m * 1.0005))
+
+        unaligned_reasons = []
+        if not unanimous_5_models:
+            unaligned_reasons.append(f"Regressors unconverged (1M: {v_1m}/5, 5M: {v_5m}/5, 15M: {v_15m}/5)")
+        if not dir_concordance:
+            unaligned_reasons.append(f"Directional sign discordance (1M: {chg_1m:+.2f}%, 5M: {chg_5m:+.2f}%, 15M: {chg_15m:+.2f}%)")
+        if has_adverse_rebound:
+            unaligned_reasons.append(f"Microstructure adverse rebound (1M: {chg_1m:+.2f}%, 5M: {chg_5m:+.2f}%)")
+        if not progression_valid:
+            unaligned_reasons.append(f"Target excursion non-monotonic ($P_1m: {p_1m:.4f}, $P_5m: {p_5m:.4f}, $P_15m: {p_15m:.4f})")
+
+        is_aligned = (len(unaligned_reasons) == 0)
+        unaligned_reason_str = " | ".join(unaligned_reasons) if unaligned_reasons else None
+
+        return {
+            "is_aligned": is_aligned,
+            "unanimous_5_models_satisfied": unanimous_5_models,
+            "directional_sign_concordance": dir_concordance,
+            "has_adverse_rebound": has_adverse_rebound,
+            "temporal_progression_valid": progression_valid,
+            "unaligned_reason": unaligned_reason_str,
+            "m1": {
+                "predicted_target_price": p_1m,
+                "predicted_change_pct": chg_1m,
+                "winning_vote_count": v_1m,
+                "regressor_votes": f"{v_1m}/5",
+                "outliers": outliers_1m
+            },
+            "m5": {
+                "predicted_target_price": p_5m,
+                "predicted_change_pct": chg_5m,
+                "winning_vote_count": v_5m,
+                "regressor_votes": f"{v_5m}/5",
+                "outliers": outliers_5m
+            },
+            "m15": {
+                "predicted_target_price": p_15m,
+                "predicted_change_pct": chg_15m,
+                "winning_vote_count": v_15m,
+                "regressor_votes": f"{v_15m}/5",
+                "outliers": outliers_15m
+            }
+        }
 
     def _build_single_horizon_signal(
         self,
@@ -1646,6 +1814,13 @@ class SignalGenerationSystem:
                 illiquidity_reason = f"Tail pair spread {spread_bps:.1f} bps > 20.0 bps limit on ${volume_24h_usd/1e6:.2f}M volume"
 
         is_radar_eligible = False
+        tri_horizon_res = self.evaluate_tri_horizon_regression_alignment(
+            symbol=symbol,
+            direction=direction,
+            current_price=current_price,
+            dfs_9=dfs_9,
+            horizon_prediction_15m=horizon_prediction
+        )
 
         if is_sub_threshold_illiquid:
             status = "HOLD_VETOED_BY_SUB_THRESHOLD_ILLIQUIDITY"
@@ -1812,6 +1987,17 @@ class SignalGenerationSystem:
             tp3_price = cand_tp3
             sl_price = cand_sl
             rr_ratio = cand_rr
+        elif not tri_horizon_res.get("is_aligned", True):
+            status = "HOLD_AWAITING_1M_5M_REGRESSION_CONFLUENCE"
+            trade_active = False
+            grade = f"Grade C (TRI-HORIZON REGRESSION UNALIGNED: {tri_horizon_res.get('unaligned_reason', 'Awaiting 1M/5M/15M convergence')})"
+            conviction = max(35.0, float(meta_eval.get("win_probability_pct", 65.0)) * 0.6)
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
+            is_radar_eligible = True
         elif effective_rr < 1.20 or actual_rr < 2.00:
             status = "HOLD_INSUFFICIENT_RISK_REWARD" if actual_rr < 2.00 else "HOLD_SPREAD_DEGRADED_RR"
             trade_active = False
@@ -2005,6 +2191,7 @@ class SignalGenerationSystem:
             "actual_rr": actual_rr,
             "gross_rr": actual_rr,
             "is_radar_eligible": is_radar_eligible,
+            "tri_horizon_alignment": tri_horizon_res,
             "execution_assumption": exec_assumption.value,
             "costs_total_pct": ev_result.costs_total_pct,
             "cost_breakdown": {
@@ -3549,6 +3736,7 @@ class SignalGenerationSystem:
                 "HOLD_INSUFFICIENT_RISK_REWARD",
                 "HOLD_SPREAD_DEGRADED_RR",
                 "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY",
+                "HOLD_AWAITING_1M_5M_REGRESSION_CONFLUENCE",
                 "PRE_SIGNAL_RADAR"
             ]
             or s.get("is_radar_eligible", False)
@@ -3653,6 +3841,8 @@ class SignalGenerationSystem:
                 wait_reason = f"⏳ PRE-SIGNAL RADAR: Setup qualified for {dominant_direction} ({active_signal_horizon}). Awaiting price retracement to ${rr_target_entry:g} to achieve R:R >= 1:2.00 (current: {rr_ratio})."
             elif sig_st == "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY":
                 wait_reason = f"⏳ PRE-SIGNAL RADAR: Setup qualified for {dominant_direction} ({active_signal_horizon}). Awaiting favorable price geometry to achieve positive Net EV (current: {float(radar_sig.get('ev_net', 0.0)):+.2f}% after costs)."
+            elif sig_st == "HOLD_AWAITING_1M_5M_REGRESSION_CONFLUENCE":
+                wait_reason = radar_sig.get("wait_reason") or f"⏳ PRE-SIGNAL RADAR: Setup qualified for {dominant_direction} ({active_signal_horizon}). Awaiting 1M/5M/15M regression model convergence and directional confluence."
             else:
                 wait_reason = radar_sig.get("wait_reason") or f"⏳ PRE-SIGNAL RADAR: Setup qualified for {dominant_direction} ({active_signal_horizon}). Awaiting institutional candle trigger confirmation (Order Block reaction / Liquidity Sweep reclaim / VWAP bounce)."
 
@@ -3775,6 +3965,7 @@ class SignalGenerationSystem:
             "ev_net": dom_sig.get("ev_net", 0.0) if dom_sig else (radar_sig.get("ev_net", 0.0) if status == "PRE_SIGNAL_RADAR" else 0.0),
             "actual_rr": dom_sig.get("actual_rr", 0.0) if dom_sig else (radar_sig.get("actual_rr", 0.0) if status == "PRE_SIGNAL_RADAR" else 0.0),
             "effective_rr": dom_sig.get("effective_rr", 0.0) if dom_sig else (radar_sig.get("effective_rr", 0.0) if status == "PRE_SIGNAL_RADAR" else 0.0),
+            "tri_horizon_alignment": dom_sig.get("tri_horizon_alignment") if dom_sig else (radar_sig.get("tri_horizon_alignment") if status == "PRE_SIGNAL_RADAR" else None),
             "dominant_timeframe": dominant_timeframe,
             "classifier_votes": classifier_votes,
             "regressor_votes": regressor_votes,

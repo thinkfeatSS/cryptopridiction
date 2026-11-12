@@ -489,7 +489,8 @@ class UnifiedCryptoEngine:
                         "HOLD_AWAITING_CANDLE_TRIGGER_CONFIRMATION",
                         "HOLD_INSUFFICIENT_RISK_REWARD",
                         "HOLD_SPREAD_DEGRADED_RR",
-                        "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY"
+                        "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY",
+                        "HOLD_AWAITING_1M_5M_REGRESSION_CONFLUENCE"
                     ] or s.get("is_radar_eligible"):
                         # Preserve diagnostic Radar status and wait_reason
                         continue

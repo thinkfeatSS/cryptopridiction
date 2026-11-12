@@ -35,7 +35,7 @@ TIMEFRAMES_9 = [
 ]
 
 # Active ML & Microstructure Modeling Timeframes (Week and Month models completely retired)
-ACTIVE_MODEL_TIMEFRAMES = ["15m", "1h", "4h", "5m", "12h", "1d"]
+ACTIVE_MODEL_TIMEFRAMES = ["15m", "1h", "4h", "5m", "1m", "12h", "1d"]
 RETIRED_MACRO_TIMEFRAMES = ["1w", "15d", "1M"]
 
 # Timeframe metadata: native Binance interval strings vs resampling requirements
@@ -463,6 +463,7 @@ PRICE_CLUSTER_TOLERANCE_PCT = 0.0020 # 0.20% price band for regression consensus
 # DYNAMIC CANDLE LIMIT CONFIGURATIONS (TRAINING vs SCANNING LOOKBACKS)
 # ==============================================================================
 SCANNING_CANDLE_LIMITS: Dict[str, int] = {
+    "1m": 120,   # 2 Hours (Ultra-fast Microstructure & Execution Gate)
     "5m": 120,   # 10 Hours (Micro Scalp Trigger)
     "15m": 500,  # 5.2 Days (Maximum Depth Primary Scalp & Tactical Execution)
     "1h": 500,   # 20.8 Days (Maximum Depth Intraday Momentum & Context Horizon)
@@ -476,6 +477,7 @@ SCANNING_CANDLE_LIMITS: Dict[str, int] = {
 
 # Institutional Optimal Training Candle Limits (Maximum Stationarity & Statistical Rigor)
 TRAINING_CANDLE_LIMITS: Dict[str, int] = {
+    "1m": 500,   # 8.3 Hours (Microstructure order flow & taker wicks)
     "5m": 1000,  # 3.47 Days (Micro intraday momentum & session liquidity)
     "15m": 1000, # 10.4 Days (~1.5 Weeks; 2 full weekly cycles)
     "1h": 720,   # 30 Days (1 Full monthly trading regime)
