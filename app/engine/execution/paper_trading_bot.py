@@ -42,6 +42,7 @@ class PaperTradingBot:
             self.ledger_file = os.path.join(EXPORT_DIR, "paper_trading_ledger.json")
         self.taker_fee_rate = 0.000405 # 0.045% with 10% BNB discount
         self.enable_signal_expiry: bool = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
+        self.enable_breakeven_guard: bool = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
         self.blackout_ceiling_ms: float = float(os.getenv("BLACKOUT_CEILING_MS", "8000.0"))
         self.MAX_SAFEGUARD_VOID_HOLD_SECONDS: float = 1800.0  # 30m maximum safeguard hold before auto-liquidation
         self.ABANDONED_MICRO_CAP_VOID_TIMEOUT: float = 60.0  # 60s fast auto-liquidation on abandoned/depleted micro-caps
@@ -1337,9 +1338,9 @@ class PaperTradingBot:
                             continue
 
                     # Extreme Network Blackout Sentinel (Fix 7): If latency exceeds blackout safety ceiling (default 8000ms),
-                    # pre-emptively cancel resting limit orders to eliminate blind knife-catch fills:
+                    # pre-emptively cancel resting limit orders only when signal expiry is enabled:
                     blackout_ceiling = float(getattr(self, "blackout_ceiling_ms", 8000.0))
-                    if tick_latency_ms >= blackout_ceiling:
+                    if getattr(self, "enable_signal_expiry", False) and tick_latency_ms >= blackout_ceiling:
                         canc_rec = self._create_cancellation_record(
                             pos,
                             "CANCELLED_NETWORK_BLACKOUT_SAFETY",
@@ -1354,7 +1355,7 @@ class PaperTradingBot:
                     # The PaperTradingBot tick-watcher mitigates this by evaluating the actual live bid/ask price
                     # against the Order Block invalidation level on each tick.
                     ob_inval_lvl = self._resolve_ob_invalidation_level(pos)
-                    if ob_inval_lvl is not None and ob_inval_lvl > 0:
+                    if getattr(self, "enable_signal_expiry", False) and ob_inval_lvl is not None and ob_inval_lvl > 0:
                         is_ob_inval_breached = False
                         if direction == "LONG" and live_bid <= ob_inval_lvl:
                             is_ob_inval_breached = True
@@ -1412,14 +1413,18 @@ class PaperTradingBot:
                             print(f"[PAPER BOT 🚀 RUNAWAY REVERSAL CONVERTED] {sym} ({direction} {norm_h}) price reversed early! Filled at ${curr_p:,.4f} with effective R:R 1:{eff_rr:.2f}")
                             remaining_positions.append(pos)
                             continue
-                        else:
+                        elif getattr(self, "enable_signal_expiry", False):
                             canc_detail = "Price expanded beyond chase threshold without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.00) without limit fill"
                             canc_rec = self._create_cancellation_record(pos, "CANCELLED_CHASE_EXCEEDED", canc_detail)
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
+                        else:
+                            # In no-expiry mode, continue waiting for fill
+                            remaining_positions.append(pos)
+                            continue
 
                     # C. Macro Regime / NTZ Shift Invalidation (Fix 1)
-                    if btc_shield_state:
+                    if btc_shield_state and getattr(self, "enable_signal_expiry", False):
                         is_flash_dump = btc_shield_state.get("regime") in ["FLASH_DUMP"] or btc_shield_state.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "FLASH_DUMP"]
                         is_ntz = btc_shield_state.get("is_ntz_active") or btc_shield_state.get("status_code") == "NO_TRADE_ZONE" or btc_shield_state.get("regime") in ["RANGE_SQUEEZE"]
                         is_pos_boundary = bool(pos.get("is_range_boundary") or any(k in str(pos.get("strategy") or "").upper() for k in ["RECTANGLE", "RANGE_BOUND", "BOUNDARY"]))
@@ -1454,7 +1459,7 @@ class PaperTradingBot:
                             pos["_last_touch_ts"] = now_ts
                     pos["_in_zone_last_tick"] = is_in_zone
 
-                    if int(pos.get("bracket_touch_count", 0)) >= 6 and not is_in_zone and elapsed_secs >= 180:
+                    if getattr(self, "enable_signal_expiry", False) and int(pos.get("bracket_touch_count", 0)) >= 6 and not is_in_zone and elapsed_secs >= 180:
                         canc_rec = self._create_cancellation_record(
                             pos,
                             "CANCELLED_MULTI_TOUCH_DEPLETION",
@@ -1819,7 +1824,7 @@ class PaperTradingBot:
 
                 # Phase 4: Dynamic 2-Stage Profit Ratchet (+0.50% Micro-Guard & +0.75% Tier-0 Breakeven)
                 # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by strictly 50% from immutable original anchor)
-                if pos["peak_gain_pct"] >= 0.50 and not pos.get("is_breakeven_locked") and not pos.get("tp1_hit"):
+                if getattr(self, "enable_breakeven_guard", False) and pos["peak_gain_pct"] >= 0.50 and not pos.get("is_breakeven_locked") and not pos.get("tp1_hit"):
                     orig_sl = float(pos.get("initial_sl_price") or pos.get("sl_original") or entry_p)
                     if orig_sl <= 0.0 or (direction == "LONG" and orig_sl >= entry_p) or (direction == "SHORT" and orig_sl <= entry_p):
                         orig_sl = float(pos.get("sl_price") or entry_p)
@@ -1844,7 +1849,7 @@ class PaperTradingBot:
 
                 effective_t0_thresh = min(float(pos.get("tier0_threshold_pct", 0.75)), max(0.50, 0.35 * tp1_dist))
 
-                if not pos.get("is_breakeven_locked") and not pos.get("tp1_hit") and not pos.get("tp2_hit") and (tp1_proximity_reached or pos["peak_gain_pct"] >= effective_t0_thresh):
+                if getattr(self, "enable_breakeven_guard", False) and not pos.get("is_breakeven_locked") and not pos.get("tp1_hit") and not pos.get("tp2_hit") and (tp1_proximity_reached or pos["peak_gain_pct"] >= effective_t0_thresh):
                     pos["is_breakeven_locked"] = True
                     pos["sl_price"] = format_dynamic_precision(entry_p * (1.0005 if direction == "LONG" else 0.9995))
                     self._update_position_trailing_evolution(pos, curr_p)
@@ -1864,7 +1869,7 @@ class PaperTradingBot:
 
                 # Multi-Stage Pre-TP1 Trailing Profit Ratchet (Locking in real profits before TP1)
                 # Guarantees that trades moving +1.2% to +4.8% never regress back to Breakeven or a Loss!
-                if not pos.get("tp1_hit") and not pos.get("tp2_hit") and pos["peak_gain_pct"] >= 1.20:
+                if getattr(self, "enable_breakeven_guard", False) and not pos.get("tp1_hit") and not pos.get("tp2_hit") and pos["peak_gain_pct"] >= 1.20:
                     peak_gain = float(pos["peak_gain_pct"])
                     pos_atr = float(pos.get("active_atr") or (entry_p * 0.015))
                     new_pre_tp1_sl = None
@@ -1921,7 +1926,7 @@ class PaperTradingBot:
 
                 # Phase 2: Dynamic Order Flow Exhaustion Harvester (Near-Target Profit Harvester)
                 # Evaluates whether the position has reached >= 75% proximity to TP1 and order flow exhibits aggressive exhaustion/absorption.
-                if not pos.get("tp1_hit") and tp1_p > 0 and entry_p > 0:
+                if getattr(self, "enable_breakeven_guard", False) and not pos.get("tp1_hit") and tp1_p > 0 and entry_p > 0:
                     tp1_total_span = abs(tp1_p - entry_p)
                     current_progress = (curr_p - entry_p) if direction == "LONG" else (entry_p - curr_p)
                     proximity_ratio = current_progress / max(1e-12, tp1_total_span)
@@ -2134,7 +2139,7 @@ class PaperTradingBot:
                     elif hit_tp1_final:
                         exit_reason = "TAKE_PROFIT_1"
                         exit_p = tp1_p
-                    elif hit_sl or hit_ob_invalidation:
+                    elif hit_sl or (hit_ob_invalidation and getattr(self, "enable_breakeven_guard", False)):
                         if (pos.get("is_profit_ratchet_active") or pos.get("profit_ratchet_locked_gain_pct")) and gain_pct > 0.15:
                             exit_reason = "TAKE_PROFIT_PRE_TP1_RATCHET"
                         elif pos.get("tp2_hit"):

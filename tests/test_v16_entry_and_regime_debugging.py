@@ -534,6 +534,7 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
 
             with patch("app.engine.execution.paper_trading_bot.EXPORT_DIR", tmp_dir):
                 bot = PaperTradingBot(ledger_file=ledger_path)
+                bot.enable_signal_expiry = True
                 signal = {
                     "signal_id": sig_id,
                     "symbol": "0G/USDT",

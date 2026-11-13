@@ -1626,36 +1626,35 @@ class UnifiedCryptoEngine:
                         if is_pending and sym_r and hz_r:
                             date_u = str(row.get("date_utc", ""))
                             time_u = str(row.get("time_utc", "")).replace(" UTC", "").strip()
-                            is_still_active = False
-                            try:
-                                if date_u and time_u:
-                                    sig_dt = datetime.strptime(f"{date_u} {time_u}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                                    age_s = (now_utc - sig_dt).total_seconds()
-                                    max_s = HORIZON_MAX_ACTIVE_SECS.get(norm_hz_r, 21600)
-                                    is_runner_st = st in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
-                                    is_t0_st = st == "TIER0_PROTECTED_BREAKEVEN"
-                                    eff_max_s = (max_s * 4.0) if is_runner_st else ((max_s * 2.5) if is_t0_st else max_s)
+                            enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
+                            is_still_active = not enable_expiry
+                            if enable_expiry:
+                                try:
+                                    if date_u and time_u:
+                                        sig_dt = datetime.strptime(f"{date_u} {time_u}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                                        age_s = (now_utc - sig_dt).total_seconds()
+                                        max_s = HORIZON_MAX_ACTIVE_SECS.get(norm_hz_r, 21600)
+                                        is_runner_st = st in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"]
+                                        is_t0_st = st == "TIER0_PROTECTED_BREAKEVEN"
+                                        eff_max_s = (max_s * 4.0) if is_runner_st else ((max_s * 2.5) if is_t0_st else max_s)
 
-                                    # Active in paper trading bot or within TTL or in consolidation grace
-                                    is_in_paper = (
-                                        sid in existing_ids or
-                                        (sym_r, norm_hz_r) in active_pairs or
-                                        (sym_r.replace("/", ""), norm_hz_r) in active_pairs
-                                    )
-                                    enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
-                                    if not enable_expiry:
-                                        is_still_active = True
-                                    elif age_s <= eff_max_s or is_in_paper:
-                                        is_still_active = True
-                                    elif age_s <= (eff_max_s * 1.50):
-                                        # Dynamic Consolidation Grace Extension (+50% TTL for flat coiling setups)
-                                        is_still_active = True
-                            except Exception:
-                                pass
+                                        # Active in paper trading bot or within TTL or in consolidation grace
+                                        is_in_paper = (
+                                            sid in existing_ids or
+                                            (sym_r, norm_hz_r) in active_pairs or
+                                            (sym_r.replace("/", ""), norm_hz_r) in active_pairs
+                                        )
+                                        if age_s <= eff_max_s or is_in_paper:
+                                            is_still_active = True
+                                        elif age_s <= (eff_max_s * 1.50):
+                                            # Dynamic Consolidation Grace Extension (+50% TTL for flat coiling setups)
+                                            is_still_active = True
+                                except Exception:
+                                    pass
 
                             if is_still_active:
                                 active_pairs.add((sym_r, hz_r))
-                            else:
+                            elif enable_expiry:
                                 # Mark stale historical pending trade as expired breakeven (clean close)
                                 row["status"] = "EXPIRED_HORIZON"
                                 row["outcome_label"] = "⏱️ EXPIRED"

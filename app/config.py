@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Signal Expiry Policy: when False (default), signals and positions never expire by time/horizon/TTL
     # and strictly wait until Take Profit (TP) or Stop Loss (SL) is hit.
     ENABLE_SIGNAL_EXPIRY: bool = os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes")
+    # Breakeven Guard Policy: when False (default), stop-loss is never moved to entry/breakeven before TP1,
+    # ensuring trades remain live until structural Take Profit or structural Stop Loss is hit.
+    ENABLE_BREAKEVEN_GUARD: bool = os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes")
 
     # WhatsApp Automation & Broadcast Settings
     WHATSAPP_ENABLED: bool = os.getenv("WHATSAPP_ENABLED", "false").lower() in ("true", "1", "yes")

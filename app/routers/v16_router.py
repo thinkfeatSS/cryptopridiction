@@ -273,8 +273,9 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
         elif dirn == "SHORT" and 0.0 < tp1 < entry and tr_p > 0.0 and tr_p > (tp1 * 1.0005):
             is_tp1_locked = False
 
+        enable_be = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
         is_tp2_locked = "TP2" in st or "TP3" in st or str(r.get("is_tp2_locked", "")).lower() == "true"
-        is_be_locked = (
+        is_be_locked = is_tp1_locked if not enable_be else (
             is_tp1_locked
             or "BE" in st
             or "BREAKEVEN" in st
@@ -537,7 +538,8 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 elif dirn == "SHORT" and 0.0 < tp1 < entry and db_tr > 0.0 and db_tr > (tp1 * 1.0005):
                     is_tp1_db = False
 
-                is_be_db = is_tp1_db or any(k in st for k in ["BE", "BREAKEVEN", "GUARD", "TIER0"]) or bool(getattr(s, "is_tier0_locked", False))
+                enable_be = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
+                is_be_db = is_tp1_db if not enable_be else (is_tp1_db or any(k in st for k in ["BE", "BREAKEVEN", "GUARD", "TIER0"]) or bool(getattr(s, "is_tier0_locked", False)))
 
                 dyn_data[sid] = {
                     "signal_id": sid,
@@ -548,6 +550,8 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                     "unrealized_net_pnl_pct": pnl,
                     "mfe_pct": float(s.max_potential_gain_pct or 0.0),
                     "mae_pct": db_mae,
+                    "peak_price_seen": db_pk,
+                    "trough_price_seen": db_tr,
                     "is_tp1_locked": is_tp1_db,
                     "is_tp2_locked": "TP2" in st or "TP3" in st,
                     "is_breakeven_locked": is_be_db,
@@ -634,7 +638,8 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 pos_mae = round(((p_pk - entry) / entry) * 100.0, 2)
         is_tp1_pos = bool(pos.get("tp1_hit") or "TP1" in str(pos.get("status", "")).upper())
         is_tp2_pos = bool(pos.get("tp2_hit", False) or "TP2" in str(pos.get("status", "")).upper())
-        is_be_pos = bool(pos.get("is_breakeven_locked") or pos.get("is_tier0_locked") or is_tp1_pos)
+        enable_be = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
+        is_be_pos = is_tp1_pos if not enable_be else bool(pos.get("is_breakeven_locked") or pos.get("is_tier0_locked") or is_tp1_pos)
 
         # Strict price geometry verification: TP1 can NEVER be marked locked if price never reached TP1!
         p_pk_curr = p_pk if p_pk > 0.0 else safe_float(pos.get("peak_price_seen"), 0.0)
@@ -680,6 +685,51 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
         is_term = any(x in st for x in ["WON", "LOST", "STOP", "EXP", "BREAKEVEN", "BE_", "CANCEL"]) or any(x in out for x in ["WON", "LOST", "STOPPED", "EXPIRED"])
 
         enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
+
+        # Authoritative Healing for Prematurely Expired or Breakeven-Guarded Signals:
+        if st in ["EXPIRED_HORIZON", "BREAKEVEN_GUARD", "STOP_LOSS_BREAKEVEN", "EXPIRED_BREAKEVEN", "LOST_EXP", "WON_EXP_PROFIT"] or "EXPIRED" in out:
+            entry_v = safe_float(imm.get("entry_price_initial"), 0.0)
+            tp1_v = safe_float(imm.get("tp1_initial"), 0.0)
+            sl_v = safe_float(imm.get("sl_initial"), 0.0)
+            dir_v = str(imm.get("direction", "LONG")).upper()
+            pk_v = safe_float(dyn.get("peak_price_seen") or imm.get("peak_price_seen"), 0.0)
+            tr_v = safe_float(dyn.get("trough_price_seen") or imm.get("trough_price_seen"), 0.0)
+            mfe_v = safe_float(dyn.get("mfe_pct") or imm.get("mfe_pct"), 0.0)
+            curr_v = safe_float(dyn.get("current_price"), entry_v)
+            if pk_v <= 0.0 and mfe_v > 0.0 and dir_v == "LONG" and entry_v > 0.0:
+                pk_v = entry_v * (1.0 + mfe_v / 100.0)
+            if tr_v <= 0.0 and mfe_v > 0.0 and dir_v == "SHORT" and entry_v > 0.0:
+                tr_v = entry_v * (1.0 - mfe_v / 100.0)
+
+            hit_tp1_real = (dir_v == "LONG" and (pk_v >= tp1_v or curr_v >= tp1_v)) or (dir_v == "SHORT" and (0 < tr_v <= tp1_v or 0 < curr_v <= tp1_v))
+            hit_sl_real = (dir_v == "LONG" and (0 < tr_v <= sl_v or 0 < curr_v <= sl_v)) or (dir_v == "SHORT" and (pk_v >= sl_v or curr_v >= sl_v))
+
+            if hit_tp1_real:
+                gain_val = round(abs(tp1_v - entry_v) / max(1e-9, entry_v) * 100.0, 2)
+                dyn["status"] = "WON_TP1"
+                dyn["outcome_label"] = f"🟢 WON (TP1 HIT +{gain_val:.2f}%)"
+                imm["status"] = "WON_TP1"
+                dyn["exit_price"] = tp1_v
+                dyn["realized_return_pct"] = gain_val
+                dyn["is_tp1_locked"] = True
+                modified = True
+            elif hit_sl_real:
+                loss_val = round(-abs(entry_v - sl_v) / max(1e-9, entry_v) * 100.0, 2)
+                dyn["status"] = "LOST_SL"
+                dyn["outcome_label"] = "🔴 LOST (SL HIT)"
+                imm["status"] = "LOST_SL"
+                dyn["exit_price"] = sl_v
+                dyn["realized_return_pct"] = loss_val
+                modified = True
+            elif not enable_expiry:
+                # Still running in the market!
+                dyn["status"] = "ACTIVE"
+                dyn["outcome_label"] = "RUNNING 🚀"
+                imm["status"] = "ACTIVE"
+                dyn["exit_price"] = None
+                dyn["realized_return_pct"] = None
+                modified = True
+
         if not is_term:
             matching_p = next((p for p in open_positions if p.get("symbol") == sym), None)
 

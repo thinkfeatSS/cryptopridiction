@@ -622,6 +622,7 @@ class TestSMCMarketStructure15M(unittest.TestCase):
         from app.engine.execution.paper_trading_bot import PaperTradingBot
 
         bot = PaperTradingBot(ledger_file="scratch/test_paper_runaway_reversal.json")
+        bot.enable_signal_expiry = True
         bot.data = {
             "account_equity_usd": 1000.0,
             "open_positions": [],
@@ -824,6 +825,7 @@ class TestSMCMarketStructure15M(unittest.TestCase):
 
         # 2. Pre-TP1 Trailing Profit Ratchet Simulation (NIGHT-like setup reaching +3.10% gain)
         bot = PaperTradingBot(ledger_file="scratch/test_paper_profit_ratchet.json")
+        bot.enable_breakeven_guard = True
         bot.data = {
             "account_equity_usd": 1000.0,
             "open_positions": [],

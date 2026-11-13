@@ -248,18 +248,25 @@ class TestUnifiedTrackerPolicy(unittest.TestCase):
 
         service = SignalService()
         now = datetime.now(timezone.utc)
+        old_be = os.environ.get("ENABLE_BREAKEVEN_GUARD")
+        os.environ["ENABLE_BREAKEVEN_GUARD"] = "true"
+        try:
+            # 1. Price surges to 60600 (+1.0% MFE) -> activates TIER0_PROTECTED_BREAKEVEN
+            service.evaluate_active_signals([sig], live_prices={"BTC/USDT": 60600.0}, now_utc=now)
+            self.assertEqual(sig.status, "TIER0_PROTECTED_BREAKEVEN")
+            soft_be = sig.sl_price
+            self.assertGreater(soft_be, 60000.0)
 
-        # 1. Price surges to 60600 (+1.0% MFE) -> activates TIER0_PROTECTED_BREAKEVEN
-        service.evaluate_active_signals([sig], live_prices={"BTC/USDT": 60600.0}, now_utc=now)
-        self.assertEqual(sig.status, "TIER0_PROTECTED_BREAKEVEN")
-        soft_be = sig.sl_price
-        self.assertGreater(soft_be, 60000.0)
-
-        # 2. Price falls back and breaches soft BE -> resolves to BREAKEVEN_GUARD
-        service.evaluate_active_signals([sig], live_prices={"BTC/USDT": 60000.0}, now_utc=now)
-        self.assertEqual(sig.status, "BREAKEVEN_GUARD")
-        self.assertIn("BREAKEVEN", sig.outcome_label)
-        self.assertNotIn("WON_TIER0_BE", sig.status)
+            # 2. Price falls back and breaches soft BE -> resolves to BREAKEVEN_GUARD
+            service.evaluate_active_signals([sig], live_prices={"BTC/USDT": 60000.0}, now_utc=now)
+            self.assertEqual(sig.status, "BREAKEVEN_GUARD")
+            self.assertIn("BREAKEVEN", sig.outcome_label)
+            self.assertNotIn("WON_TIER0_BE", sig.status)
+        finally:
+            if old_be is None:
+                os.environ.pop("ENABLE_BREAKEVEN_GUARD", None)
+            else:
+                os.environ["ENABLE_BREAKEVEN_GUARD"] = old_be
 
     def test_router_csv_candidate_priority(self):
         """Verifies that v16_router prioritizes trader_signals_tracker.csv ahead of any fallback snapshots."""
@@ -309,22 +316,29 @@ class TestUnifiedTrackerPolicy(unittest.TestCase):
 
         service = SignalService()
         now = datetime.now(timezone.utc)
-
-        # Cycle 1: Price at 0.00902 -> Micro-Guard fires and halves risk to 0.009107
-        service.evaluate_active_signals([sig], live_prices={"SIGN/USDT": 0.00902}, now_utc=now)
-        expected_sl = 0.009107
-        self.assertEqual(sig.sl_price, expected_sl, f"Cycle 1 expected SL {expected_sl}, got {sig.sl_price}")
-        self.assertEqual(sig.status, "ACTIVE")
-
-        # Cycles 2, 3, 4, 5: Consecutive daemon scans must NEVER decay the Stop Loss further
-        for cycle in range(2, 6):
-            service.evaluate_active_signals([sig], live_prices={"SIGN/USDT": 0.00903}, now_utc=now)
-            self.assertEqual(
-                sig.sl_price,
-                expected_sl,
-                f"Cycle {cycle} decayed SL! Expected {expected_sl}, but got {sig.sl_price}"
-            )
+        old_be = os.environ.get("ENABLE_BREAKEVEN_GUARD")
+        os.environ["ENABLE_BREAKEVEN_GUARD"] = "true"
+        try:
+            # Cycle 1: Price at 0.00902 -> Micro-Guard fires and halves risk to 0.009107
+            service.evaluate_active_signals([sig], live_prices={"SIGN/USDT": 0.00902}, now_utc=now)
+            expected_sl = 0.009107
+            self.assertEqual(sig.sl_price, expected_sl, f"Cycle 1 expected SL {expected_sl}, got {sig.sl_price}")
             self.assertEqual(sig.status, "ACTIVE")
+
+            # Cycles 2, 3, 4, 5: Consecutive daemon scans must NEVER decay the Stop Loss further
+            for cycle in range(2, 6):
+                service.evaluate_active_signals([sig], live_prices={"SIGN/USDT": 0.00903}, now_utc=now)
+                self.assertEqual(
+                    sig.sl_price,
+                    expected_sl,
+                    f"Cycle {cycle} decayed SL! Expected {expected_sl}, but got {sig.sl_price}"
+                )
+                self.assertEqual(sig.status, "ACTIVE")
+        finally:
+            if old_be is None:
+                os.environ.pop("ENABLE_BREAKEVEN_GUARD", None)
+            else:
+                os.environ["ENABLE_BREAKEVEN_GUARD"] = old_be
 
         # Crucial: Spot price touches 0.009056 (which previously killed the trade)
         # Because SL remains protected at 0.009107, 0.009056 is NOT a stop-out!

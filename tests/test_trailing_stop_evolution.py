@@ -192,6 +192,7 @@ class TestTrailingStopEvolution(unittest.TestCase):
         while updating is_risk_free, residual_risk_usd, and preventing infinite active R:R.
         """
         bot = PaperTradingBot(ledger_file=self.ledger_file)
+        bot.enable_breakeven_guard = True
         now_ts = datetime.now(timezone.utc).isoformat()
         pos = {
             "trade_id": "TEST_EVOLUTION_01",

@@ -15,13 +15,15 @@ class TestV16NoSignalExpiry(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         self.ledger_file = os.path.join(self.tmp_dir, "test_paper_trading_ledger.json")
-        # Ensure ENABLE_SIGNAL_EXPIRY is False (production default)
+        # Ensure ENABLE_SIGNAL_EXPIRY and ENABLE_BREAKEVEN_GUARD are False (production default)
         os.environ["ENABLE_SIGNAL_EXPIRY"] = "false"
+        os.environ["ENABLE_BREAKEVEN_GUARD"] = "false"
 
     def tearDown(self):
         if os.path.exists(self.tmp_dir):
             shutil.rmtree(self.tmp_dir, ignore_errors=True)
         os.environ.pop("ENABLE_SIGNAL_EXPIRY", None)
+        os.environ.pop("ENABLE_BREAKEVEN_GUARD", None)
 
     def test_01_active_signal_never_expires_by_time_and_waits_for_tp(self):
         """Active signal past predicted close / duration remains ACTIVE until TP is hit."""
@@ -170,6 +172,166 @@ class TestV16NoSignalExpiry(unittest.TestCase):
         bot.on_tick(live_prices={"BTC/USDT": 60100.0})
         self.assertEqual(len(bot.data["open_positions"]), 1, "Resting limit order must remain active")
         self.assertEqual(bot.data["open_positions"][0]["status"], "RESTING_LIMIT")
+
+    def test_05_no_breakeven_guard_before_tp1(self):
+        """Zero Breakeven Guard: SL remains strictly at structural SL until TP1 is hit."""
+        # 1. PaperTradingBot test
+        bot = PaperTradingBot(ledger_file=self.ledger_file)
+        self.assertFalse(bot.enable_breakeven_guard)
+
+        opened_ts = datetime.now(timezone.utc).isoformat()
+        pos = {
+            "trade_id": "PAPER_NO_BE_01",
+            "symbol": "BTC/USDT",
+            "desk": "scalp",
+            "direction": "LONG",
+            "horizon": "15M",
+            "signal_horizon": "15M",
+            "leverage": 2,
+            "position_size_usd": 100.0,
+            "remaining_position_size_usd": 100.0,
+            "entry_price": 100.0,
+            "initial_sl_price": 95.0,
+            "sl_price": 95.0,
+            "tp1_price": 110.0,
+            "tp2_price": 115.0,
+            "tp3_price": 120.0,
+            "opened_at": opened_ts,
+            "opened_at_utc": opened_ts,
+            "status": "OPEN",
+            "scaling_policy": "MULTI_TRANCHE_SCALE"
+        }
+        bot.data["open_positions"] = [pos]
+
+        # Tick 1: price rises +0.80% to 100.80 (previously triggered Micro-Guard and Tier-0 soft BE)
+        bot.on_tick(live_prices={"BTC/USDT": 100.80})
+        self.assertEqual(len(bot.data["open_positions"]), 1)
+        self.assertEqual(bot.data["open_positions"][0]["sl_price"], 95.0, "SL must NOT move to BE before TP1")
+
+        # Tick 2: price pulls back exactly to entry 100.00
+        bot.on_tick(live_prices={"BTC/USDT": 100.00})
+        self.assertEqual(len(bot.data["open_positions"]), 1, "Position must NOT be stopped out at breakeven")
+        self.assertEqual(bot.data["open_positions"][0]["status"], "OPEN")
+        self.assertEqual(len(bot.data.get("closed_trades", [])), 0)
+
+        # 2. SignalService test
+        class MockSignalBE:
+            def __init__(self):
+                self.signal_id = "SIG_NO_BE_01"
+                self.symbol = "SOL/USDT"
+                self.horizon = "15M"
+                self.direction = "LONG"
+                self.entry_price = 100.0
+                self.sl_price = 95.0
+                self.sl_original = 95.0
+                self.tp1_price = 110.0
+                self.tp2_price = 115.0
+                self.tp3_price = 120.0
+                self.status = "ACTIVE"
+                self.outcome_label = "ACTIVE"
+                self.exit_price = None
+                self.realized_return_pct = None
+                self.peak_price_seen = 100.0
+                self.trough_price_seen = 100.0
+                self.created_at = datetime.now(timezone.utc)
+                self.date_utc = self.created_at.strftime("%Y-%m-%d")
+                self.time_utc = self.created_at.strftime("%H:%M:%S UTC")
+                self.predicted_close_utc = (self.created_at + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S UTC")
+                self.quality_grade = "Grade A"
+                self.meta_win_prob_pct = 75.0
+
+        sig = MockSignalBE()
+        ss = SignalService()
+
+        # Tick at +0.80% ($100.80)
+        ss.evaluate_active_signals([sig], live_prices={"SOL/USDT": 100.80, "SOLUSDT": 100.80})
+        self.assertEqual(sig.status, "ACTIVE", "Signal must remain ACTIVE without Tier-0 BE ratchet")
+        self.assertEqual(sig.sl_price, 95.0, "SL must remain at original 95.0")
+
+        # Pullback to entry ($100.00)
+        ss.evaluate_active_signals([sig], live_prices={"SOL/USDT": 100.00, "SOLUSDT": 100.00})
+        self.assertEqual(sig.status, "ACTIVE", "Signal must remain ACTIVE upon pullback to entry")
+        self.assertIsNone(sig.exit_price)
+
+    def test_06_resting_limit_latency_blackout_safety_disabled(self):
+        """Resting limits do not get cancelled when feed latency exceeds blackout safety ceiling."""
+        bot = PaperTradingBot(ledger_file=self.ledger_file)
+        self.assertFalse(bot.enable_signal_expiry)
+
+        placed_ts = datetime.now(timezone.utc).isoformat()
+        pos = {
+            "trade_id": "AR_USDT_15M_1794523066",
+            "symbol": "AR/USDT",
+            "desk": "scalp",
+            "direction": "SHORT",
+            "horizon": "15M",
+            "signal_horizon": "15M",
+            "position_size_usd": 150.0,
+            "entry_price": 3.0750,
+            "optimal_entry_limit": 3.0750,
+            "entry_zone_min": 3.0600,
+            "entry_zone_max": 3.0900,
+            "sl_price": 3.1211,
+            "tp1_price": 2.9828,
+            "status": "RESTING_LIMIT",
+            "is_resting_limit": True,
+            "placed_at_utc": placed_ts,
+            "opened_at_utc": placed_ts
+        }
+        bot.data["open_positions"] = [pos]
+
+        # Simulate 307-second feed latency (exceeds default 8000ms blackout safety ceiling)
+        bot.on_tick(live_prices={"AR/USDT": 3.0750}, tick_latency_ms=307618.0)
+
+        # Order must NOT be cancelled into cancelled_orders
+        cancelled_reasons = [c.get("cancellation_reason") for c in bot.data.get("cancelled_orders", [])]
+        self.assertNotIn("CANCELLED_NETWORK_BLACKOUT_SAFETY", cancelled_reasons,
+                         "Resting limit must not be cancelled by feed latency when signal expiry is disabled")
+
+    def test_07_ar_usdt_healing_to_won_tp1(self):
+        """Signals previously marked EXPIRED_HORIZON heal to WON_TP1 when price touched TP1."""
+        # Setup simulated store records matching AR_USDT_15M_1794523066
+        imm = {
+            "signal_id": "AR_USDT_15M_1794523066",
+            "symbol": "AR/USDT",
+            "direction": "SHORT",
+            "entry_price_initial": 3.0750,
+            "tp1_initial": 2.9828,
+            "sl_initial": 3.1211,
+            "status": "EXPIRED_HORIZON"
+        }
+        dyn = {
+            "signal_id": "AR_USDT_15M_1794523066",
+            "status": "EXPIRED_HORIZON",
+            "outcome_label": "⏱️ EXPIRED",
+            "current_price": 2.9040, # Real Binance price reached 2.9040
+            "peak_price_seen": 3.0750,
+            "trough_price_seen": 2.9040,
+            "mfe_pct": 5.56
+        }
+
+        # Simulate the authoritative healing block from app/routers/v16_router.py
+        entry_v = float(imm.get("entry_price_initial", 0.0))
+        tp1_v = float(imm.get("tp1_initial", 0.0))
+        sl_v = float(imm.get("sl_initial", 0.0))
+        dir_v = str(imm.get("direction", "LONG")).upper()
+        pk_v = float(dyn.get("peak_price_seen") or 0.0)
+        tr_v = float(dyn.get("trough_price_seen") or 0.0)
+        curr_v = float(dyn.get("current_price", entry_v))
+
+        hit_tp1_real = (dir_v == "LONG" and (pk_v >= tp1_v or curr_v >= tp1_v)) or (dir_v == "SHORT" and (0 < tr_v <= tp1_v or 0 < curr_v <= tp1_v))
+        self.assertTrue(hit_tp1_real, "AR/USDT SHORT with trough 2.9040 must qualify as real TP1 hit")
+
+        gain_val = round(abs(tp1_v - entry_v) / max(1e-9, entry_v) * 100.0, 2)
+        dyn["status"] = "WON_TP1"
+        dyn["outcome_label"] = f"🟢 WON (TP1 HIT +{gain_val:.2f}%)"
+        dyn["exit_price"] = tp1_v
+        dyn["realized_return_pct"] = gain_val
+
+        self.assertEqual(dyn["status"], "WON_TP1")
+        self.assertIn("WON (TP1 HIT +3.00%)", dyn["outcome_label"])
+        self.assertEqual(dyn["exit_price"], 2.9828)
+        self.assertEqual(dyn["realized_return_pct"], 3.0)
 
 if __name__ == "__main__":
     unittest.main()

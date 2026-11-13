@@ -1033,53 +1033,55 @@ class SignalService:
                     updated = True
                     continue
 
-                # Step 2.5: Check for Paper Trading Resting Limit Cancellation / Invalidation
-                canc_match = cancelled_paper_map.get(s.signal_id)
-                if not canc_match:
-                    fallback_canc = cancelled_paper_map.get((s_sym, norm_hz)) or cancelled_paper_map.get((s_sym.replace("/", "").replace(":USDT", ""), norm_hz))
-                    if fallback_canc:
-                        sig_time = f"{s.date_utc or ''} {s.time_utc or ''}".strip()
-                        canc_time = str(fallback_canc.get("cancelled_at_utc") or fallback_canc.get("cancelled_at") or "")
-                        if canc_time and sig_time and canc_time >= sig_time:
-                            canc_match = fallback_canc
-                        elif not sig_time:
-                            canc_match = fallback_canc
+                # Step 2.5: Check for Paper Trading Resting Limit Cancellation / Invalidation (Only if signal expiry is explicitly enabled)
+                enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
+                if enable_expiry:
+                    canc_match = cancelled_paper_map.get(s.signal_id)
+                    if not canc_match:
+                        fallback_canc = cancelled_paper_map.get((s_sym, norm_hz)) or cancelled_paper_map.get((s_sym.replace("/", "").replace(":USDT", ""), norm_hz))
+                        if fallback_canc:
+                            sig_time = f"{s.date_utc or ''} {s.time_utc or ''}".strip()
+                            canc_time = str(fallback_canc.get("cancelled_at_utc") or fallback_canc.get("cancelled_at") or "")
+                            if canc_time and sig_time and canc_time >= sig_time:
+                                canc_match = fallback_canc
+                            elif not sig_time:
+                                canc_match = fallback_canc
 
-                if canc_match:
-                    canc_reason = str(canc_match.get("cancellation_reason", "CANCELLED"))
-                    canc_at = canc_match.get("cancelled_at_utc") or canc_match.get("cancelled_at") or now_str
-                    live_mkt_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
-                    canc_mkt_p = safe_float(canc_match.get("cancel_market_price"), 0.0)
-                    existing_curr_p = safe_float(getattr(s, "current_price", None), 0.0)
-                    limit_p = safe_float(canc_match.get("optimal_entry_limit") or s.entry_price, 0.0)
-                    ref_mkt_p = live_mkt_p if (live_mkt_p and live_mkt_p > 0) else (canc_mkt_p if canc_mkt_p > 0 else (existing_curr_p if existing_curr_p > 0 else limit_p))
-                    s.status = "EXPIRED_HORIZON"
-                    s.outcome_label = "⏱️ EXPIRED"
-                    s.exit_price = round(ref_mkt_p, 6) if ref_mkt_p > 0 else s.entry_price
-                    if ref_mkt_p > 0:
-                        s.current_price = round(ref_mkt_p, 6)
-                    s.realized_return_pct = 0.0
-                    s.evaluated_at_utc = canc_at
-                    updated = True
-                    try:
-                        from app.services.whatsapp_service import whatsapp_service
-                        sig_dict = {
-                            "signal_id": s.signal_id,
-                            "symbol": s.symbol,
-                            "horizon": s.horizon,
-                            "direction": s.direction,
-                            "entry_price": s.entry_price,
-                            "quality_grade": s.quality_grade,
-                            "meta_win_prob_pct": s.meta_win_prob_pct,
-                            "decision": getattr(s, "decision", None) or s.outcome_label,
-                            "cancellation_reason": canc_reason,
-                            "cancellation_detail": canc_match.get("cancellation_detail", ""),
-                            "outcome_label": s.outcome_label
-                        }
-                        whatsapp_service.emit_signal_outcome(sig_dict, "LIMIT_CANCELLED", float(s.exit_price or 0.0), 0.0)
-                    except Exception:
-                        pass
-                    continue
+                    if canc_match:
+                        canc_reason = str(canc_match.get("cancellation_reason", "CANCELLED"))
+                        canc_at = canc_match.get("cancelled_at_utc") or canc_match.get("cancelled_at") or now_str
+                        live_mkt_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
+                        canc_mkt_p = safe_float(canc_match.get("cancel_market_price"), 0.0)
+                        existing_curr_p = safe_float(getattr(s, "current_price", None), 0.0)
+                        limit_p = safe_float(canc_match.get("optimal_entry_limit") or s.entry_price, 0.0)
+                        ref_mkt_p = live_mkt_p if (live_mkt_p and live_mkt_p > 0) else (canc_mkt_p if canc_mkt_p > 0 else (existing_curr_p if existing_curr_p > 0 else limit_p))
+                        s.status = "EXPIRED_HORIZON"
+                        s.outcome_label = "⏱️ EXPIRED"
+                        s.exit_price = round(ref_mkt_p, 6) if ref_mkt_p > 0 else s.entry_price
+                        if ref_mkt_p > 0:
+                            s.current_price = round(ref_mkt_p, 6)
+                        s.realized_return_pct = 0.0
+                        s.evaluated_at_utc = canc_at
+                        updated = True
+                        try:
+                            from app.services.whatsapp_service import whatsapp_service
+                            sig_dict = {
+                                "signal_id": s.signal_id,
+                                "symbol": s.symbol,
+                                "horizon": s.horizon,
+                                "direction": s.direction,
+                                "entry_price": s.entry_price,
+                                "quality_grade": s.quality_grade,
+                                "meta_win_prob_pct": s.meta_win_prob_pct,
+                                "decision": getattr(s, "decision", None) or s.outcome_label,
+                                "cancellation_reason": canc_reason,
+                                "cancellation_detail": canc_match.get("cancellation_detail", ""),
+                                "outcome_label": s.outcome_label
+                            }
+                            whatsapp_service.emit_signal_outcome(sig_dict, "LIMIT_CANCELLED", float(s.exit_price or 0.0), 0.0)
+                        except Exception:
+                            pass
+                        continue
 
                 curr_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
                 if not curr_p or curr_p <= 0:
@@ -1184,7 +1186,8 @@ class SignalService:
                         # 4. Stagnant or losing trade: strictly enforce canonical base TTL
                         eff_max_sec = max_sec
 
-                    if sig_age_sec is not None and sig_age_sec >= eff_max_sec:
+                    enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
+                    if enable_expiry and sig_age_sec is not None and sig_age_sec >= eff_max_sec:
                         is_expired = True
                     else:
                         is_expired = False
@@ -1253,43 +1256,45 @@ class SignalService:
                 tp1_dist = abs(tp1_p - entry_p) / max(1e-12, entry_p) * 100.0
 
                 # Phase 4: Dynamic 2-Stage Profit Ratchet (+0.50% Micro-Guard & +0.75% Tier-0 Breakeven)
-                # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by strictly 50% from immutable original anchor)
-                if max_gain >= 0.50 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
-                    orig_sl = safe_float(getattr(s, "sl_original", None) or getattr(s, "initial_sl_price", None), 0.0)
-                    if orig_sl <= 0.0 or (direction == "LONG" and orig_sl >= entry_p) or (direction == "SHORT" and orig_sl <= entry_p):
-                        orig_sl = sl_p
-                        if hasattr(s, "sl_original") and getattr(s, "sl_original", None) is None:
-                            s.sl_original = orig_sl
+                enable_be = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
+                if enable_be:
+                    # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by strictly 50% from immutable original anchor)
+                    if max_gain >= 0.50 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
+                        orig_sl = safe_float(getattr(s, "sl_original", None) or getattr(s, "initial_sl_price", None), 0.0)
+                        if orig_sl <= 0.0 or (direction == "LONG" and orig_sl >= entry_p) or (direction == "SHORT" and orig_sl <= entry_p):
+                            orig_sl = sl_p
+                            if hasattr(s, "sl_original") and getattr(s, "sl_original", None) is None:
+                                s.sl_original = orig_sl
 
-                    spread_bps = safe_float(getattr(s, "spread_bps", None), 5.0)
-                    min_sl_dist = max(entry_p * 0.0035, 2.5 * (spread_bps / 10000.0) * entry_p)
+                        spread_bps = safe_float(getattr(s, "spread_bps", None), 5.0)
+                        min_sl_dist = max(entry_p * 0.0035, 2.5 * (spread_bps / 10000.0) * entry_p)
 
-                    if direction == "LONG" and orig_sl < entry_p:
-                        full_risk = entry_p - orig_sl
-                        if full_risk > (min_sl_dist * 1.5):
-                            target_half_sl = round(entry_p - max(min_sl_dist, full_risk * 0.50), 6)
-                            if target_half_sl > sl_p and target_half_sl < entry_p:
-                                s.sl_price = target_half_sl
-                                sl_p = target_half_sl
-                                updated = True
-                    elif direction == "SHORT" and orig_sl > entry_p:
-                        full_risk = orig_sl - entry_p
-                        if full_risk > (min_sl_dist * 1.5):
-                            target_half_sl = round(entry_p + max(min_sl_dist, full_risk * 0.50), 6)
-                            if target_half_sl < sl_p and target_half_sl > entry_p:
-                                s.sl_price = target_half_sl
-                                sl_p = target_half_sl
-                                updated = True
+                        if direction == "LONG" and orig_sl < entry_p:
+                            full_risk = entry_p - orig_sl
+                            if full_risk > (min_sl_dist * 1.5):
+                                target_half_sl = round(entry_p - max(min_sl_dist, full_risk * 0.50), 6)
+                                if target_half_sl > sl_p and target_half_sl < entry_p:
+                                    s.sl_price = target_half_sl
+                                    sl_p = target_half_sl
+                                    updated = True
+                        elif direction == "SHORT" and orig_sl > entry_p:
+                            full_risk = orig_sl - entry_p
+                            if full_risk > (min_sl_dist * 1.5):
+                                target_half_sl = round(entry_p + max(min_sl_dist, full_risk * 0.50), 6)
+                                if target_half_sl < sl_p and target_half_sl > entry_p:
+                                    s.sl_price = target_half_sl
+                                    sl_p = target_half_sl
+                                    updated = True
 
-                # Stage 2: Tier-0 Breakeven Ratchet (Lock in fees + small profit at +0.75% or 35% of TP1 distance)
-                effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
-                if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
-                    s.status = "TIER0_PROTECTED_BREAKEVEN"
-                    soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)
-                    s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
-                    sl_p = s.sl_price
-                    s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
-                    updated = True
+                    # Stage 2: Tier-0 Breakeven Ratchet (Lock in fees + small profit at +0.75% or 35% of TP1 distance)
+                    effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
+                    if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
+                        s.status = "TIER0_PROTECTED_BREAKEVEN"
+                        soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)
+                        s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
+                        sl_p = s.sl_price
+                        s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
+                        updated = True
 
                 # 1. Conservative Adverse SL Precedence:
                 # If an unlocked active trade hits SL intra-candle, SL strictly takes precedence over simultaneous TP touches
@@ -1662,7 +1667,8 @@ class SignalService:
                     # 4. Stagnant or losing trade: strictly enforce canonical base TTL
                     eff_max_sec = max_sec
 
-                if sig_age_sec is not None and sig_age_sec >= eff_max_sec:
+                enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
+                if enable_expiry and sig_age_sec is not None and sig_age_sec >= eff_max_sec:
                     is_expired = True
                 else:
                     is_expired = False
@@ -1730,42 +1736,44 @@ class SignalService:
             tp1_dist = abs(tp1_p - entry_p) / max(1e-12, entry_p) * 100.0
 
             # Phase 4: Dynamic 2-Stage Profit Ratchet (+0.50% Micro-Guard & +0.75% Tier-0 Breakeven)
-            # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by strictly 50% from immutable original anchor)
-            if max_gain >= 0.50 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
-                orig_sl = safe_float(getattr(s, "sl_original", None) or getattr(s, "initial_sl_price", None), 0.0)
-                if orig_sl <= 0.0 or (direction == "LONG" and orig_sl >= entry_p) or (direction == "SHORT" and orig_sl <= entry_p):
-                    orig_sl = sl_p
-                    if hasattr(s, "sl_original") and getattr(s, "sl_original", None) is None:
-                        s.sl_original = orig_sl
+            enable_be = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
+            if enable_be:
+                # Stage 1: Micro-Guard at +0.50% MFE (Cut risk by strictly 50% from immutable original anchor)
+                if max_gain >= 0.50 and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
+                    orig_sl = safe_float(getattr(s, "sl_original", None) or getattr(s, "initial_sl_price", None), 0.0)
+                    if orig_sl <= 0.0 or (direction == "LONG" and orig_sl >= entry_p) or (direction == "SHORT" and orig_sl <= entry_p):
+                        orig_sl = sl_p
+                        if hasattr(s, "sl_original") and getattr(s, "sl_original", None) is None:
+                            s.sl_original = orig_sl
 
-                spread_bps = safe_float(getattr(s, "spread_bps", None), 5.0)
-                min_sl_dist = max(entry_p * 0.0035, 2.5 * (spread_bps / 10000.0) * entry_p)
+                    spread_bps = safe_float(getattr(s, "spread_bps", None), 5.0)
+                    min_sl_dist = max(entry_p * 0.0035, 2.5 * (spread_bps / 10000.0) * entry_p)
 
-                if direction == "LONG" and orig_sl < entry_p:
-                    full_risk = entry_p - orig_sl
-                    if full_risk > (min_sl_dist * 1.5):
-                        target_half_sl = round(entry_p - max(min_sl_dist, full_risk * 0.50), 6)
-                        if target_half_sl > sl_p and target_half_sl < entry_p:
-                            s.sl_price = target_half_sl
-                            sl_p = target_half_sl
-                            updated = True
-                elif direction == "SHORT" and orig_sl > entry_p:
-                    full_risk = orig_sl - entry_p
-                    if full_risk > (min_sl_dist * 1.5):
-                        target_half_sl = round(entry_p + max(min_sl_dist, full_risk * 0.50), 6)
-                        if target_half_sl < sl_p and target_half_sl > entry_p:
-                            s.sl_price = target_half_sl
-                            sl_p = target_half_sl
-                            updated = True
+                    if direction == "LONG" and orig_sl < entry_p:
+                        full_risk = entry_p - orig_sl
+                        if full_risk > (min_sl_dist * 1.5):
+                            target_half_sl = round(entry_p - max(min_sl_dist, full_risk * 0.50), 6)
+                            if target_half_sl > sl_p and target_half_sl < entry_p:
+                                s.sl_price = target_half_sl
+                                sl_p = target_half_sl
+                                updated = True
+                    elif direction == "SHORT" and orig_sl > entry_p:
+                        full_risk = orig_sl - entry_p
+                        if full_risk > (min_sl_dist * 1.5):
+                            target_half_sl = round(entry_p + max(min_sl_dist, full_risk * 0.50), 6)
+                            if target_half_sl < sl_p and target_half_sl > entry_p:
+                                s.sl_price = target_half_sl
+                                sl_p = target_half_sl
+                                updated = True
 
-            effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
-            if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
-                s.status = "TIER0_PROTECTED_BREAKEVEN"
-                soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)
-                s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
-                sl_p = s.sl_price
-                s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
-                updated = True
+                effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
+                if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
+                    s.status = "TIER0_PROTECTED_BREAKEVEN"
+                    soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)
+                    s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
+                    sl_p = s.sl_price
+                    s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
+                    updated = True
 
             def _build_sig_dict(sig_obj):
                 return {
