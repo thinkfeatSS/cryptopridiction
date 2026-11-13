@@ -28,8 +28,9 @@ export function useV16Signals(filters?: { status?: string; symbol?: string }) {
         error: res.error,
       };
     },
-    refetchInterval: 10000, // 10s auto-refresh
-    staleTime: 3000,
+    refetchInterval: 15000,
+    staleTime: 10000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: 2,
   });
@@ -53,7 +54,8 @@ export function useV16Theses() {
       };
     },
     refetchInterval: 15000,
-    staleTime: 5000,
+    staleTime: 10000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: 2,
   });
@@ -76,8 +78,9 @@ export function useV16Events(limit = 100) {
         error: res.error,
       };
     },
-    refetchInterval: 10000,
-    staleTime: 3000,
+    refetchInterval: 15000,
+    staleTime: 10000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: 2,
   });
@@ -98,8 +101,9 @@ export function useV16Regime() {
         error: res.error,
       };
     },
-    refetchInterval: 15000,
-    staleTime: 5000,
+    refetchInterval: 20000,
+    staleTime: 15000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: 2,
   });
@@ -120,8 +124,9 @@ export function useV16MarketIntelligence(symbol = "BTC/USDT") {
         error: res.error,
       };
     },
-    refetchInterval: 20000, // 20s auto-refresh
-    staleTime: 10000,
+    refetchInterval: 25000,
+    staleTime: 15000,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: 2,
   });

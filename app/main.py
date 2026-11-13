@@ -77,15 +77,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Enforce No-Cache on API Endpoints to prevent browser stale in-memory cache
+# API Cache-Control & SWR Middleware for Next.js Frontend
 @app.middleware("http")
 async def add_no_cache_headers(request, call_next):
     response = await call_next(request)
     if request.url.path.startswith("/api/"):
-        response.headers["Cache-Control"] = "private, no-cache, no-store, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "-1"
-        response.headers["Surrogate-Control"] = "no-store"
+        # If the endpoint handler already explicitly defined a Cache-Control header, preserve it
+        if "Cache-Control" in response.headers:
+            return response
+
+        # Selective lightweight SWR for high-frequency GET reads (prices, status, signals, v16)
+        # Allows browser HTTP connection reuse and eliminates frontend component re-render query bursts
+        if request.method == "GET" and any(request.url.path.startswith(p) for p in [
+            "/api/prices", "/api/status", "/api/v16/signals", "/api/v16/theses",
+            "/api/v16/regime", "/api/v16/market-intelligence", "/api/forecast", "/api/fundamentals"
+        ]):
+            response.headers["Cache-Control"] = "public, max-age=1, stale-while-revalidate=4"
+        else:
+            response.headers["Cache-Control"] = "private, no-cache, no-store, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "-1"
     return response
 
 # Include API Routers
