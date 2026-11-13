@@ -280,46 +280,67 @@ def fetch_live_binance_prices(max_age_seconds: float = 15.0) -> Dict[str, float]
         pass
 
     now = time.time()
-    if not _LIVE_PRICES_CACHE:
-        try:
-            url = "https://data-api.binance.vision/api/v3/ticker/24hr"
-            resp = requests.get(url, timeout=3.5)
-            if resp.status_code == 200:
-                data = resp.json()
-                prices = {}
-                for t in data:
-                    s = t.get('symbol', '')
-                    p = float(t.get('lastPrice', 0.0))
-                    if p > 0:
-                        prices[s] = p
-                        if s.endswith('USDT'):
-                            base = s[:-4]
-                            prices[f"{base}/USDT"] = p
-                            prices[base] = p
-                if prices:
-                    _LIVE_PRICES_CACHE = prices
-                    _LIVE_PRICES_TS = time.time()
-            else:
-                _async_refresh_tickers()
-        except Exception:
-            _async_refresh_tickers()
+    # 2. Check in-memory cache first
+    if _LIVE_PRICES_CACHE and (now - _LIVE_PRICES_TS) < max_age_seconds:
+        return _LIVE_PRICES_CACHE
 
-        if not _LIVE_PRICES_CACHE:
-            try:
-                export_dir = getattr(settings, "EXPORT_DIR", "./export_app_data")
-                cache_file = os.path.join(export_dir, "live_tickers_swr.json")
-                if os.path.exists(cache_file):
-                    with open(cache_file, "r", encoding="utf-8") as f:
-                        swr_data = json.load(f)
-                        cached_ticks = swr_data.get("tickers", {})
-                        cached_ts = float(swr_data.get("timestamp", 0.0))
-                        if cached_ticks and (now - cached_ts) <= 180.0:
-                            _LIVE_PRICES_CACHE = cached_ticks
-                            _LIVE_PRICES_TS = cached_ts
-            except Exception:
-                pass
-    elif (now - _LIVE_PRICES_TS) >= max_age_seconds:
+    # 3. Check persistent SWR disk cache before initiating any blocking network call
+    if not _LIVE_PRICES_CACHE or (now - _LIVE_PRICES_TS) >= max_age_seconds:
+        try:
+            export_dir = getattr(settings, "EXPORT_DIR", "./export_app_data")
+            cache_file = os.path.join(export_dir, "live_tickers_swr.json")
+            if os.path.exists(cache_file):
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    swr_data = json.load(f)
+                    cached_ticks = swr_data.get("tickers", {})
+                    cached_ts = float(swr_data.get("timestamp", 0.0))
+                    if cached_ticks and (now - cached_ts) <= 180.0:
+                        _LIVE_PRICES_CACHE = cached_ticks
+                        _LIVE_PRICES_TS = cached_ts
+                        if (now - cached_ts) <= max_age_seconds:
+                            return _LIVE_PRICES_CACHE
+        except Exception:
+            pass
+
+    # 4. If warm in-memory cache exists, trigger async refresh in background and return warm cache instantly
+    if _LIVE_PRICES_CACHE:
         _async_refresh_tickers()
+        return _LIVE_PRICES_CACHE
+
+    # 5. Cold start synchronous fetch only if NO cache exists anywhere
+    try:
+        url = "https://data-api.binance.vision/api/v3/ticker/24hr"
+        resp = requests.get(url, timeout=3.5)
+        if resp.status_code == 200:
+            data = resp.json()
+            prices = {}
+            for t in data:
+                s = t.get('symbol', '')
+                p = float(t.get('lastPrice', 0.0))
+                if p > 0:
+                    prices[s] = p
+                    if s.endswith('USDT'):
+                        base = s[:-4]
+                        prices[f"{base}/USDT"] = p
+                        prices[base] = p
+            if prices:
+                _LIVE_PRICES_CACHE = prices
+                _LIVE_PRICES_TS = time.time()
+                try:
+                    export_dir = getattr(settings, "EXPORT_DIR", "./export_app_data")
+                    cache_file = os.path.join(export_dir, "live_tickers_swr.json")
+                    tmp_file = f"{cache_file}.tmp_{os.getpid()}_{threading.get_ident()}"
+                    with open(tmp_file, "w", encoding="utf-8") as f:
+                        json.dump({"timestamp": _LIVE_PRICES_TS, "tickers": prices}, f)
+                    os.replace(tmp_file, cache_file)
+                except Exception:
+                    pass
+                return _LIVE_PRICES_CACHE
+        else:
+            _async_refresh_tickers()
+    except Exception:
+        _async_refresh_tickers()
+
     return _LIVE_PRICES_CACHE
 
 _INTRA_KLINES_CACHE: Dict[str, list] = {}

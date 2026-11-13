@@ -1413,6 +1413,12 @@ class MultiHorizonDataLoader:
                 for s in res:
                     self._symbol_price_timestamps[s] = now
             self._save_tickers_to_swr_disk(res, now)
+            try:
+                import app.services.signal_service as sig_svc
+                sig_svc._LIVE_PRICES_CACHE.update(res)
+                sig_svc._LIVE_PRICES_TS = now
+            except Exception:
+                pass
             return res
 
         # Tier-2 Failover: Bybit Tickers
