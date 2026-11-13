@@ -527,7 +527,7 @@ class TestV16NoSignalExpiry(unittest.TestCase):
 
         # Setup mock klines in cache representing historical candles since signal inception
         raw_sym = "FETUSDT"
-        since_ts = time.time() - 1800.0  # 30 minutes ago (within 14h -> 1m interval)
+        since_ts = float(int(time.time() - 1800.0))  # 30 minutes ago (within 14h -> 1m interval)
         start_ms = int((since_ts - 5.0) * 1000)
         cache_key = f"{raw_sym}:1m:40:{start_ms}"
 
@@ -568,7 +568,7 @@ class TestV16NoSignalExpiry(unittest.TestCase):
             settings.EXPORT_DIR = self.tmp_dir
             sig_id = "SIG_FET_USDT_15M_HEAL_01"
             raw_sym = "FETUSDT"
-            since_ts = time.time() - 3600.0
+            since_ts = float(int(time.time() - 3600.0))
             start_ms = int((since_ts - 5.0) * 1000)
             cache_key = f"{raw_sym}:1m:70:{start_ms}"
 

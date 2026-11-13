@@ -16,6 +16,8 @@ import os
 import json
 import csv
 import time
+import copy
+import threading
 from datetime import datetime, timezone
 
 from app.config import settings
@@ -58,11 +60,30 @@ def _load_json_file(filename: str) -> Any:
             pass
     return {}
 
-def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
+_V16_STORE_CACHE: Optional[tuple[str, Dict[str, Any], Dict[str, Any]]] = None
+_V16_STORE_CACHE_TS: float = 0.0
+_V16_STORE_CACHE_LOCK = threading.Lock()
+_SIGNAL_LAST_KLINE_FETCH: Dict[str, float] = {}
+
+def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Returns (immutable_signals, dynamic_states) dictionaries.
     Authoritatively syncs dynamic outcomes directly from MySQL database and active scanner.
+    Decoupled with smart 15s in-memory caching to eliminate redundant disk I/O and network requests.
     """
+    global _V16_STORE_CACHE, _V16_STORE_CACHE_TS
+    now = time.time()
+    current_export_dir = getattr(settings, "EXPORT_DIR", "./export_app_data")
+    with _V16_STORE_CACHE_LOCK:
+        if (
+            _V16_STORE_CACHE
+            and _V16_STORE_CACHE[0] == current_export_dir
+            and not force_refresh
+            and (now - _V16_STORE_CACHE_TS) < 15.0
+        ):
+            _, imm_c, dyn_c = _V16_STORE_CACHE
+            return copy.deepcopy(imm_c), copy.deepcopy(dyn_c)
+
     immut_data = _load_json_file("v16_immutable_signals.json") or {}
     dyn_data = _load_json_file("v16_dynamic_states.json") or {}
 
@@ -764,13 +785,17 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
             except Exception:
                 pass
 
-            # Fetch intra-candle extremes strictly post-entry
+            # Fetch intra-candle extremes strictly post-entry (cached to max 1 query per 60s per signal)
             intra_h, intra_l = 0.0, 0.0
-            try:
-                from app.services.signal_service import fetch_intra_candle_extremes, evaluate_chronological_candle_outcome
-                intra_h, intra_l = fetch_intra_candle_extremes(sym, hz_v, since_ts=gen_ts)
-            except Exception:
-                pass
+            last_kf = _SIGNAL_LAST_KLINE_FETCH.get(sid, 0.0)
+            should_fetch_kline = force_refresh or (now - last_kf) >= 60.0 or not dyn.get("peak_price_seen")
+            if should_fetch_kline:
+                try:
+                    from app.services.signal_service import fetch_intra_candle_extremes, evaluate_chronological_candle_outcome
+                    intra_h, intra_l = fetch_intra_candle_extremes(sym, hz_v, since_ts=gen_ts)
+                    _SIGNAL_LAST_KLINE_FETCH[sid] = now
+                except Exception:
+                    pass
 
             curr_v = safe_float(live_prices.get(sym) or live_prices.get(sym.replace("/", "").replace(":USDT", "")), 0.0)
             if curr_v <= 0.0:
@@ -1005,6 +1030,8 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
 
     clean_immut = {k: v for k, v in immut_data.items() if not is_meme_coin(v.get("symbol", ""))}
     clean_dyn = {k: v for k, v in dyn_data.items() if k in clean_immut or (v.get("symbol") and not is_meme_coin(v.get("symbol", "")))}
+    _V16_STORE_CACHE = (current_export_dir, copy.deepcopy(clean_immut), copy.deepcopy(clean_dyn))
+    _V16_STORE_CACHE_TS = now
     return clean_immut, clean_dyn
 
 def _get_v16_events(limit: int = 100) -> List[Dict[str, Any]]:
@@ -1136,10 +1163,11 @@ def _get_v16_events(limit: int = 100) -> List[Dict[str, Any]]:
 @v16_router.get("/signals")
 def get_v16_signals(
     status: Optional[str] = Query(None, description="Filter by status (ACTIVE, WON, LOST, EXPIRED)"),
-    symbol: Optional[str] = Query(None, description="Filter by cryptocurrency pair")
+    symbol: Optional[str] = Query(None, description="Filter by cryptocurrency pair"),
+    force: bool = Query(False, description="Bypass in-memory cache and force live re-evaluation")
 ) -> Dict[str, Any]:
     """Returns combined immutable audit snapshots and dynamic real-time tracking states."""
-    immut_data, dyn_data = _get_v16_store()
+    immut_data, dyn_data = _get_v16_store(force_refresh=force)
 
     results = []
     for sig_id, immut in immut_data.items():
@@ -1173,9 +1201,11 @@ def get_v16_signals(
     }
 
 @v16_router.get("/theses")
-def get_trade_theses() -> Dict[str, Any]:
+def get_trade_theses(
+    force: bool = Query(False, description="Bypass in-memory cache and force live re-evaluation")
+) -> Dict[str, Any]:
     """Returns active and historical Trade Theses clustered across multi-horizon signals."""
-    immut_data, dyn_data = _get_v16_store()
+    immut_data, dyn_data = _get_v16_store(force_refresh=force)
     theses: Dict[str, Dict[str, Any]] = {}
 
     for sig_id, immut in immut_data.items():
