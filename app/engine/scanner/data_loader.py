@@ -2668,7 +2668,7 @@ class MultiHorizonDataLoader:
                 warm_4h = warm_dfs.get("4h")
                 df_result = None
                 # Incremental candle delta optimization for 4H
-                if warm_4h is not None and len(warm_4h) >= 30 and "timestamp" in warm_4h.columns:
+                if warm_4h is not None and len(warm_4h) >= fetch_limit and "timestamp" in warm_4h.columns:
                     delta_4h = self.fetch_single_timeframe_raw(symbol, "4h", limit=5)
                     if delta_4h is not None and not delta_4h.empty and "timestamp" in delta_4h.columns:
                         bar_ms = bar_intervals.get("4h", 14400) * 1000
@@ -2734,7 +2734,7 @@ class MultiHorizonDataLoader:
                 df_result = None
                 # Incremental candle delta optimization:
                 # If warm candle history exists with sufficient depth, fetch recent 5-candle delta and stitch
-                if warm_df is not None and len(warm_df) >= min(fetch_limit, 50) and "timestamp" in warm_df.columns:
+                if warm_df is not None and len(warm_df) >= fetch_limit and "timestamp" in warm_df.columns:
                     delta_df = self.fetch_single_timeframe_raw(symbol, tf_target, limit=5)
                     if delta_df is not None and not delta_df.empty and "timestamp" in delta_df.columns:
                         bar_ms = bar_intervals.get(tf_target, 60) * 1000
@@ -2857,7 +2857,7 @@ class MultiHorizonDataLoader:
 
         if df_1m is None:
             fetch_limit_1m = max(60, limits.get("1m", 120))
-            if warm_1m is not None and len(warm_1m) >= 30 and "timestamp" in warm_1m.columns:
+            if warm_1m is not None and len(warm_1m) >= fetch_limit_1m and "timestamp" in warm_1m.columns:
                 delta_1m = self.fetch_single_timeframe_raw(symbol, "1m", limit=5)
                 if delta_1m is not None and not delta_1m.empty and "timestamp" in delta_1m.columns:
                     latest_warm_ts = int(warm_1m["timestamp"].iloc[-1])
