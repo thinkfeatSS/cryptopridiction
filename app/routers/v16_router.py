@@ -1254,21 +1254,62 @@ _LIVE_REGIME_CACHE_TS: float = 0.0
 def _compute_live_market_regime() -> Dict[str, Any]:
     global _LIVE_REGIME_CACHE, _LIVE_REGIME_CACHE_TS
     now = time.time()
-    if _LIVE_REGIME_CACHE and (now - _LIVE_REGIME_CACHE_TS) < 20.0:
+    if _LIVE_REGIME_CACHE and (now - _LIVE_REGIME_CACHE_TS) < 60.0:
         return _LIVE_REGIME_CACHE
 
     try:
-        import urllib.request
         import math
+        import pandas as pd
         from app.quant_v16.regime import compute_live_btc_regime
 
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=100"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=4) as r:
-            klines = json.loads(r.read().decode("utf-8"))
+        klines = None
+        # 1. First priority: Warm cached BTC 1H candles from DataLoader persistent store (0ms, 0 network I/O)
+        try:
+            cache_path = os.path.join(settings.EXPORT_DIR, "candle_cache", "BTC_USDT_1h.pkl")
+            if os.path.exists(cache_path):
+                file_age = now - os.path.getmtime(cache_path)
+                if file_age < 3600.0:  # Fresh within 1 hour
+                    df_btc = pd.read_pickle(cache_path)
+                    if df_btc is not None and len(df_btc) >= 50:
+                        records = []
+                        for _, row in df_btc.tail(100).iterrows():
+                            ts_val = int(row.get("timestamp", 0))
+                            records.append([
+                                ts_val,
+                                float(row.get("open", 0.0)),
+                                float(row.get("high", 0.0)),
+                                float(row.get("low", 0.0)),
+                                float(row.get("close", 0.0)),
+                                float(row.get("volume", 0.0))
+                            ])
+                        if len(records) >= 50:
+                            klines = records
+        except Exception:
+            pass
+
+        # 2. Second priority: Multi-exchange mirror fallback (Binance Vision -> Binance Spot)
+        if not klines:
+            import urllib.request
+            binance_urls = [
+                "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=100",
+                "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=100"
+            ]
+            for u in binance_urls:
+                try:
+                    req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=3.5) as r:
+                        k_data = json.loads(r.read().decode("utf-8"))
+                        if isinstance(k_data, list) and len(k_data) >= 50:
+                            klines = k_data
+                            break
+                except Exception:
+                    continue
+
+        if not klines and _LIVE_REGIME_CACHE:
+            return _LIVE_REGIME_CACHE
 
         prev_r = _LIVE_REGIME_CACHE.get("regime") if _LIVE_REGIME_CACHE else None
-        res = compute_live_btc_regime(klines, prev_regime=prev_r)
+        res = compute_live_btc_regime(klines or [], prev_regime=prev_r)
 
         # Reconcile with active Macro No Trade Zone from scanner forecast
         try:

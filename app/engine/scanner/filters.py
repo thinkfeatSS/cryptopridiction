@@ -3,6 +3,7 @@ import requests
 from typing import List, Dict, Any, Optional
 import json
 import time
+import threading
 from app.engine.config import (
     EXPORT_DIR,
     TOP_N_UNIVERSE,
@@ -126,6 +127,86 @@ class UniverseFilter:
 
         return True
 
+    _active_spot_symbols_cache: Optional[set] = None
+    _active_spot_symbols_ts: float = 0.0
+    _active_spot_symbols_lock: threading.Lock = threading.Lock()
+    _CACHE_TTL_EXCHANGE_INFO: float = 8.0 * 3600.0  # 8 hours SWR TTL
+
+    @classmethod
+    def get_active_spot_symbols(cls, session: Optional[requests.Session] = None, force_refresh: bool = False) -> set:
+        """
+        Retrieves actively trading Binance spot symbols with smart 8h TTL in-memory caching
+        and atomic SWR disk persistence (binance_active_spot_symbols_swr.json).
+        Eliminates redundant 2.5-3.0 MB exchangeInfo downloads on every scan cycle.
+        """
+        now = time.time()
+        with cls._active_spot_symbols_lock:
+            # 1. Fast in-memory cache check
+            if cls._active_spot_symbols_cache and not force_refresh:
+                if (now - cls._active_spot_symbols_ts) < cls._CACHE_TTL_EXCHANGE_INFO:
+                    return cls._active_spot_symbols_cache.copy()
+
+            s = session or requests.Session()
+            swr_file = os.path.join(EXPORT_DIR, "binance_active_spot_symbols_swr.json")
+            disk_symbols = set()
+            disk_ts = 0.0
+
+            # 2. Check persistent SWR disk cache
+            if os.path.exists(swr_file) and not force_refresh:
+                try:
+                    with open(swr_file, "r", encoding="utf-8") as f:
+                        disk_data = json.load(f)
+                        sym_list = disk_data.get("symbols", [])
+                        disk_ts = float(disk_data.get("timestamp", 0.0))
+                        if sym_list and isinstance(sym_list, list):
+                            disk_symbols = set(sym_list)
+                            if (now - disk_ts) < cls._CACHE_TTL_EXCHANGE_INFO:
+                                cls._active_spot_symbols_cache = disk_symbols
+                                cls._active_spot_symbols_ts = disk_ts
+                                return cls._active_spot_symbols_cache.copy()
+                except Exception:
+                    pass
+
+            # 3. Network fetch with Binance Vision primary & api.binance.com fallback
+            active_spot_symbols = set()
+            exchange_info_urls = [
+                "https://data-api.binance.vision/api/v3/exchangeInfo",
+                "https://api.binance.com/api/v3/exchangeInfo"
+            ]
+            for eu in exchange_info_urls:
+                try:
+                    e_resp = s.get(eu, timeout=5)
+                    if e_resp.status_code == 200:
+                        e_data = e_resp.json()
+                        active_spot_symbols = {
+                            sym_info["symbol"] for sym_info in e_data.get("symbols", [])
+                            if sym_info.get("status") == "TRADING" and sym_info.get("isSpotTradingAllowed", True)
+                        }
+                        if active_spot_symbols:
+                            break
+                except Exception:
+                    continue
+
+            if active_spot_symbols:
+                cls._active_spot_symbols_cache = active_spot_symbols
+                cls._active_spot_symbols_ts = now
+                try:
+                    tmp_swr = f"{swr_file}.tmp_{os.getpid()}_{threading.get_ident()}"
+                    with open(tmp_swr, "w", encoding="utf-8") as f:
+                        json.dump({"timestamp": now, "symbols": sorted(list(active_spot_symbols))}, f)
+                    os.replace(tmp_swr, swr_file)
+                except Exception:
+                    pass
+                return cls._active_spot_symbols_cache.copy()
+
+            # 4. Resilient fallback to disk SWR cache if network failed
+            if disk_symbols:
+                cls._active_spot_symbols_cache = disk_symbols
+                cls._active_spot_symbols_ts = disk_ts
+                return cls._active_spot_symbols_cache.copy()
+
+            return cls._active_spot_symbols_cache.copy() if cls._active_spot_symbols_cache else set()
+
     @classmethod
     def get_top_40_universe(cls, session: Optional[requests.Session] = None, top_n: Optional[int] = None) -> List[Dict[str, Any]]:
         """
@@ -136,25 +217,8 @@ class UniverseFilter:
         s = session or requests.Session()
         limit = int(top_n) if top_n is not None else TOP_N_UNIVERSE
 
-        # 0. Query Binance ExchangeInfo to verify actively trading spot symbols
-        active_spot_symbols = set()
-        exchange_info_urls = [
-            "https://data-api.binance.vision/api/v3/exchangeInfo",
-            "https://api.binance.com/api/v3/exchangeInfo"
-        ]
-        for eu in exchange_info_urls:
-            try:
-                e_resp = s.get(eu, timeout=5)
-                if e_resp.status_code == 200:
-                    e_data = e_resp.json()
-                    active_spot_symbols = {
-                        sym_info["symbol"] for sym_info in e_data.get("symbols", [])
-                        if sym_info.get("status") == "TRADING" and sym_info.get("isSpotTradingAllowed", True)
-                    }
-                    if active_spot_symbols:
-                        break
-            except Exception:
-                continue
+        # 0. Query Binance ExchangeInfo with smart 8h TTL + SWR disk caching
+        active_spot_symbols = cls.get_active_spot_symbols(session=s)
 
         urls = [
             "https://data-api.binance.vision/api/v3/ticker/24hr",
