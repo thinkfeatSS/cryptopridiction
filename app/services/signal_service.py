@@ -912,7 +912,7 @@ class SignalService:
                         s.outcome_label = "🟢 TP1 HIT (SL @ BREAKEVEN)"
                         if hasattr(s, "paper_trading_status"):
                             s.paper_trading_status = "EXECUTED (PAPER WALLET)"
-                    elif op_match.get("is_breakeven_locked") or op_match.get("status") == "TIER0_PROTECTED_BREAKEVEN":
+                    elif (getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))) and (op_match.get("is_breakeven_locked") or op_match.get("status") == "TIER0_PROTECTED_BREAKEVEN"):
                         s.status = "TIER0_PROTECTED_BREAKEVEN"
                         s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
                         if hasattr(s, "paper_trading_status"):
@@ -984,8 +984,16 @@ class SignalService:
                         s.status = "WON_EXP_PROFIT"
                         s.outcome_label = f"🟢 WON (HORIZON PROFIT {ret_pct:+.2f}%)"
                     elif "BREAKEVEN" in exit_reason or "TIER0" in exit_reason or exit_reason == "STOP_LOSS_BREAKEVEN":
-                        s.status = "BREAKEVEN_GUARD"
-                        s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_pct:+.2f}%)"
+                        enable_be_flag = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
+                        if enable_be_flag:
+                            s.status = "BREAKEVEN_GUARD"
+                            s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_pct:+.2f}%)"
+                        else:
+                            s.status = "ACTIVE"
+                            s.outcome_label = "RUNNING 🚀"
+                            s.exit_price = None
+                            s.realized_return_pct = None
+                            continue
                     elif "STOP_LOSS" in exit_reason:
                         s.status = "LOST_SL"
                         s.outcome_label = "🔴 LOST (SL HIT)"
@@ -1296,8 +1304,28 @@ class SignalService:
                         s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
                         updated = True
 
-                # 1. Conservative Adverse SL Precedence:
-                # If an unlocked active trade hits SL intra-candle, SL strictly takes precedence over simultaneous TP touches
+                # 1. Microstructure Resolution for Simultaneous TP1 and SL Breaches:
+                if is_hit_sl and (is_hit_tp1 or is_hit_tp2 or is_hit_tp3):
+                    try:
+                        from app.quant_v16.microstructure_resolver import MicrostructureResolver
+                        now_ms = int(time.time() * 1000)
+                        start_ms = now_ms - (15 * 60 * 1000)
+                        micro_res = MicrostructureResolver.resolve_path(
+                            symbol=s.symbol,
+                            direction=direction,
+                            entry_p=entry_p,
+                            tp1_p=tp1_p,
+                            sl_p=sl_p,
+                            start_ts_ms=start_ms,
+                            end_ts_ms=now_ms,
+                            candle_open=entry_p,
+                            candle_close=curr_p
+                        )
+                        if micro_res.get("outcome") == "WON_TP1":
+                            is_hit_sl = False
+                    except Exception:
+                        pass
+
                 if is_hit_sl and not is_be_locked:
                     s.status = "LOST_SL"
                     actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
@@ -1401,12 +1429,18 @@ class SignalService:
                         s.outcome_label = "🟢 WON (TP1 + BE RUNNER)"
                         evt = "BE_HIT"
                     elif s.status == "TIER0_PROTECTED_BREAKEVEN":
-                        ret_be = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
-                        s.status = "BREAKEVEN_GUARD"
-                        s.exit_price = round(sl_p, 6)
-                        s.realized_return_pct = round(ret_be, 2)
-                        s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
-                        evt = "BE_HIT"
+                        enable_be_flag = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
+                        if enable_be_flag:
+                            ret_be = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                            s.status = "BREAKEVEN_GUARD"
+                            s.exit_price = round(sl_p, 6)
+                            s.realized_return_pct = round(ret_be, 2)
+                            s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
+                            evt = "BE_HIT"
+                        else:
+                            s.status = "ACTIVE"
+                            s.outcome_label = "RUNNING 🚀"
+                            continue
                     else:
                         s.status = "LOST_SL"
                         actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
@@ -1795,7 +1829,29 @@ class SignalService:
                     "is_trade_active": True,
                 }
 
-            # 1. Conservative Adverse SL Precedence with Physical Gap Penetration:
+            # 1. Microstructure Resolution for Simultaneous TP1 and SL Breaches:
+            if is_hit_sl and (is_hit_tp1 or is_hit_tp2 or is_hit_tp3):
+                try:
+                    from app.quant_v16.microstructure_resolver import MicrostructureResolver
+                    now_ms = int(time.time() * 1000)
+                    start_ms = now_ms - (15 * 60 * 1000)
+                    micro_res = MicrostructureResolver.resolve_path(
+                        symbol=s.symbol,
+                        direction=direction,
+                        entry_p=entry_p,
+                        tp1_p=tp1_p,
+                        sl_p=sl_p,
+                        start_ts_ms=start_ms,
+                        end_ts_ms=now_ms,
+                        candle_open=entry_p,
+                        candle_close=curr_p
+                    )
+                    if micro_res.get("outcome") == "WON_TP1":
+                        is_hit_sl = False
+                except Exception:
+                    pass
+
+            # Adverse SL Exit when not resolved as earlier TP1 win:
             if is_hit_sl and not is_be_locked:
                 s.status = "LOST_SL"
                 actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)
@@ -1879,12 +1935,18 @@ class SignalService:
                     s.outcome_label = "🟢 WON (TP1 + BE RUNNER)"
                     evt = "BE_HIT"
                 elif s.status == "TIER0_PROTECTED_BREAKEVEN":
-                    ret_be = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
-                    s.status = "BREAKEVEN_GUARD"
-                    s.exit_price = round(sl_p, 6)
-                    s.realized_return_pct = round(ret_be, 2)
-                    s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
-                    evt = "BE_HIT"
+                    enable_be_flag = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
+                    if enable_be_flag:
+                        ret_be = ((sl_p - entry_p) / entry_p) * 100.0 if direction == "LONG" else ((entry_p - sl_p) / entry_p) * 100.0
+                        s.status = "BREAKEVEN_GUARD"
+                        s.exit_price = round(sl_p, 6)
+                        s.realized_return_pct = round(ret_be, 2)
+                        s.outcome_label = f"🛡️ BREAKEVEN (TIER-0 GUARD {ret_be:+.2f}%)"
+                        evt = "BE_HIT"
+                    else:
+                        s.status = "ACTIVE"
+                        s.outcome_label = "RUNNING 🚀"
+                        continue
                 else:
                     s.status = "LOST_SL"
                     actual_exit_p = min(sl_p, curr_p) if direction == "LONG" else max(sl_p, curr_p)

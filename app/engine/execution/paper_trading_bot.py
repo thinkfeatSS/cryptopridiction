@@ -567,9 +567,32 @@ class PaperTradingBot:
 
             # Desk Allocation & Runner Fractional Slot Accounting (Fix 4)
             desk_positions = [p for p in self.data.get("open_positions", []) if p.get("desk") == desk_key]
-            active_primary_count = sum(1 for p in desk_positions if not (p.get("tp1_hit") or p.get("tp2_hit")))
-            active_runner_count = sum(1 for p in desk_positions if (p.get("tp1_hit") or p.get("tp2_hit")))
-            effective_desk_slots = active_primary_count + (active_runner_count * 0.25)
+            active_primary_count = 0
+            active_runner_count = 0
+            prolonged_consol_count = 0
+            for p in desk_positions:
+                is_runner = bool(p.get("tp1_hit") or p.get("tp2_hit"))
+                if is_runner:
+                    active_runner_count += 1
+                else:
+                    opened_str = p.get("opened_at_utc") or p.get("opened_at")
+                    p_elapsed = 0.0
+                    if opened_str:
+                        try:
+                            clean_ts = opened_str.replace("Z", "+00:00")
+                            p_dt = datetime.fromisoformat(clean_ts)
+                            p_elapsed = (datetime.now(timezone.utc) - p_dt).total_seconds()
+                        except Exception:
+                            pass
+                    p_gain = abs(float(p.get("unrealized_pnl_pct", 0.0)))
+                    thresh_s = 7200 if desk_key == "scalp" else 28800
+                    if p_elapsed >= thresh_s and p_gain <= 0.85:
+                        prolonged_consol_count += 1
+                        p["is_prolonged_consolidation"] = True
+                    else:
+                        active_primary_count += 1
+
+            effective_desk_slots = active_primary_count + (active_runner_count * 0.25) + (prolonged_consol_count * 0.25)
 
             if max_slots <= 0 or active_primary_count >= max_slots or effective_desk_slots >= (max_slots + 0.50):
                 # Check for stagnant runner recycling if incoming signal is Grade A+
@@ -1730,6 +1753,8 @@ class PaperTradingBot:
 
                 if not getattr(self, "enable_signal_expiry", False):
                     hit_expiry = False
+                    if elapsed_secs >= (7200 if any(x in norm_h for x in ["15M", "5M", "30M", "SCALP"]) else 28800) and abs(gain_pct) <= 0.85:
+                        pos["is_prolonged_consolidation"] = True
                 elif elapsed_secs < base_hold_secs:
                     hit_expiry = False
                 else:
@@ -2113,6 +2138,33 @@ class PaperTradingBot:
                 hit_tp2_final = is_tp2 and pos.get("tp1_hit") and not has_tp3
                 hit_tp1_final = is_tp1 and (not has_multi_tp or policy == "SINGLE_TARGET_TP1")
                 hit_tp = hit_tp3 or hit_tp2_final or hit_tp1_final
+
+                # Microstructure Simultaneous Breach Resolution:
+                if hit_tp and hit_sl:
+                    try:
+                        from app.quant_v16.microstructure_resolver import MicrostructureResolver
+                        now_ms = int(time.time() * 1000)
+                        start_ms = now_ms - (15 * 60 * 1000)
+                        micro_res = MicrostructureResolver.resolve_path(
+                            symbol=sym,
+                            direction=direction,
+                            entry_p=entry_p,
+                            tp1_p=tp1_p,
+                            sl_p=sl_p,
+                            start_ts_ms=start_ms,
+                            end_ts_ms=now_ms,
+                            candle_open=entry_p,
+                            candle_close=curr_p
+                        )
+                        if micro_res.get("outcome") == "WON_TP1":
+                            hit_sl = False
+                        else:
+                            hit_tp = False
+                            hit_tp1_final = False
+                            hit_tp2_final = False
+                            hit_tp3 = False
+                    except Exception:
+                        pass
 
                 hit_order_book_void_exit = is_void and is_emergency_liq
 

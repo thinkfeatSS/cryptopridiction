@@ -5651,7 +5651,29 @@ class SignalAuditTracker:
 
                 is_be_locked = bool(is_tp1_locked or is_tp2_locked or is_tier0_locked)
 
-                # 1. Strict Adverse SL Precedence: Unlocked initial trade touching SL must exit as LOST_SL
+                # 1. Microstructure Resolution for Simultaneous TP1 and SL Breaches:
+                if is_hit_sl and (is_hit_tp1 or is_hit_tp2 or is_hit_tp3):
+                    try:
+                        from app.quant_v16.microstructure_resolver import MicrostructureResolver
+                        now_ms = int(time.time() * 1000)
+                        start_ms = now_ms - (15 * 60 * 1000)
+                        micro_res = MicrostructureResolver.resolve_path(
+                            symbol=sym,
+                            direction=direction,
+                            entry_p=entry_p,
+                            tp1_p=tp1_p,
+                            sl_p=sl_p,
+                            start_ts_ms=start_ms,
+                            end_ts_ms=now_ms,
+                            candle_open=entry_p,
+                            candle_close=curr_p
+                        )
+                        if micro_res.get("outcome") == "WON_TP1":
+                            is_hit_sl = False
+                    except Exception:
+                        pass
+
+                # Strict Adverse SL Precedence: Unlocked initial trade touching SL must exit as LOST_SL
                 if is_hit_sl and not is_be_locked:
                     r['status'] = "LOST_SL"
                     r['exit_price'] = format_precision_price(sl_p)

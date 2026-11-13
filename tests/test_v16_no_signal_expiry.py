@@ -333,5 +333,133 @@ class TestV16NoSignalExpiry(unittest.TestCase):
         self.assertEqual(dyn["exit_price"], 2.9828)
         self.assertEqual(dyn["realized_return_pct"], 3.0)
 
+    def test_08_prolonged_open_signals_in_consolidation_do_not_expire_or_choke_desk(self):
+        """Prolonged open signals in range-bound chop remain active indefinitely and do not starve new incoming setups."""
+        bot = PaperTradingBot(ledger_file=self.ledger_file)
+        self.assertFalse(bot.enable_signal_expiry)
+
+        # 5 existing scalp positions open for 5 hours in flat consolidation (abs(pnl) <= 0.50%)
+        opened_ts = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        desk_positions = []
+        valid_coins = ["ADA/USDT", "DOT/USDT", "AVAX/USDT", "LINK/USDT", "NEAR/USDT"]
+        for i, sym in enumerate(valid_coins):
+            desk_positions.append({
+                "trade_id": f"SCALP_CHOP_{i}",
+                "symbol": sym,
+                "desk": "scalp",
+                "direction": "LONG",
+                "horizon": "15M",
+                "signal_horizon": "15M",
+                "position_size_usd": 50.0,
+                "entry_price": 10.0,
+                "current_price": 10.02, # +0.20% flat consolidation
+                "unrealized_pnl_pct": 0.20,
+                "sl_price": 9.50,
+                "tp1_price": 11.0,
+                "status": "OPEN",
+                "opened_at_utc": opened_ts,
+                "opened_at": opened_ts
+            })
+        bot.data["open_positions"] = desk_positions
+
+        # 1. On tick: none of the 5 prolonged positions should expire
+        bot.on_tick(live_prices={sym: 10.02 for sym in valid_coins})
+        self.assertEqual(len(bot.data["open_positions"]), 5, "Prolonged range-bound positions must remain active")
+        for p in bot.data["open_positions"]:
+            self.assertEqual(p["status"], "OPEN")
+            self.assertTrue(p.get("is_prolonged_consolidation"), "Must be tagged as prolonged consolidation")
+
+        # 2. Admit incoming high-conviction Grade A+ setup
+        new_signal = {
+            "signal_id": "SOL_USDT_15M_FRESH_BREAKOUT",
+            "symbol": "SOL/USDT",
+            "direction": "LONG",
+            "horizon": "15M",
+            "desk": "scalp",
+            "quality_grade": "Grade A+",
+            "conviction": 90.0,
+            "ev_net": 1.25,
+            "entry_price": 150.0,
+            "optimal_entry_limit": 150.0,
+            "sl_price": 145.0,
+            "tp1_price": 160.0,
+            "strategy": "MOMENTUM_EXPANSION",
+            "is_trade_active": True,
+            "signal_status": "ACTIVE_SIGNAL"
+        }
+        admitted = bot.admit_signal(new_signal)
+        self.assertTrue(admitted, "Fresh Grade A+ signal must be admitted via prolonged fractional slot accounting")
+        self.assertEqual(len(bot.data["open_positions"]), 6, "Total positions must expand to include fresh signal")
+
+    def test_09_microstructure_volatility_simultaneous_breach_resolves_tp_first(self):
+        """Microstructure Volatility: Simultaneous 15M candle breach resolves chronologically via 1M sub-candles."""
+        from app.quant_v16.microstructure_resolver import MicrostructureResolver
+
+        # Scenario A: In a volatile 15M bar, 1M sub-candles show price reached TP1 at minute 2 before dropping to SL at minute 10
+        sub_candles_tp_first = [
+            [1000, 100.0, 101.0, 99.5, 100.5, 50],
+            [2000, 100.5, 104.5, 100.2, 104.0, 150], # Touched TP1 (104.0) at minute 2!
+            [3000, 104.0, 104.2, 103.5, 103.8, 40],
+            [4000, 103.8, 103.9, 98.0, 98.2, 300]   # Breached SL (99.0) at minute 4
+        ]
+        res_a = MicrostructureResolver.resolve_path(
+            symbol="BTC/USDT",
+            direction="LONG",
+            entry_p=100.0,
+            tp1_p=104.0,
+            sl_p=99.0,
+            sub_candles=sub_candles_tp_first
+        )
+        self.assertEqual(res_a["outcome"], "WON_TP1", "Must resolve as WON_TP1 when TP1 was reached chronologically first")
+        self.assertEqual(res_a["exit_price"], 104.0)
+
+        # Scenario B: 1M sub-candles show price reached SL first at minute 1
+        sub_candles_sl_first = [
+            [1000, 100.0, 100.2, 98.5, 98.8, 250],  # Breached SL (99.0) at minute 1
+            [2000, 99.0, 105.0, 98.9, 104.5, 500]   # Reached TP1 (104.0) later
+        ]
+        res_b = MicrostructureResolver.resolve_path(
+            symbol="BTC/USDT",
+            direction="LONG",
+            entry_p=100.0,
+            tp1_p=104.0,
+            sl_p=99.0,
+            sub_candles=sub_candles_sl_first
+        )
+        self.assertEqual(res_b["outcome"], "LOST_SL", "Must resolve as LOST_SL when SL was reached chronologically first")
+        self.assertEqual(res_b["exit_price"], 99.0)
+
+    def test_10_no_breakeven_in_any_case(self):
+        """Zero Breakeven Policy: Stop Loss remains fixed at structural SL under all pre-TP1 price moves."""
+        bot = PaperTradingBot(ledger_file=self.ledger_file)
+        self.assertFalse(bot.enable_breakeven_guard)
+
+        pos = {
+            "trade_id": "TEST_NO_BE_ANY_CASE",
+            "symbol": "ETH/USDT",
+            "desk": "scalp",
+            "direction": "LONG",
+            "horizon": "15M",
+            "entry_price": 3000.0,
+            "initial_sl_price": 2900.0,
+            "sl_price": 2900.0,
+            "tp1_price": 3200.0,
+            "position_size_usd": 100.0,
+            "status": "OPEN",
+            "opened_at_utc": datetime.now(timezone.utc).isoformat()
+        }
+        bot.data["open_positions"] = [pos]
+
+        # Price pumps +1.50% to $3045 (previously would have triggered micro-guard or soft BE)
+        bot.on_tick(live_prices={"ETH/USDT": 3045.0})
+        self.assertEqual(bot.data["open_positions"][0]["sl_price"], 2900.0, "SL must NOT move from initial structural SL")
+        self.assertFalse(bot.data["open_positions"][0].get("is_breakeven_locked"))
+
+        # Price pulls back to $2995 (below entry)
+        bot.on_tick(live_prices={"ETH/USDT": 2995.0})
+        self.assertEqual(len(bot.data["open_positions"]), 1, "Position must NOT be closed at breakeven")
+        self.assertEqual(bot.data["open_positions"][0]["status"], "OPEN")
+        self.assertEqual(len(bot.data.get("closed_trades", [])), 0)
+
 if __name__ == "__main__":
     unittest.main()
