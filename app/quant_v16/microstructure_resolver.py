@@ -140,24 +140,15 @@ class MicrostructureResolver:
                                 "confidence": 0.99
                             }
                         elif hit_tp and hit_sl:
-                            # Ultra-acute intra-minute volatility: examine 1M bar body vector
-                            if b_open >= entry_p and b_close >= b_open:
-                                # Opened above entry and closed bullish green: impulse pushed high
-                                return {
-                                    "outcome": "WON_TP1",
-                                    "exit_price": tp1_p,
-                                    "resolution_method": "1M_MOMENTUM_VECTOR",
-                                    "timestamp_ms": b_ts,
-                                    "confidence": 0.85
-                                }
-                            else:
-                                return {
-                                    "outcome": "LOST_SL",
-                                    "exit_price": sl_p,
-                                    "resolution_method": "1M_MOMENTUM_VECTOR",
-                                    "timestamp_ms": b_ts,
-                                    "confidence": 0.85
-                                }
+                            # Black-swan liquidation cascade: Both TP1 and SL breached within the exact same sub-candle.
+                            # System enforces the conservative mathematical invariant that SL takes deterministic precedence.
+                            return {
+                                "outcome": "LOST_SL",
+                                "exit_price": sl_p,
+                                "resolution_method": "CONSERVATIVE_CASCADE_SL_PRECEDENCE",
+                                "timestamp_ms": b_ts,
+                                "confidence": 0.95
+                            }
                     elif dirn == "SHORT":
                         hit_tp = b_low <= tp1_p
                         hit_sl = b_high >= sl_p
@@ -181,23 +172,15 @@ class MicrostructureResolver:
                                 "confidence": 0.99
                             }
                         elif hit_tp and hit_sl:
-                            if b_open <= entry_p and b_close <= b_open:
-                                # Opened below entry and closed bearish red: impulse plunged down to TP
-                                return {
-                                    "outcome": "WON_TP1",
-                                    "exit_price": tp1_p,
-                                    "resolution_method": "1M_MOMENTUM_VECTOR",
-                                    "timestamp_ms": b_ts,
-                                    "confidence": 0.85
-                                }
-                            else:
-                                return {
-                                    "outcome": "LOST_SL",
-                                    "exit_price": sl_p,
-                                    "resolution_method": "1M_MOMENTUM_VECTOR",
-                                    "timestamp_ms": b_ts,
-                                    "confidence": 0.85
-                                }
+                            # Black-swan liquidation cascade: Both TP1 and SL breached within the exact same sub-candle.
+                            # System enforces the conservative mathematical invariant that SL takes deterministic precedence.
+                            return {
+                                "outcome": "LOST_SL",
+                                "exit_price": sl_p,
+                                "resolution_method": "CONSERVATIVE_CASCADE_SL_PRECEDENCE",
+                                "timestamp_ms": b_ts,
+                                "confidence": 0.95
+                            }
                 except Exception:
                     continue
 

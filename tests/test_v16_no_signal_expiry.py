@@ -461,5 +461,63 @@ class TestV16NoSignalExpiry(unittest.TestCase):
         self.assertEqual(bot.data["open_positions"][0]["status"], "OPEN")
         self.assertEqual(len(bot.data.get("closed_trades", [])), 0)
 
+    def test_11_microstructure_volatility_liquidation_cascade_sl_precedence(self):
+        """Microstructure Volatility: In black-swan liquidation cascades where both TP1 and SL are breached in the same bar, SL takes deterministic precedence."""
+        from app.quant_v16.microstructure_resolver import MicrostructureResolver
+
+        # Scenario: Extreme volatility bar where both TP1 (104.0) and SL (99.0) are touched in the same minute
+        cascade_sub_candles = [
+            [1000, 100.0, 104.5, 98.5, 99.2, 800], # Both breached within the exact same 1M candle
+        ]
+        res = MicrostructureResolver.resolve_path(
+            symbol="BTC/USDT",
+            direction="LONG",
+            entry_p=100.0,
+            tp1_p=104.0,
+            sl_p=99.0,
+            sub_candles=cascade_sub_candles
+        )
+        self.assertEqual(res["outcome"], "LOST_SL", "Must enforce conservative mathematical invariant: SL takes deterministic precedence")
+        self.assertEqual(res["exit_price"], 99.0)
+
+    def test_12_api_issues_wait_for_refresh_before_evaluation(self):
+        """API Issues: When live feeds or tickers are unavailable, system waits for data to refresh without premature mutation."""
+        class MockSignal:
+            def __init__(self):
+                self.signal_id = "SIG_API_WAIT_01"
+                self.symbol = "MOCK_TOKEN/USDT"
+                self.horizon = "15M"
+                self.direction = "LONG"
+                self.entry_price = 3000.0
+                self.sl_price = 2900.0
+                self.tp1_price = 3200.0
+                self.tp2_price = 3300.0
+                self.tp3_price = 3400.0
+                self.status = "ACTIVE"
+                self.outcome_label = "ACTIVE"
+                self.peak_price_seen = 3000.0
+                self.trough_price_seen = 3000.0
+                self.created_at = datetime.now(timezone.utc) - timedelta(hours=4)
+                self.date_utc = self.created_at.strftime("%Y-%m-%d")
+                self.time_utc = self.created_at.strftime("%H:%M:%S UTC")
+
+        sig = MockSignal()
+        ss = SignalService()
+
+        # 1. Feed is empty due to API rate limit / outage: evaluation must safely skip and wait for refresh
+        updated = ss.evaluate_active_signals([sig], live_prices={})
+        self.assertFalse(updated, "Must return False and not mutate signals when live prices feed is empty")
+        self.assertEqual(sig.status, "ACTIVE", "Signal status must remain intact while waiting for refresh")
+
+        # 2. Feed contains prices for other coins but MOCK_TOKEN/USDT is missing (asset API issue)
+        updated_2 = ss.evaluate_active_signals([sig], live_prices={"SOL/USDT": 150.0})
+        self.assertFalse(updated_2, "Must skip evaluation for missing asset and wait for data refresh")
+        self.assertEqual(sig.status, "ACTIVE", "Signal status must remain intact while waiting for refresh")
+
+        # 3. Data refreshes with valid MOCK_TOKEN/USDT price touching TP1 -> evaluated cleanly
+        updated_3 = ss.evaluate_active_signals([sig], live_prices={"MOCK_TOKEN/USDT": 3210.0})
+        self.assertTrue(updated_3, "Evaluates signal once data refreshes")
+        self.assertIn(sig.status, ["TP1_LOCKED_BREAKEVEN", "WON_TP1"])
+
 if __name__ == "__main__":
     unittest.main()

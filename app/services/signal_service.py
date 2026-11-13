@@ -499,10 +499,9 @@ def resolve_asset_price(symbol: str, signal: Optional[Any] = None, live_prices: 
     except Exception:
         pass
 
-    # Tier 6: Baseline Entry Price (absolute last resort if 0 tick history ever existed)
-    if signal and getattr(signal, "entry_price", None):
-        return float(signal.entry_price)
-
+    # Tier 6: Unresolved price (API issues or missing feed)
+    # If no live market price could be reached from any feed or telemetry, return 0.0
+    # to indicate that data is unrefreshed, allowing signal evaluators to safely wait for data refresh.
     return 0.0
 
 def clear_forecast_cache():
@@ -881,6 +880,7 @@ class SignalService:
 
             live_prices = fetch_live_binance_prices(max_age_seconds=5.0)
             if not live_prices:
+                print("[SIGNAL SERVICE ⏸️] Live prices feed unavailable due to API issue or rate limit. Waiting for data to refresh before evaluating signals.")
                 return
 
             now_utc = datetime.now(timezone.utc)
@@ -1093,7 +1093,9 @@ class SignalService:
 
                 curr_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
                 if not curr_p or curr_p <= 0:
-                    curr_p = safe_float(s.entry_price, 0.0)
+                    # In case of API issues / missing ticker for this asset:
+                    # Wait for data to refresh on subsequent ticks before evaluating.
+                    continue
 
                 entry_p = safe_float(s.entry_price or curr_p, curr_p)
                 tp1_p = safe_float(s.tp1_price or entry_p, entry_p)
@@ -1602,6 +1604,8 @@ class SignalService:
 
         if live_prices is None:
             live_prices = fetch_live_binance_prices()
+        if not live_prices:
+            return False
         if now_utc is None:
             now_utc = datetime.now(timezone.utc)
         now_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -1619,14 +1623,16 @@ class SignalService:
 
             curr_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
             if not curr_p or curr_p <= 0:
-                curr_p = safe_float(s.entry_price, 0.0)
+                # In case of API issues / missing ticker for this asset:
+                # Wait for data to refresh on subsequent ticks before evaluating.
+                continue
 
-            entry_p = safe_float(s.entry_price or curr_p, curr_p)
-            tp1_p = safe_float(s.tp1_price or entry_p, entry_p)
-            tp2_p = safe_float(s.tp2_price or entry_p, entry_p)
-            tp3_p = safe_float(s.tp3_price or entry_p, entry_p)
-            sl_p = safe_float(s.sl_price or entry_p, entry_p)
-            direction = str(s.direction or "LONG").upper()
+            entry_p = safe_float(getattr(s, "entry_price", None) or curr_p, curr_p)
+            tp1_p = safe_float(getattr(s, "tp1_price", None) or entry_p, entry_p)
+            tp2_p = safe_float(getattr(s, "tp2_price", None) or entry_p, entry_p)
+            tp3_p = safe_float(getattr(s, "tp3_price", None) or entry_p, entry_p)
+            sl_p = safe_float(getattr(s, "sl_price", None) or entry_p, entry_p)
+            direction = str(getattr(s, "direction", "LONG")).upper()
 
             # Extract authoritative creation timestamp for post-entry time gating
             sig_created_ts = None
