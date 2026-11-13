@@ -1313,13 +1313,14 @@ class SignalGenerationSystem:
             from app.services.institutional_intelligence_service import institutional_intelligence_service
             clean_sym = symbol.split("/")[0].split(":")[0].upper()
             
-            # 1. Hyperliquid Whale Wall alignment across ALL coins
-            hl_radar = institutional_intelligence_service.get_hyperliquid_whale_radar(clean_sym)
-            hl_bias = hl_radar.get("whale_bias", "")
-            if direction == "LONG" and hl_bias in ["BULLISH_WHALE_BID_ABSORPTION", "BULLISH_AGGREGATE_BID_PRESSURE"]:
-                inst_conviction_bonus += 5.0
-            elif direction == "SHORT" and hl_bias in ["BEARISH_WHALE_ASK_RESISTANCE", "BEARISH_AGGREGATE_ASK_PRESSURE"]:
-                inst_conviction_bonus += 5.0
+            # 1. Hyperliquid Whale Wall alignment across ALL coins (only query depth when trade is not vetoed)
+            if not is_vetoed and not is_macro_ntz and direction in ["LONG", "SHORT"]:
+                hl_radar = institutional_intelligence_service.get_hyperliquid_whale_radar(clean_sym)
+                hl_bias = hl_radar.get("whale_bias", "")
+                if direction == "LONG" and hl_bias in ["BULLISH_WHALE_BID_ABSORPTION", "BULLISH_AGGREGATE_BID_PRESSURE"]:
+                    inst_conviction_bonus += 5.0
+                elif direction == "SHORT" and hl_bias in ["BEARISH_WHALE_ASK_RESISTANCE", "BEARISH_AGGREGATE_ASK_PRESSURE"]:
+                    inst_conviction_bonus += 5.0
 
             # 2. Spot ETF institutional momentum alignment
             if clean_sym in ["BTC", "ETH"]:

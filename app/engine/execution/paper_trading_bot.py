@@ -3270,6 +3270,8 @@ class PaperTradingBot:
             print(f"[PAPER BOT [HEARTBEAT]] Standalone 24/7 Tick Watcher Active (Sub-second polling every {interval_seconds}s)")
             current_interval = interval_seconds
             consecutive_partitions = 0
+            _cached_depths = {}
+            _cached_cvds = {}
             while self._running:
                 try:
                     if self.data["open_positions"]:
@@ -3298,23 +3300,34 @@ class PaperTradingBot:
                                         if p.get("is_limit_resting") or p.get("status") == "RESTING_LIMIT":
                                             resting_syms.add(p.get("symbol"))
 
+                                now_ts = time.time()
                                 if depth_fetch_fn and resting_syms:
                                     for s in resting_syms:
-                                        try:
-                                            d = depth_fetch_fn(s)
-                                            if d:
-                                                depths[s] = d
-                                        except Exception:
-                                            pass
+                                        cached_d, cached_d_ts = _cached_depths.get(s, (None, 0.0))
+                                        if cached_d is not None and (now_ts - cached_d_ts) < 5.0:
+                                            depths[s] = cached_d
+                                        else:
+                                            try:
+                                                d = depth_fetch_fn(s)
+                                                if d:
+                                                    depths[s] = d
+                                                    _cached_depths[s] = (d, now_ts)
+                                            except Exception:
+                                                pass
 
                                 if cvd_fetch_fn and resting_syms:
                                     for s in resting_syms:
-                                        try:
-                                            c = cvd_fetch_fn(s)
-                                            if c:
-                                                cvds[s] = c
-                                        except Exception:
-                                            pass
+                                        cached_c, cached_c_ts = _cached_cvds.get(s, (None, 0.0))
+                                        if cached_c is not None and (now_ts - cached_c_ts) < 5.0:
+                                            cvds[s] = cached_c
+                                        else:
+                                            try:
+                                                c = cvd_fetch_fn(s)
+                                                if c:
+                                                    cvds[s] = c
+                                                    _cached_cvds[s] = (c, now_ts)
+                                            except Exception:
+                                                pass
 
                                 self.on_tick(
                                     prices,
