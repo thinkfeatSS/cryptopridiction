@@ -1624,6 +1624,37 @@ class UnifiedCryptoEngine:
                         )
 
                         if is_pending and sym_r and hz_r:
+                            pk_seen = safe_float(row.get("peak_price_seen"), 0.0)
+                            tr_seen = safe_float(row.get("trough_price_seen"), 0.0)
+                            entry_val = safe_float(row.get("entry_price"), 0.0)
+                            tp1_val = safe_float(row.get("tp1_price"), 0.0)
+                            sl_val = safe_float(row.get("sl_price") or row.get("sl_original"), 0.0)
+                            dir_val = str(row.get("direction", "LONG")).upper()
+
+                            # Reconcile completed trades directly from recorded price extremes
+                            hit_tp1_csv = (dir_val == "LONG" and pk_seen >= tp1_val > 0) or (dir_val == "SHORT" and 0 < tr_seen <= tp1_val)
+                            hit_sl_csv = (dir_val == "LONG" and 0 < tr_seen <= sl_val) or (dir_val == "SHORT" and pk_seen >= sl_val > 0)
+
+                            if hit_tp1_csv:
+                                gain_val = round(abs(tp1_val - entry_val) / max(1e-9, entry_val) * 100.0, 2)
+                                row["status"] = "WON_TP1"
+                                row["outcome_label"] = f"🟢 WON (TP1 HIT +{gain_val:.2f}%)"
+                                row["exit_price"] = str(round(tp1_val, 6))
+                                row["realized_return_pct"] = f"{gain_val:+.2f}%"
+                                row["evaluated_at_utc"] = time_str
+                                csv_needs_update = True
+                                is_pending = False
+                            elif hit_sl_csv:
+                                loss_val = round(-abs(entry_val - sl_val) / max(1e-9, entry_val) * 100.0, 2)
+                                row["status"] = "LOST_SL"
+                                row["outcome_label"] = "🔴 LOST (SL HIT)"
+                                row["exit_price"] = str(round(sl_val, 6))
+                                row["realized_return_pct"] = f"{loss_val:+.2f}%"
+                                row["evaluated_at_utc"] = time_str
+                                csv_needs_update = True
+                                is_pending = False
+
+                        if is_pending and sym_r and hz_r:
                             date_u = str(row.get("date_utc", ""))
                             time_u = str(row.get("time_utc", "")).replace(" UTC", "").strip()
                             enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))

@@ -363,7 +363,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 "structural_risk_reward": evo.structural_rr,
                 "status": st,
                 "outcome_label": out,
-                "updated_at_utc": r.get("evaluated_at_utc") or "2026-10-24 02:00:00 UTC",
+                "updated_at_utc": r.get("evaluated_at_utc") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             }
             modified = True
 
@@ -415,7 +415,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
             "symbol": sym,
             "direction": dirn,
             "horizon": hz,
-            "signal_generated_at": fsig.get("signal_generated_at") or fsig.get("server_prediction_time") or "2026-10-24 02:00:00 UTC",
+            "signal_generated_at": fsig.get("signal_generated_at") or fsig.get("server_prediction_time") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "entry_price_initial": entry,
             "tp1_initial": tp1,
             "tp2_initial": tp2,
@@ -569,6 +569,17 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
     open_positions = ledger_data.get("open_positions") or []
     open_pos_symbols = {p.get("symbol") for p in open_positions if p.get("symbol")}
     open_trade_ids = {p.get("trade_id") for p in open_positions if p.get("trade_id")}
+    closed_trades = (ledger_data.get("closed_trades_history") or []) + (ledger_data.get("closed_trades") or [])
+    closed_paper_map = {}
+    for ct in closed_trades:
+        ct_sid = ct.get("trade_id") or ct.get("signal_id")
+        if ct_sid:
+            closed_paper_map[ct_sid] = ct
+        ct_sym = str(ct.get("symbol", "")).strip().upper()
+        ct_hz = str(ct.get("signal_horizon") or ct.get("horizon") or "15M").strip().upper()
+        norm_hz = "15M" if "15" in ct_hz else ("24H" if any(x in ct_hz for x in ["24", "1D", "SWING", "MACRO"]) else "1H")
+        closed_paper_map[(ct_sym, norm_hz)] = ct
+        closed_paper_map[(ct_sym.replace("/", "").replace(":USDT", ""), norm_hz)] = ct
 
     for pos in open_positions:
         sym = pos.get("symbol", "")
@@ -605,7 +616,7 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
             "symbol": sym,
             "direction": dirn,
             "horizon": hz,
-            "signal_generated_at": pos.get("opened_at") or pos.get("opened_at_utc") or "2026-10-25 18:00:00 UTC",
+            "signal_generated_at": pos.get("opened_at") or pos.get("opened_at_utc") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "entry_price_initial": entry,
             "tp1_initial": tp1,
             "tp2_initial": tp2,
@@ -670,6 +681,13 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
 
     # 2. Reconcile stale/phantom/duplicate signals to ensure exact alignment with Scanner Matrix & Portfolio
     now_utc = datetime.now(timezone.utc)
+    live_prices = {}
+    try:
+        from app.services.signal_service import fetch_live_binance_prices, fetch_intra_candle_extremes, evaluate_chronological_candle_outcome
+        live_prices = fetch_live_binance_prices(max_age_seconds=10.0) or {}
+    except Exception:
+        pass
+
     for sid, imm in list(immut_data.items()):
         sym = imm.get("symbol", "")
         # Remove delisted, invalid, test artifacts, or obsolete synthetic tokens immediately
@@ -686,25 +704,127 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
 
         enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
 
-        # Authoritative Healing for Prematurely Expired or Breakeven-Guarded Signals:
-        if st in ["EXPIRED_HORIZON", "BREAKEVEN_GUARD", "STOP_LOSS_BREAKEVEN", "EXPIRED_BREAKEVEN", "LOST_EXP", "WON_EXP_PROFIT"] or "EXPIRED" in out:
+        # Step A: Check Closed Trades from Paper Trading Ledger for exact execution parity
+        norm_hz = "15M" if "15" in str(imm.get("horizon", "15M")) else ("24H" if any(x in str(imm.get("horizon", "")) for x in ["24", "1D", "SWING", "MACRO"]) else "1H")
+        ct_match = closed_paper_map.get(sid) or closed_paper_map.get((sym, norm_hz)) or closed_paper_map.get((sym.replace("/", "").replace(":USDT", ""), norm_hz))
+        if ct_match:
+            ct_st = str(ct_match.get("status") or ct_match.get("execution_status") or "").upper()
+            ct_out = str(ct_match.get("outcome_label") or ct_match.get("status") or "").upper()
+            ct_exit = safe_float(ct_match.get("exit_price"), 0.0)
+            ct_pnl = safe_float(ct_match.get("realized_pnl_pct") or ct_match.get("net_pnl_pct") or ct_match.get("pnl_pct"), 0.0)
+            if any(term in ct_st for term in ["WON", "LOST", "STOP", "TP", "CANCEL"]) or any(term in ct_out for term in ["WON", "LOST", "STOPPED", "TP"]):
+                if "WON" in ct_st or "TP" in ct_st or "WON" in ct_out:
+                    dyn["status"] = "WON_TP1"
+                    dyn["outcome_label"] = f"🟢 WON (TP1 HIT +{abs(ct_pnl):.2f}%)" if ct_pnl > 0 else "🟢 WON (TP1 HIT)"
+                    imm["status"] = "WON_TP1"
+                    dyn["is_tp1_locked"] = True
+                elif "LOST" in ct_st or "STOP" in ct_st or "LOST" in ct_out:
+                    dyn["status"] = "LOST_SL"
+                    dyn["outcome_label"] = "🔴 LOST (SL HIT)"
+                    imm["status"] = "LOST_SL"
+                if ct_exit > 0.0:
+                    dyn["exit_price"] = ct_exit
+                dyn["realized_return_pct"] = ct_pnl
+                dyn["updated_at_utc"] = ct_match.get("closed_at_utc") or now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+                modified = True
+                continue
+
+        # Step B: Check Open Positions from Paper Trading Ledger
+        matching_p = next((p for p in open_positions if p.get("symbol") == sym), None)
+        if matching_p and sid == matching_p.get("trade_id"):
+            dyn["status"] = "ACTIVE"
+            dyn["outcome_label"] = "RUNNING 🚀"
+            imm["status"] = "ACTIVE"
+            continue
+
+        # Step C: Dynamic Evaluation Pass for active, running, or previously-expired signals:
+        # Evaluates all active signals and heals any prematurely expired/breakeven-guarded signals
+        should_eval = (
+            not is_term
+            or st in ["ACTIVE", "RUNNING", "PENDING_EVALUATION", "EXPIRED_HORIZON", "BREAKEVEN_GUARD", "STOP_LOSS_BREAKEVEN", "EXPIRED_BREAKEVEN", "LOST_EXP", "WON_EXP_PROFIT"]
+            or "EXPIRED" in out
+        )
+
+        if should_eval:
             entry_v = safe_float(imm.get("entry_price_initial"), 0.0)
             tp1_v = safe_float(imm.get("tp1_initial"), 0.0)
             sl_v = safe_float(imm.get("sl_initial"), 0.0)
             dir_v = str(imm.get("direction", "LONG")).upper()
-            pk_v = safe_float(dyn.get("peak_price_seen") or imm.get("peak_price_seen"), 0.0)
-            tr_v = safe_float(dyn.get("trough_price_seen") or imm.get("trough_price_seen"), 0.0)
+            hz_v = str(imm.get("horizon", "15M")).upper()
+
+            gen_at_str = imm.get("signal_generated_at", "")
+            gen_ts = None
+            try:
+                clean_ts = gen_at_str.replace(" UTC", "").replace("Z", "+00:00")
+                if "T" in clean_ts:
+                    dt = datetime.fromisoformat(clean_ts)
+                else:
+                    dt = datetime.strptime(clean_ts[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                gen_ts = dt.timestamp()
+            except Exception:
+                pass
+
+            # Fetch intra-candle extremes strictly post-entry
+            intra_h, intra_l = 0.0, 0.0
+            try:
+                from app.services.signal_service import fetch_intra_candle_extremes, evaluate_chronological_candle_outcome
+                intra_h, intra_l = fetch_intra_candle_extremes(sym, hz_v, since_ts=gen_ts)
+            except Exception:
+                pass
+
+            curr_v = safe_float(live_prices.get(sym) or live_prices.get(sym.replace("/", "").replace(":USDT", "")), 0.0)
+            if curr_v <= 0.0:
+                curr_v = safe_float(dyn.get("current_price"), entry_v)
+            if curr_v <= 0.0:
+                curr_v = entry_v
+
+            pk_v = safe_float(dyn.get("peak_price_seen") or imm.get("peak_price_seen"), entry_v)
+            tr_v = safe_float(dyn.get("trough_price_seen") or imm.get("trough_price_seen"), entry_v)
             mfe_v = safe_float(dyn.get("mfe_pct") or imm.get("mfe_pct"), 0.0)
-            curr_v = safe_float(dyn.get("current_price"), entry_v)
+
             if pk_v <= 0.0 and mfe_v > 0.0 and dir_v == "LONG" and entry_v > 0.0:
                 pk_v = entry_v * (1.0 + mfe_v / 100.0)
             if tr_v <= 0.0 and mfe_v > 0.0 and dir_v == "SHORT" and entry_v > 0.0:
                 tr_v = entry_v * (1.0 - mfe_v / 100.0)
 
+            if intra_h > 0.0:
+                pk_v = max(pk_v, intra_h)
+            if intra_l > 0.0:
+                tr_v = min(tr_v, intra_l) if tr_v > 0.0 else intra_l
+            pk_v = max(pk_v, curr_v)
+            tr_v = min(tr_v, curr_v) if tr_v > 0.0 else curr_v
+
+            dyn["peak_price_seen"] = pk_v
+            dyn["trough_price_seen"] = tr_v
+            dyn["current_price"] = curr_v
+
             hit_tp1_real = (dir_v == "LONG" and (pk_v >= tp1_v or curr_v >= tp1_v)) or (dir_v == "SHORT" and (0 < tr_v <= tp1_v or 0 < curr_v <= tp1_v))
             hit_sl_real = (dir_v == "LONG" and (0 < tr_v <= sl_v or 0 < curr_v <= sl_v)) or (dir_v == "SHORT" and (pk_v >= sl_v or curr_v >= sl_v))
 
-            if hit_tp1_real:
+            if hit_tp1_real and hit_sl_real and gen_ts:
+                # Both breached across the lifecycle: resolve using chronological candle sequence!
+                try:
+                    from app.services.signal_service import evaluate_chronological_candle_outcome
+                    res_st, res_ex, res_ret, res_pk, res_tr, res_lab = evaluate_chronological_candle_outcome(
+                        sym, dir_v, entry_v, tp1_v, sl_v, since_ts=gen_ts, horizon=hz_v, current_spot_price=curr_v
+                    )
+                    dyn["status"] = res_st
+                    dyn["outcome_label"] = res_lab
+                    imm["status"] = res_st
+                    dyn["exit_price"] = res_ex
+                    dyn["realized_return_pct"] = res_ret
+                    if res_st == "WON_TP1":
+                        dyn["is_tp1_locked"] = True
+                    modified = True
+                except Exception:
+                    loss_val = round(-abs(entry_v - sl_v) / max(1e-9, entry_v) * 100.0, 2)
+                    dyn["status"] = "LOST_SL"
+                    dyn["outcome_label"] = "🔴 LOST (SL HIT - CASCADE)"
+                    imm["status"] = "LOST_SL"
+                    dyn["exit_price"] = sl_v
+                    dyn["realized_return_pct"] = loss_val
+                    modified = True
+            elif hit_tp1_real:
                 gain_val = round(abs(tp1_v - entry_v) / max(1e-9, entry_v) * 100.0, 2)
                 dyn["status"] = "WON_TP1"
                 dyn["outcome_label"] = f"🟢 WON (TP1 HIT +{gain_val:.2f}%)"
@@ -728,56 +848,20 @@ def _get_v16_store() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 imm["status"] = "ACTIVE"
                 dyn["exit_price"] = None
                 dyn["realized_return_pct"] = None
+                unrealized = ((curr_v - entry_v) / max(1e-9, entry_v) * 100.0) if dir_v == "LONG" else ((entry_v - curr_v) / max(1e-9, entry_v) * 100.0)
+                dyn["unrealized_net_pnl_pct"] = round(unrealized, 2)
                 modified = True
-
-        if not is_term:
-            matching_p = next((p for p in open_positions if p.get("symbol") == sym), None)
-
-            # Case A: Symbol currently has an active running position in paper trading
-            if matching_p:
-                if sid == matching_p.get("trade_id"):
-                    # This is the canonical running trade
-                    dyn["status"] = "ACTIVE"
-                    dyn["outcome_label"] = "RUNNING 🚀"
-                    imm["status"] = "ACTIVE"
-                    continue
-                else:
-                    # Older scan signals or duplicates for this symbol
-                    if enable_expiry:
-                        dyn["status"] = "EXPIRED_HORIZON"
-                        dyn["outcome_label"] = "⏱️ EXPIRED"
-                        imm["status"] = "EXPIRED_HORIZON"
-                        dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-                        modified = True
-                        continue
-
-            # Case B: Symbol has no active open trade in paper trading
             else:
-                hz = str(imm.get("horizon", "1H")).upper()
-                max_hold = 7200 if "15M" in hz else (172800 if any(x in hz for x in ["24H", "1D", "SWING", "MACRO"]) else (43200 if "4H" in hz else 21600))
-
-                gen_at_str = imm.get("signal_generated_at", "")
+                max_hold = 7200 if "15M" in hz_v else (172800 if any(x in hz_v for x in ["24H", "1D", "SWING", "MACRO"]) else (43200 if "4H" in hz_v else 21600))
                 is_stale = False
-                try:
-                    clean_ts = gen_at_str.replace(" UTC", "").replace("Z", "+00:00")
-                    if "T" in clean_ts:
-                        dt = datetime.fromisoformat(clean_ts)
-                    else:
-                        dt = datetime.strptime(clean_ts[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-                    age = (now_utc - dt).total_seconds()
-                    if age > max_hold:
-                        is_stale = True
-                except Exception:
-                    if gen_at_str and not gen_at_str.startswith(now_utc.strftime("%Y-%m-%d")):
-                        is_stale = True
-
-                if enable_expiry and is_stale:
+                if gen_ts and (now_utc.timestamp() - gen_ts) > max_hold:
+                    is_stale = True
+                if is_stale:
                     dyn["status"] = "EXPIRED_HORIZON"
                     dyn["outcome_label"] = "⏱️ EXPIRED"
                     imm["status"] = "EXPIRED_HORIZON"
                     dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-                    exit_p = float(dyn.get("current_price") or imm.get("entry_price_initial") or 0.0)
-                    dyn["exit_price"] = exit_p
+                    dyn["exit_price"] = curr_v
                     dyn["realized_return_pct"] = 0.0
                     modified = True
 

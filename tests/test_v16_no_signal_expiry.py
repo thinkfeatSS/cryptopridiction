@@ -2,6 +2,8 @@ import unittest
 import os
 import tempfile
 import shutil
+import time
+import json
 from datetime import datetime, timezone, timedelta
 from app.services.signal_service import SignalService
 from app.engine.execution.paper_trading_bot import PaperTradingBot
@@ -518,6 +520,107 @@ class TestV16NoSignalExpiry(unittest.TestCase):
         updated_3 = ss.evaluate_active_signals([sig], live_prices={"MOCK_TOKEN/USDT": 3210.0})
         self.assertTrue(updated_3, "Evaluates signal once data refreshes")
         self.assertIn(sig.status, ["TP1_LOCKED_BREAKEVEN", "WON_TP1"])
+
+    def test_13_historical_signal_tp_resolution_from_inception(self):
+        """Historical signals touching TP1 are evaluated and resolved from inception without getting stuck in ACTIVE."""
+        from app.services.signal_service import evaluate_chronological_candle_outcome, _INTRA_KLINES_CACHE, _INTRA_KLINES_TS
+
+        # Setup mock klines in cache representing historical candles since signal inception
+        raw_sym = "FETUSDT"
+        since_ts = time.time() - 1800.0  # 30 minutes ago (within 14h -> 1m interval)
+        start_ms = int((since_ts - 5.0) * 1000)
+        cache_key = f"{raw_sym}:1m:40:{start_ms}"
+
+        # 3 candles: candle 0 at entry, candle 1 drops to 0.1390 (<= TP1 0.142147), candle 2 bounces to 0.1475
+        mock_klines = [
+            [int(since_ts * 1000), 0.1470, 0.1475, 0.1460, 0.1465, 100.0],
+            [int((since_ts + 60) * 1000), 0.1465, 0.1468, 0.1390, 0.1400, 150.0],
+            [int((since_ts + 120) * 1000), 0.1400, 0.1475, 0.1398, 0.1472, 120.0],
+        ]
+        _INTRA_KLINES_CACHE[cache_key] = mock_klines
+        _INTRA_KLINES_TS[cache_key] = time.time()
+
+        res_status, exit_p, realized_ret, peak_p, trough_p, label = evaluate_chronological_candle_outcome(
+            symbol="FET/USDT",
+            direction="SHORT",
+            entry_p=0.147000,
+            tp1_p=0.142147,
+            sl_p=0.148764,
+            since_ts=since_ts,
+            horizon="15M",
+            current_spot_price=0.1472
+        )
+
+        self.assertEqual(res_status, "WON_TP1", "Signal dropping to 0.1390 must resolve to WON_TP1")
+        self.assertEqual(exit_p, 0.142147, "Exit price must be TP1 price")
+        self.assertAlmostEqual(realized_ret, 3.30, delta=0.1)
+        self.assertIn("WON (TP1 HIT", label)
+        self.assertLessEqual(trough_p, 0.1390)
+
+    def test_14_v16_store_active_signals_evaluation(self):
+        """_get_v16_store authoritatively evaluates ACTIVE signals against price history instead of leaving them stuck."""
+        from app.routers.v16_router import _get_v16_store
+        from app.services.signal_service import _INTRA_KLINES_CACHE, _INTRA_KLINES_TS
+        from app.config import settings
+
+        orig_export = settings.EXPORT_DIR
+        try:
+            settings.EXPORT_DIR = self.tmp_dir
+            sig_id = "SIG_FET_USDT_15M_HEAL_01"
+            raw_sym = "FETUSDT"
+            since_ts = time.time() - 3600.0
+            start_ms = int((since_ts - 5.0) * 1000)
+            cache_key = f"{raw_sym}:1m:70:{start_ms}"
+
+            # Seed mock klines where low touched TP1
+            _INTRA_KLINES_CACHE[cache_key] = [
+                [int(since_ts * 1000), 0.1470, 0.1472, 0.1465, 0.1468, 50.0],
+                [int((since_ts + 60) * 1000), 0.1468, 0.1470, 0.1390, 0.1410, 80.0],
+            ]
+            _INTRA_KLINES_TS[cache_key] = time.time()
+
+            immut_file = os.path.join(self.tmp_dir, "v16_immutable_signals.json")
+            dyn_file = os.path.join(self.tmp_dir, "v16_dynamic_states.json")
+
+            immut_store = {
+                sig_id: {
+                    "signal_id": sig_id,
+                    "symbol": "FET/USDT",
+                    "direction": "SHORT",
+                    "horizon": "15M",
+                    "signal_generated_at": datetime.fromtimestamp(since_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "entry_price_initial": 0.147000,
+                    "tp1_initial": 0.142147,
+                    "sl_initial": 0.148764,
+                    "status": "ACTIVE",
+                }
+            }
+            dyn_store = {
+                sig_id: {
+                    "signal_id": sig_id,
+                    "current_price": 0.145000,
+                    "status": "ACTIVE",
+                    "outcome_label": "RUNNING 🚀",
+                    "peak_price_seen": None,
+                    "trough_price_seen": 0.1390,
+                    "exit_price": None,
+                    "realized_return_pct": None,
+                }
+            }
+
+            with open(immut_file, "w", encoding="utf-8") as f:
+                json.dump(immut_store, f)
+            with open(dyn_file, "w", encoding="utf-8") as f:
+                json.dump(dyn_store, f)
+
+            imm_res, dyn_res = _get_v16_store()
+            self.assertIn(sig_id, dyn_res)
+            self.assertEqual(dyn_res[sig_id]["status"], "WON_TP1", "ACTIVE signal touching TP1 must resolve to WON_TP1")
+            self.assertEqual(dyn_res[sig_id]["exit_price"], 0.142147)
+            self.assertIn("WON", dyn_res[sig_id]["outcome_label"])
+        finally:
+            settings.EXPORT_DIR = orig_export
+
 
 if __name__ == "__main__":
     unittest.main()

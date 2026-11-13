@@ -152,7 +152,12 @@ def start_heartbeat_worker(engine, heartbeat_secs: int = 4, stop_event: threadin
                 # 2. Real-time audit tracker evaluation every 15s
                 now_t = time.time()
                 if (now_t - last_eval_ts) >= 15.0:
-                    engine.signal_tracker.evaluate_signals({})
+                    try:
+                        from app.services.signal_service import fetch_live_binance_prices
+                        live_p = fetch_live_binance_prices()
+                    except Exception:
+                        live_p = getattr(engine, "live_prices", {})
+                    engine.signal_tracker.evaluate_signals(live_p or {})
                     last_eval_ts = now_t
                     if HAS_DB_SYNC:
                         try:

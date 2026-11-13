@@ -341,24 +341,40 @@ def fetch_intra_candle_extremes(symbol: str, horizon: str = "15M", since_ts: Opt
         return (0.0, 0.0)
         
     norm_hz = "15M" if "15" in horizon else ("24H" if ("24" in horizon or "1D" in horizon) else "1H")
-    interval = "1m" if norm_hz == "15M" else ("5m" if norm_hz == "1H" else "1h")
-    bar_secs = 60 if interval == "1m" else (300 if interval == "5m" else 3600)
+    age_sec = max(0.0, (now_t - since_ts)) if since_ts else 0.0
+
+    if age_sec <= 14 * 3600:
+        interval = "1m" if norm_hz == "15M" else ("5m" if norm_hz == "1H" else "1h")
+        bar_secs = 60 if interval == "1m" else (300 if interval == "5m" else 3600)
+    elif age_sec <= 72 * 3600:
+        interval = "5m"
+        bar_secs = 300
+    elif age_sec <= 10 * 86400:
+        interval = "15m"
+        bar_secs = 900
+    else:
+        interval = "1h"
+        bar_secs = 3600
+
     base_limit = 15 if norm_hz == "15M" else 12
     if since_ts and now_t > since_ts:
-        needed = int((now_t - since_ts) / bar_secs) + 5
+        needed = int(age_sec / bar_secs) + 10
         limit = min(1000, max(base_limit, needed))
     else:
         limit = base_limit
 
-    cache_key = f"{raw_sym}:{interval}:{limit}"
+    start_param = f"&startTime={int((since_ts - 5.0) * 1000)}" if since_ts else ""
+    start_ms = int((since_ts - 5.0) * 1000) if since_ts else None
+
+    cache_key = f"{raw_sym}:{interval}:{limit}:{start_ms or 0}"
     klines = None
     if cache_key in _INTRA_KLINES_CACHE and (now_t - _INTRA_KLINES_TS.get(cache_key, 0.0)) < 10.0:
         klines = _INTRA_KLINES_CACHE[cache_key]
     else:
         # Tier 1: Binance Vision & Binance Spot Mirrors
         binance_urls = [
-            f"https://data-api.binance.vision/api/v3/klines?symbol={raw_sym}&interval={interval}&limit={limit}",
-            f"https://api.binance.com/api/v3/klines?symbol={raw_sym}&interval={interval}&limit={limit}"
+            f"https://data-api.binance.vision/api/v3/klines?symbol={raw_sym}&interval={interval}&limit={limit}{start_param}",
+            f"https://api.binance.com/api/v3/klines?symbol={raw_sym}&interval={interval}&limit={limit}{start_param}"
         ]
         for url in binance_urls:
             try:
@@ -377,7 +393,8 @@ def fetch_intra_candle_extremes(symbol: str, horizon: str = "15M", since_ts: Opt
         if not klines:
             try:
                 tf_bybit = {'1m': '1', '5m': '5', '15m': '15', '1h': '60', '4h': '240', '1d': 'D'}.get(interval, '60')
-                bybit_url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={raw_sym}&interval={tf_bybit}&limit={limit}"
+                bybit_start = f"&start={start_ms}" if start_ms else ""
+                bybit_url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={raw_sym}&interval={tf_bybit}&limit={limit}{bybit_start}"
                 resp = requests.get(bybit_url, timeout=2.5)
                 if resp.status_code == 200:
                     b_data = resp.json()
@@ -395,7 +412,8 @@ def fetch_intra_candle_extremes(symbol: str, horizon: str = "15M", since_ts: Opt
             try:
                 base_sym = raw_sym[:-4] if raw_sym.endswith("USDT") else raw_sym
                 tf_okx = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1H', '4h': '4H', '1d': '1D'}.get(interval, '1H')
-                okx_url = f"https://www.okx.com/api/v5/market/candles?instId={base_sym}-USDT&bar={tf_okx}&limit={limit}"
+                okx_start = f"&before={start_ms}" if start_ms else ""
+                okx_url = f"https://www.okx.com/api/v5/market/candles?instId={base_sym}-USDT&bar={tf_okx}&limit={limit}{okx_start}"
                 resp = requests.get(okx_url, timeout=2.5)
                 if resp.status_code == 200:
                     o_data = resp.json()
@@ -426,6 +444,112 @@ def fetch_intra_candle_extremes(symbol: str, horizon: str = "15M", since_ts: Opt
         return (max(highs), min(lows))
     except Exception:
         return (0.0, 0.0)
+
+
+def evaluate_chronological_candle_outcome(
+    symbol: str,
+    direction: str,
+    entry_p: float,
+    tp1_p: float,
+    sl_p: float,
+    since_ts: Optional[float] = None,
+    horizon: str = "15M",
+    tp2_p: Optional[float] = None,
+    tp3_p: Optional[float] = None,
+    current_spot_price: Optional[float] = None,
+) -> tuple[str, Optional[float], Optional[float], float, float, str]:
+    """
+    Evaluates an active or pending signal strictly along its chronological candle history
+    from since_ts to the current timestamp.
+    
+    Returns:
+        (resolved_status, exit_price, realized_return_pct, peak_price_seen, trough_price_seen, outcome_label)
+        
+    Mathematical Invariants:
+    1. If TP1 is touched before SL -> 'WON_TP1' with exit_price = tp1_p.
+    2. If SL is touched before TP1 -> 'LOST_SL' with exit_price = sl_p.
+    3. In single-candle liquidation cascades where both are breached in the same bar,
+       SL takes deterministic conservative precedence -> 'LOST_SL'.
+    4. If neither is reached, returns ('ACTIVE', None, unrealized_return_pct, peak, trough, 'RUNNING 🚀').
+    """
+    raw_sym = symbol.replace("/", "").replace(":USDT", "").upper()
+    now_t = time.time()
+    
+    # Pre-entry protection: If signal is in its first 60s of life, do not evaluate past closed candles
+    if since_ts and (now_t - since_ts) < 60.0:
+        return ("ACTIVE", None, 0.0, entry_p, entry_p, "RUNNING 🚀")
+
+    # Fetch extremes using our historical wick fetcher
+    intra_high, intra_low = fetch_intra_candle_extremes(symbol, horizon, since_ts)
+    
+    curr_p = current_spot_price if (current_spot_price and current_spot_price > 0.0) else entry_p
+    peak_p = max(entry_p, curr_p, intra_high if intra_high > 0 else entry_p)
+    trough_p = min(entry_p, curr_p, intra_low if intra_low > 0 else entry_p)
+
+    is_long = direction.upper() in ["LONG", "BUY"]
+
+    # Retrieve valid klines from cache
+    age_sec = max(0.0, now_t - since_ts) if since_ts else 0.0
+    norm_hz = "15M" if "15" in horizon else ("24H" if ("24" in horizon or "1D" in horizon) else "1H")
+    if age_sec <= 14 * 3600:
+        interval = "1m" if norm_hz == "15M" else ("5m" if norm_hz == "1H" else "1h")
+        bar_secs = 60 if interval == "1m" else (300 if interval == "5m" else 3600)
+    elif age_sec <= 72 * 3600:
+        interval = "5m"
+        bar_secs = 300
+    elif age_sec <= 10 * 86400:
+        interval = "15m"
+        bar_secs = 900
+    else:
+        interval = "1h"
+        bar_secs = 3600
+
+    base_limit = 15 if norm_hz == "15M" else 12
+    needed = int(age_sec / bar_secs) + 10 if since_ts else base_limit
+    limit = min(1000, max(base_limit, needed))
+    start_ms = int((since_ts - 5.0) * 1000) if since_ts else None
+    cache_key = f"{raw_sym}:{interval}:{limit}:{start_ms or 0}"
+    klines = _INTRA_KLINES_CACHE.get(cache_key)
+
+    if klines and since_ts:
+        valid_klines = [k for k in klines if (float(k[0]) / 1000.0) >= (since_ts - 5.0)]
+        valid_klines.sort(key=lambda k: int(k[0]))
+        
+        # Check chronological candle-by-candle order
+        for c in valid_klines:
+            high = float(c[2])
+            low = float(c[3])
+            
+            hit_tp1 = (high >= tp1_p) if is_long else (low <= tp1_p)
+            hit_sl = (low <= sl_p) if is_long else (high >= sl_p)
+
+            if hit_tp1 and hit_sl:
+                # Microstructure Liquidation Cascade: Conservative SL Precedence
+                loss_pct = round(-abs(entry_p - sl_p) / max(1e-9, entry_p) * 100.0, 2)
+                return ("LOST_SL", sl_p, loss_pct, peak_p, trough_p, "🔴 LOST (SL HIT - CASCADE)")
+            elif hit_tp1:
+                gain_pct = round(abs(tp1_p - entry_p) / max(1e-9, entry_p) * 100.0, 2)
+                return ("WON_TP1", tp1_p, gain_pct, peak_p, trough_p, f"🟢 WON (TP1 HIT +{gain_pct:.2f}%)")
+            elif hit_sl:
+                loss_pct = round(-abs(entry_p - sl_p) / max(1e-9, entry_p) * 100.0, 2)
+                return ("LOST_SL", sl_p, loss_pct, peak_p, trough_p, "🔴 LOST (SL HIT)")
+
+    # Fallback to extremum wicks if klines chronological loop didn't trigger
+    hit_tp1 = (peak_p >= tp1_p) if is_long else (trough_p <= tp1_p)
+    hit_sl = (trough_p <= sl_p) if is_long else (peak_p >= sl_p)
+
+    if hit_tp1 and hit_sl:
+        loss_pct = round(-abs(entry_p - sl_p) / max(1e-9, entry_p) * 100.0, 2)
+        return ("LOST_SL", sl_p, loss_pct, peak_p, trough_p, "🔴 LOST (SL HIT - CASCADE)")
+    elif hit_tp1:
+        gain_pct = round(abs(tp1_p - entry_p) / max(1e-9, entry_p) * 100.0, 2)
+        return ("WON_TP1", tp1_p, gain_pct, peak_p, trough_p, f"🟢 WON (TP1 HIT +{gain_pct:.2f}%)")
+    elif hit_sl:
+        loss_pct = round(-abs(entry_p - sl_p) / max(1e-9, entry_p) * 100.0, 2)
+        return ("LOST_SL", sl_p, loss_pct, peak_p, trough_p, "🔴 LOST (SL HIT)")
+
+    ret_pct = ((curr_p - entry_p) / max(1e-9, entry_p) * 100.0) if is_long else ((entry_p - curr_p) / max(1e-9, entry_p) * 100.0)
+    return ("ACTIVE", None, round(ret_pct, 2), peak_p, trough_p, "RUNNING 🚀")
 
 def resolve_asset_price(symbol: str, signal: Optional[Any] = None, live_prices: Optional[Dict[str, float]] = None) -> float:
     """
