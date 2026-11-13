@@ -194,6 +194,7 @@ class MultiHorizonDataLoader:
             os.makedirs(self._disk_cache_dir, exist_ok=True)
         except Exception:
             pass
+        self._last_saved_disk_state: Dict[str, Tuple[int, float, float]] = {}
 
         # Zero-Cold-Start Disk Pre-Warm: Load hot tickers, funding rates, and geo-cooldowns on instant boot
         try:
@@ -416,14 +417,31 @@ class MultiHorizonDataLoader:
             self._save_funding_to_swr_disk(self._funding_cache, time.time())
             print(f"[DATA LOADER [CROSS-EXCHANGE FUNDING]] Reconciled {len(reconciled_funding)} funding rates across venues (consensus & skew dampening active).", flush=True)
 
-    def _save_to_disk_cache(self, key: str, df: pd.DataFrame, ts: float):
-        """Persists warm candles to disk for zero-downtime container reboot & partition recovery."""
+    def _save_to_disk_cache(self, key: str, df: pd.DataFrame, ts: Optional[float] = None):
+        """Persists warm candles atomically to disk with change-detection throttling for zero-downtime reboots."""
+        if df is None or df.empty:
+            return
+        if ts is None:
+            ts = time.time()
         try:
             clean_key = key.replace("/", "_").replace(":", "_")
+            last_ts = int(df["timestamp"].iloc[-1]) if ("timestamp" in df.columns and len(df) > 0) else 0
+            last_close = float(df["close"].iloc[-1]) if ("close" in df.columns and len(df) > 0) else 0.0
+
+            prev_state = self._last_saved_disk_state.get(clean_key)
+            if prev_state is not None:
+                prev_candle_ts, prev_close, prev_save_time = prev_state
+                # Throttle redundant serialization: if last candle and close are unchanged within 60s, skip
+                if prev_candle_ts == last_ts and abs(prev_close - last_close) < 1e-8 and (ts - prev_save_time) < 60.0:
+                    return
+
             cache_file = os.path.join(self._disk_cache_dir, f"{clean_key}.pkl")
+            tmp_file = f"{cache_file}.tmp_{os.getpid()}_{threading.get_ident()}"
             df_to_save = df.copy()
             df_to_save.attrs["cache_ts"] = ts
-            df_to_save.to_pickle(cache_file)
+            df_to_save.to_pickle(tmp_file)
+            os.replace(tmp_file, cache_file)
+            self._last_saved_disk_state[clean_key] = (last_ts, last_close, ts)
         except Exception:
             pass
 
@@ -2591,6 +2609,7 @@ class MultiHorizonDataLoader:
 
         output_dfs = {}
         missing_tfs = []
+        warm_dfs = {}
 
         with self._cache_lock:
             for tf in TIMEFRAMES_9:
@@ -2600,6 +2619,8 @@ class MultiHorizonDataLoader:
                     if _is_cache_fresh(cached_df, cached_ts, tf):
                         output_dfs[tf] = cached_df.copy()
                         continue
+                    else:
+                        warm_dfs[tf] = cached_df
                 elif not force_refresh:
                     # Persistent disk cache pre-check for zero-downtime reboots & partition recovery
                     disk_entry = self._load_from_disk_cache(cache_key)
@@ -2610,6 +2631,8 @@ class MultiHorizonDataLoader:
                             self._candle_cache[cache_key] = (disk_df, disk_ts)
                             output_dfs[tf] = disk_df.copy()
                             continue
+                        else:
+                            warm_dfs[tf] = disk_df
                 missing_tfs.append(tf)
 
         if not missing_tfs:
@@ -2642,7 +2665,24 @@ class MultiHorizonDataLoader:
             # 2. 4H Macro Structural Ingestion (Fetch deep native 4H candles up to 500 bars; fall back to 1H resampling if unavailable)
             elif tf_target == "4h":
                 fetch_limit = limits.get("4h", 500)
-                df_result = self.fetch_single_timeframe_raw(symbol, "4h", limit=fetch_limit)
+                warm_4h = warm_dfs.get("4h")
+                df_result = None
+                # Incremental candle delta optimization for 4H
+                if warm_4h is not None and len(warm_4h) >= 30 and "timestamp" in warm_4h.columns:
+                    delta_4h = self.fetch_single_timeframe_raw(symbol, "4h", limit=5)
+                    if delta_4h is not None and not delta_4h.empty and "timestamp" in delta_4h.columns:
+                        bar_ms = bar_intervals.get("4h", 14400) * 1000
+                        latest_warm_ts = int(warm_4h["timestamp"].iloc[-1])
+                        first_delta_ts = int(delta_4h["timestamp"].iloc[0])
+                        if first_delta_ts <= latest_warm_ts + (bar_ms * 2):
+                            merged = pd.concat([warm_4h, delta_4h], ignore_index=True)
+                            merged = merged.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)
+                            if len(merged) > fetch_limit:
+                                merged = merged.iloc[-fetch_limit:].reset_index(drop=True)
+                            df_result = merged
+
+                if df_result is None:
+                    df_result = self.fetch_single_timeframe_raw(symbol, "4h", limit=fetch_limit)
                 if df_result is None or len(df_result) < 15:
                     if "1h" in output_dfs and len(output_dfs["1h"]) >= 8:
                         df_result = self._resample_chunk(output_dfs["1h"], chunk_size=4)
@@ -2689,7 +2729,28 @@ class MultiHorizonDataLoader:
                     fetch_limit = max(fetch_limit, 500)
                 elif tf_target == "1d":
                     fetch_limit = max(fetch_limit, 365)
-                df_result = self.fetch_single_timeframe_raw(symbol, tf_target, limit=fetch_limit)
+
+                warm_df = warm_dfs.get(tf_target)
+                df_result = None
+                # Incremental candle delta optimization:
+                # If warm candle history exists with sufficient depth, fetch recent 5-candle delta and stitch
+                if warm_df is not None and len(warm_df) >= min(fetch_limit, 50) and "timestamp" in warm_df.columns:
+                    delta_df = self.fetch_single_timeframe_raw(symbol, tf_target, limit=5)
+                    if delta_df is not None and not delta_df.empty and "timestamp" in delta_df.columns:
+                        bar_ms = bar_intervals.get(tf_target, 60) * 1000
+                        latest_warm_ts = int(warm_df["timestamp"].iloc[-1])
+                        first_delta_ts = int(delta_df["timestamp"].iloc[0])
+                        # If delta overlaps or connects cleanly without a gap (> 2 bars)
+                        if first_delta_ts <= latest_warm_ts + (bar_ms * 2):
+                            merged = pd.concat([warm_df, delta_df], ignore_index=True)
+                            merged = merged.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)
+                            max_keep = max(fetch_limit, len(warm_df))
+                            if len(merged) > max_keep:
+                                merged = merged.iloc[-max_keep:].reset_index(drop=True)
+                            df_result = merged
+
+                if df_result is None:
+                    df_result = self.fetch_single_timeframe_raw(symbol, tf_target, limit=fetch_limit)
 
             if df_result is not None and len(df_result) >= (2 if tf_target in ["1w", "15d", "1M"] else 5):
                 df_result.attrs["requested_limit"] = int(limits.get(tf_target, len(df_result)) or len(df_result))
@@ -2778,20 +2839,38 @@ class MultiHorizonDataLoader:
         # Ingest 1M Microstructure Horizon for Tri-Horizon Regression Model Alignment
         cache_key_1m = f"{symbol}_1m"
         df_1m = None
+        warm_1m = None
         with self._cache_lock:
             if not force_refresh and cache_key_1m in self._candle_cache:
                 c_df, c_ts = self._candle_cache[cache_key_1m]
                 if _is_cache_fresh(c_df, c_ts, "1m"):
                     df_1m = c_df.copy()
+                else:
+                    warm_1m = c_df
             elif not force_refresh:
                 disk_entry = self._load_from_disk_cache(cache_key_1m)
                 if disk_entry and len(disk_entry[0]) >= 5 and _is_cache_fresh(disk_entry[0], disk_entry[1], "1m"):
                     self._candle_cache[cache_key_1m] = disk_entry
                     df_1m = disk_entry[0].copy()
+                elif disk_entry:
+                    warm_1m = disk_entry[0]
 
         if df_1m is None:
             fetch_limit_1m = max(60, limits.get("1m", 120))
-            df_1m = self.fetch_single_timeframe_raw(symbol, "1m", limit=fetch_limit_1m)
+            if warm_1m is not None and len(warm_1m) >= 30 and "timestamp" in warm_1m.columns:
+                delta_1m = self.fetch_single_timeframe_raw(symbol, "1m", limit=5)
+                if delta_1m is not None and not delta_1m.empty and "timestamp" in delta_1m.columns:
+                    latest_warm_ts = int(warm_1m["timestamp"].iloc[-1])
+                    first_delta_ts = int(delta_1m["timestamp"].iloc[0])
+                    if first_delta_ts <= latest_warm_ts + 120000:
+                        merged = pd.concat([warm_1m, delta_1m], ignore_index=True)
+                        merged = merged.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)
+                        if len(merged) > fetch_limit_1m:
+                            merged = merged.iloc[-fetch_limit_1m:].reset_index(drop=True)
+                        df_1m = merged
+
+            if df_1m is None:
+                df_1m = self.fetch_single_timeframe_raw(symbol, "1m", limit=fetch_limit_1m)
             if df_1m is not None and len(df_1m) >= 5:
                 df_1m.attrs["requested_limit"] = int(limits.get("1m", len(df_1m)) or len(df_1m))
                 with self._cache_lock:
