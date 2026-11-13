@@ -621,6 +621,74 @@ class TestV16NoSignalExpiry(unittest.TestCase):
         finally:
             settings.EXPORT_DIR = orig_export
 
+    def test_15_legacy_october_timestamp_healing_and_evaluation(self):
+        """Signals carrying legacy October timestamps heal dynamically and resolve accurately without false SL."""
+        from app.routers.v16_router import _get_v16_store, _extract_and_heal_timestamp
+        from app.services.signal_service import _INTRA_KLINES_CACHE, _INTRA_KLINES_TS
+        from app.config import settings
+
+        orig_export = settings.EXPORT_DIR
+        try:
+            settings.EXPORT_DIR = self.tmp_dir
+            now_dt = datetime.now(timezone.utc)
+
+            # 1. Epoch extraction verification
+            epoch_ts = _extract_and_heal_timestamp(raw_date="2026-10-24", raw_time="02:00:00", sig_id="AR_USDT_15M_1794523594", now_utc=now_dt)
+            self.assertEqual(epoch_ts, "2026-11-12 22:46:34 UTC", "Epoch timestamp in signal_id must take precedence over legacy fallback date")
+
+            # 2. Legacy date healing on active signal
+            healed_ts = _extract_and_heal_timestamp(raw_date="2026-10-24 02:00:00", sig_id="SIG_FET_USDT_15M", now_utc=now_dt)
+            self.assertFalse(healed_ts.startswith("2026-10-24"), "Legacy October date must be healed")
+            self.assertTrue(healed_ts.endswith("02:00:00 UTC"), "Time of generation must be preserved during healing")
+
+            # 3. Store resolution test for SIG_FET_USDT_15M
+            sig_id = "SIG_FET_USDT_15M"
+            immut_file = os.path.join(self.tmp_dir, "v16_immutable_signals.json")
+            dyn_file = os.path.join(self.tmp_dir, "v16_dynamic_states.json")
+
+            immut_store = {
+                sig_id: {
+                    "signal_id": sig_id,
+                    "symbol": "FET/USDT",
+                    "direction": "SHORT",
+                    "horizon": "15M",
+                    "signal_generated_at": "2026-10-24 02:00:00 UTC",
+                    "entry_price_initial": 0.147000,
+                    "tp1_initial": 0.142147,
+                    "sl_initial": 0.148764,
+                    "status": "ACTIVE",
+                }
+            }
+            dyn_store = {
+                sig_id: {
+                    "signal_id": sig_id,
+                    "current_price": 0.145000,
+                    "status": "ACTIVE",
+                    "outcome_label": "RUNNING 🚀",
+                    "peak_price_seen": None,
+                    "trough_price_seen": 0.1390,
+                    "exit_price": None,
+                    "realized_return_pct": None,
+                }
+            }
+
+            with open(immut_file, "w", encoding="utf-8") as f:
+                json.dump(immut_store, f)
+            with open(dyn_file, "w", encoding="utf-8") as f:
+                json.dump(dyn_store, f)
+
+            imm_res, dyn_res = _get_v16_store(force_refresh=True)
+            self.assertIn(sig_id, dyn_res)
+            # Timestamp must be healed
+            self.assertFalse(imm_res[sig_id]["signal_generated_at"].startswith("2026-10-24"))
+            # Must be evaluated to WON_TP1
+            self.assertEqual(dyn_res[sig_id]["status"], "WON_TP1")
+            self.assertEqual(dyn_res[sig_id]["exit_price"], 0.142147)
+            self.assertAlmostEqual(dyn_res[sig_id]["realized_return_pct"], 3.30, places=1)
+            self.assertTrue(dyn_res[sig_id]["is_tp1_locked"])
+        finally:
+            settings.EXPORT_DIR = orig_export
+
 
 if __name__ == "__main__":
     unittest.main()

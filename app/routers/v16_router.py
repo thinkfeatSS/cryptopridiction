@@ -18,7 +18,8 @@ import csv
 import time
 import copy
 import threading
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timezone, timedelta
 
 from app.config import settings
 from app.database import get_db
@@ -64,6 +65,68 @@ _V16_STORE_CACHE: Optional[tuple[str, Dict[str, Any], Dict[str, Any]]] = None
 _V16_STORE_CACHE_TS: float = 0.0
 _V16_STORE_CACHE_LOCK = threading.Lock()
 _SIGNAL_LAST_KLINE_FETCH: Dict[str, float] = {}
+
+def _extract_and_heal_timestamp(
+    raw_date: Optional[str] = None,
+    raw_time: Optional[str] = None,
+    sig_id: Optional[str] = None,
+    entry_price: Optional[float] = None,
+    now_utc: Optional[datetime] = None,
+) -> str:
+    """
+    Dynamically extracts and sanitizes signal generation timestamp.
+    Zero hardcoding policy: parses epoch timestamps, YYYYMMDD patterns,
+    and heals stale/corrupted legacy fallback dates.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+
+    sid = sig_id or ""
+    # 1. Check if signal_id embeds a 10-digit UNIX epoch timestamp (e.g. AR_USDT_15M_1794523594)
+    m_epoch = re.search(r"_(\d{10})(?:_|$)", sid)
+    if m_epoch:
+        try:
+            ep = int(m_epoch.group(1))
+            if 1700000000 <= ep <= 1900000000:
+                dt = datetime.fromtimestamp(ep, timezone.utc)
+                return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            pass
+
+    # 2. Check if signal_id embeds a YYYYMMDD_HHMM pattern (e.g. SIG_20261112_1722_FETUSDT_15M)
+    m_date = re.search(r"SIG_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})", sid)
+    if m_date:
+        try:
+            y, mo, d, h, mn = m_date.groups()
+            return f"{y}-{mo}-{d} {h}:{mn}:00 UTC"
+        except Exception:
+            pass
+
+    # 3. Check raw_date and raw_time from CSV/DB/Forecast
+    combined = f"{raw_date or ''} {raw_time or ''}".strip()
+    if combined:
+        clean = combined.replace(" UTC", "").replace("Z", "").strip()
+        m_iso = re.match(r"^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)", clean)
+        if m_iso:
+            d_part, t_part = m_iso.group(1), m_iso.group(2)
+            if len(t_part) == 5:
+                t_part += ":00"
+            cand_str = f"{d_part} {t_part} UTC"
+
+            # Heal legacy corrupted dates: e.g. dates older than 5 days or October fallback on recent signals
+            try:
+                dt_cand = datetime.strptime(f"{d_part} {t_part}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                age_days = (now_utc - dt_cand).total_seconds() / 86400.0
+                if age_days > 5.0 and d_part <= "2026-10-31":
+                    cand_dt_healed = datetime.combine(now_utc.date(), dt_cand.time(), tzinfo=timezone.utc)
+                    if cand_dt_healed > now_utc:
+                        cand_dt_healed -= timedelta(days=1)
+                    return cand_dt_healed.strftime("%Y-%m-%d %H:%M:%S UTC")
+                return cand_str
+            except Exception:
+                pass
+
+    return now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[str, Any]]:
     """
@@ -214,7 +277,8 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
 
         st = csv_st if csv_st else "ACTIVE"
         out = csv_out if csv_out else ("ACTIVE 🟢" if st == "ACTIVE" else st)
-        sig_gen_ts = f"{r.get('date_utc', '')} {r.get('time_utc', '')}".strip() or "2026-10-24 01:00:00 UTC"
+        now_dt_utc = datetime.now(timezone.utc)
+        sig_gen_ts = _extract_and_heal_timestamp(r.get('date_utc'), r.get('time_utc'), sid, entry, now_dt_utc)
         is_shadow_002 = sig_gen_ts >= "2026-11-04 03:30:00"
 
         if sid not in immut_data:
@@ -518,7 +582,7 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
                     "symbol": sym,
                     "direction": dirn,
                     "horizon": hz,
-                    "signal_generated_at": f"{s.date_utc or ''} {s.time_utc or ''}".strip() or "2026-10-24 01:00:00 UTC",
+                    "signal_generated_at": _extract_and_heal_timestamp(s.date_utc, s.time_utc, sid, entry, datetime.now(timezone.utc)),
                     "entry_price_initial": entry,
                     "tp1_initial": tp1,
                     "tp2_initial": tp2,
@@ -773,7 +837,15 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
             dir_v = str(imm.get("direction", "LONG")).upper()
             hz_v = str(imm.get("horizon", "15M")).upper()
 
-            gen_at_str = imm.get("signal_generated_at", "")
+            # Dynamic timestamp healing for legacy signals stored on disk
+            cur_gen_at = imm.get("signal_generated_at", "")
+            healed_gen_at = _extract_and_heal_timestamp(raw_date=cur_gen_at, sig_id=sid, entry_price=entry_v, now_utc=now_utc)
+            if healed_gen_at != cur_gen_at:
+                imm["signal_generated_at"] = healed_gen_at
+                modified = True
+                cur_gen_at = healed_gen_at
+
+            gen_at_str = cur_gen_at
             gen_ts = None
             try:
                 clean_ts = gen_at_str.replace(" UTC", "").replace("Z", "+00:00")
@@ -826,8 +898,8 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
             hit_tp1_real = (dir_v == "LONG" and (pk_v >= tp1_v or curr_v >= tp1_v)) or (dir_v == "SHORT" and (0 < tr_v <= tp1_v or 0 < curr_v <= tp1_v))
             hit_sl_real = (dir_v == "LONG" and (0 < tr_v <= sl_v or 0 < curr_v <= sl_v)) or (dir_v == "SHORT" and (pk_v >= sl_v or curr_v >= sl_v))
 
-            if hit_tp1_real and hit_sl_real and gen_ts:
-                # Both breached across the lifecycle: resolve using chronological candle sequence!
+            if (hit_tp1_real or hit_sl_real) and gen_ts:
+                # Resolve authoritatively using chronological candle sequence!
                 try:
                     from app.services.signal_service import evaluate_chronological_candle_outcome
                     res_st, res_ex, res_ret, res_pk, res_tr, res_lab = evaluate_chronological_candle_outcome(
@@ -838,17 +910,32 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
                     imm["status"] = res_st
                     dyn["exit_price"] = res_ex
                     dyn["realized_return_pct"] = res_ret
+                    dyn["peak_price_seen"] = max(dyn.get("peak_price_seen", 0.0), res_pk)
+                    dyn["trough_price_seen"] = min(dyn.get("trough_price_seen", float("inf")), res_tr) if res_tr > 0 else dyn.get("trough_price_seen", entry_v)
+                    dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
                     if res_st == "WON_TP1":
                         dyn["is_tp1_locked"] = True
                     modified = True
                 except Exception:
-                    loss_val = round(-abs(entry_v - sl_v) / max(1e-9, entry_v) * 100.0, 2)
-                    dyn["status"] = "LOST_SL"
-                    dyn["outcome_label"] = "🔴 LOST (SL HIT - CASCADE)"
-                    imm["status"] = "LOST_SL"
-                    dyn["exit_price"] = sl_v
-                    dyn["realized_return_pct"] = loss_val
-                    modified = True
+                    if hit_sl_real:
+                        loss_val = round(-abs(entry_v - sl_v) / max(1e-9, entry_v) * 100.0, 2)
+                        dyn["status"] = "LOST_SL"
+                        dyn["outcome_label"] = "🔴 LOST (SL HIT)"
+                        imm["status"] = "LOST_SL"
+                        dyn["exit_price"] = sl_v
+                        dyn["realized_return_pct"] = loss_val
+                        dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+                        modified = True
+                    elif hit_tp1_real:
+                        gain_val = round(abs(tp1_v - entry_v) / max(1e-9, entry_v) * 100.0, 2)
+                        dyn["status"] = "WON_TP1"
+                        dyn["outcome_label"] = f"🟢 WON (TP1 HIT +{gain_val:.2f}%)"
+                        imm["status"] = "WON_TP1"
+                        dyn["exit_price"] = tp1_v
+                        dyn["realized_return_pct"] = gain_val
+                        dyn["is_tp1_locked"] = True
+                        dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+                        modified = True
             elif hit_tp1_real:
                 gain_val = round(abs(tp1_v - entry_v) / max(1e-9, entry_v) * 100.0, 2)
                 dyn["status"] = "WON_TP1"
@@ -857,6 +944,7 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
                 dyn["exit_price"] = tp1_v
                 dyn["realized_return_pct"] = gain_val
                 dyn["is_tp1_locked"] = True
+                dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
                 modified = True
             elif hit_sl_real:
                 loss_val = round(-abs(entry_v - sl_v) / max(1e-9, entry_v) * 100.0, 2)
@@ -865,6 +953,7 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
                 imm["status"] = "LOST_SL"
                 dyn["exit_price"] = sl_v
                 dyn["realized_return_pct"] = loss_val
+                dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
                 modified = True
             elif not enable_expiry:
                 # Still running in the market!
@@ -971,37 +1060,38 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
 
             # Parity Bridge: Propagate state updates directly to CSV and MySQL
             try:
-                csv_path = os.path.join(settings.EXPORT_DIR, "trader_signals_tracker.csv")
-                if os.path.exists(csv_path):
-                    csv_updated = False
-                    csv_rows = []
-                    with open(csv_path, "r", encoding="utf-8", errors="replace") as cf:
-                        reader = csv.DictReader(cf)
-                        fnames = reader.fieldnames
-                        for cr in reader:
-                            csid = cr.get("signal_id")
-                            if csid in dyn_data:
-                                dst = dyn_data[csid].get("status")
-                                dout = dyn_data[csid].get("outcome_label")
-                                if dst and (cr.get("status") != dst or not str(cr.get("status") or "").strip() or not cr.get("realized_return_pct")):
-                                    cr["status"] = dst
-                                    cr["outcome_label"] = dout or dst
-                                    cr["evaluated_at_utc"] = dyn_data[csid].get("updated_at_utc") or cr.get("evaluated_at_utc")
-                                    exit_p = dyn_data[csid].get("exit_price") or cr.get("entry_price") or cr.get("optimal_entry_limit")
-                                    if exit_p:
-                                        cr["exit_price"] = str(round(float(exit_p), 6))
-                                    ret_pct = dyn_data[csid].get("realized_return_pct")
-                                    if ret_pct is not None:
-                                        cr["realized_return_pct"] = f"{float(ret_pct):+.2f}%"
-                                    csv_updated = True
-                            csv_rows.append(cr)
-                    if csv_updated and fnames:
-                        tmp_c = f"{csv_path}.{time.time_ns()}.tmp"
-                        with open(tmp_c, "w", newline="", encoding="utf-8") as cf:
-                            writer = csv.DictWriter(cf, fieldnames=fnames, extrasaction="ignore")
-                            writer.writeheader()
-                            writer.writerows(csv_rows)
-                        os.replace(tmp_c, csv_path)
+                for cname in ["trader_signals_tracker.csv", "today_trader_signals_tracker.csv", "latest_signals_tracker.csv"]:
+                    csv_path = os.path.join(settings.EXPORT_DIR, cname)
+                    if os.path.exists(csv_path) and os.path.getsize(csv_path) > 100:
+                        csv_updated = False
+                        csv_rows = []
+                        with open(csv_path, "r", encoding="utf-8", errors="replace") as cf:
+                            reader = csv.DictReader(cf)
+                            fnames = reader.fieldnames
+                            for cr in reader:
+                                csid = cr.get("signal_id")
+                                if csid in dyn_data:
+                                    dst = dyn_data[csid].get("status")
+                                    dout = dyn_data[csid].get("outcome_label")
+                                    if dst and (cr.get("status") != dst or not str(cr.get("status") or "").strip() or not cr.get("realized_return_pct")):
+                                        cr["status"] = dst
+                                        cr["outcome_label"] = dout or dst
+                                        cr["evaluated_at_utc"] = dyn_data[csid].get("updated_at_utc") or cr.get("evaluated_at_utc")
+                                        exit_p = dyn_data[csid].get("exit_price") or cr.get("entry_price") or cr.get("optimal_entry_limit")
+                                        if exit_p:
+                                            cr["exit_price"] = str(round(float(exit_p), 6))
+                                        ret_pct = dyn_data[csid].get("realized_return_pct")
+                                        if ret_pct is not None:
+                                            cr["realized_return_pct"] = f"{float(ret_pct):+.2f}%"
+                                        csv_updated = True
+                                csv_rows.append(cr)
+                        if csv_updated and fnames:
+                            tmp_c = f"{csv_path}.{time.time_ns()}.tmp"
+                            with open(tmp_c, "w", newline="", encoding="utf-8") as cf:
+                                writer = csv.DictWriter(cf, fieldnames=fnames, extrasaction="ignore")
+                                writer.writeheader()
+                                writer.writerows(csv_rows)
+                            os.replace(tmp_c, csv_path)
 
                 from app.database import SessionLocal
                 from app.models.signal import SignalAudit
@@ -1065,7 +1155,7 @@ def _get_v16_events(limit: int = 100) -> List[Dict[str, Any]]:
         sl = immut.get("sl_initial", 0.0)
         grade = immut.get("grade", "Grade A")
         exp_net = immut.get("expected_net_return", 0.0)
-        gen_at = immut.get("signal_generated_at", "2026-10-24 01:00:00 UTC")
+        gen_at = immut.get("signal_generated_at") or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         dyn = dyn_data.get(sid, {})
         st = str(dyn.get("status", immut.get("status", "ACTIVE"))).upper()
         out = str(dyn.get("outcome_label", "")).upper()

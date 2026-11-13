@@ -536,10 +536,28 @@ def evaluate_chronological_candle_outcome(
         valid_klines = [k for k in klines if (float(k[0]) / 1000.0) >= (since_ts - 5.0)]
         valid_klines.sort(key=lambda k: int(k[0]))
         
-        # Check chronological candle-by-candle order
-        for c in valid_klines:
+        # Pre-entry price regime guard: ensure chronological evaluation begins at the entry window
+        eval_start_idx = 0
+        if entry_p > 0.0 and len(valid_klines) > 1:
+            for idx, c in enumerate(valid_klines):
+                c_o = float(c[1])
+                c_h = float(c[2])
+                c_l = float(c[3])
+                # Entry condition: price either touched entry_p or candle was within 2.5% of entry_p
+                if (c_l <= entry_p <= c_h) or (abs(c_o - entry_p) / entry_p <= 0.025):
+                    eval_start_idx = idx
+                    break
+        
+        eval_klines = valid_klines[eval_start_idx:]
+        
+        # Check chronological candle-by-candle order with running extremes tracking
+        running_high = max(entry_p, curr_p)
+        running_low = min(entry_p, curr_p)
+        for c in eval_klines:
             high = float(c[2])
             low = float(c[3])
+            running_high = max(running_high, high)
+            running_low = min(running_low, low)
             
             hit_tp1 = (high >= tp1_p) if is_long else (low <= tp1_p)
             hit_sl = (low <= sl_p) if is_long else (high >= sl_p)
@@ -547,13 +565,13 @@ def evaluate_chronological_candle_outcome(
             if hit_tp1 and hit_sl:
                 # Microstructure Liquidation Cascade: Conservative SL Precedence
                 loss_pct = round(-abs(entry_p - sl_p) / max(1e-9, entry_p) * 100.0, 2)
-                return ("LOST_SL", sl_p, loss_pct, peak_p, trough_p, "🔴 LOST (SL HIT - CASCADE)")
+                return ("LOST_SL", sl_p, loss_pct, running_high, running_low, "🔴 LOST (SL HIT - CASCADE)")
             elif hit_tp1:
                 gain_pct = round(abs(tp1_p - entry_p) / max(1e-9, entry_p) * 100.0, 2)
-                return ("WON_TP1", tp1_p, gain_pct, peak_p, trough_p, f"🟢 WON (TP1 HIT +{gain_pct:.2f}%)")
+                return ("WON_TP1", tp1_p, gain_pct, running_high, running_low, f"🟢 WON (TP1 HIT +{gain_pct:.2f}%)")
             elif hit_sl:
                 loss_pct = round(-abs(entry_p - sl_p) / max(1e-9, entry_p) * 100.0, 2)
-                return ("LOST_SL", sl_p, loss_pct, peak_p, trough_p, "🔴 LOST (SL HIT)")
+                return ("LOST_SL", sl_p, loss_pct, running_high, running_low, "🔴 LOST (SL HIT)")
 
     # Fallback to extremum wicks if klines chronological loop didn't trigger
     hit_tp1 = (peak_p >= tp1_p) if is_long else (trough_p <= tp1_p)
