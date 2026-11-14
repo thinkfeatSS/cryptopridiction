@@ -225,8 +225,19 @@ class StrategyRegistry:
                     self.save_to_disk()
                     return True
 
+                healed_legacy_priors = False
                 for k, v_dict in loaded_strats.items():
-                    self.strategies[k] = StrategyPerformance.from_dict(v_dict)
+                    perf_obj = StrategyPerformance.from_dict(v_dict)
+                    # Defensive Integrity: Ensure SHORT trend/breakout strategies are never locked in BEAR_TREND by legacy disk priors
+                    if "SHORT" in k.upper() and "BEAR_TREND" in perf_obj.regime_status:
+                        perf_obj.regime_status.pop("BEAR_TREND", None)
+                        healed_legacy_priors = True
+                    if "LONG" in k.upper() and "BULL_TREND" in perf_obj.regime_status:
+                        perf_obj.regime_status.pop("BULL_TREND", None)
+                        healed_legacy_priors = True
+                    self.strategies[k] = perf_obj
+                if healed_legacy_priors:
+                    self.save_to_disk()
                 return True
             except Exception:
                 return False
@@ -333,13 +344,13 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.BREAKOUT_SHORT.value,
                 sample_count=110, resolved_count=105, win_rate=0.55, profit_factor=1.30,
                 rolling_50_pf=1.25, expectancy_net_pct=0.62,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.MOMENTUM_SHORT.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.MOMENTUM_SHORT.value,
                 sample_count=190, resolved_count=182, win_rate=0.59, profit_factor=1.35,
                 rolling_50_pf=1.28, expectancy_net_pct=0.68,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.MOMENTUM_LONG.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.MOMENTUM_LONG.value,
@@ -357,7 +368,7 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.BREAKDOWN_SHORT.value,
                 sample_count=180, resolved_count=172, win_rate=0.62, profit_factor=1.35,
                 rolling_50_pf=1.30, expectancy_net_pct=0.65,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.RALLY_FADE_SHORT.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.RALLY_FADE_SHORT.value,
@@ -393,7 +404,7 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.DIRECTIONAL_TREND_SHORT.value,
                 sample_count=95, resolved_count=90, win_rate=0.61, profit_factor=1.34,
                 rolling_50_pf=1.26, expectancy_net_pct=0.56,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.DIRECTIONAL_TREND_LONG.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.DIRECTIONAL_TREND_LONG.value,
@@ -471,7 +482,7 @@ class StrategyRegistry:
                 strategy_id=StrategyArchetype.SQUEEZE_BREAKOUT_SHORT.value,
                 sample_count=95, resolved_count=90, win_rate=0.58, profit_factor=1.28,
                 rolling_50_pf=1.24, expectancy_net_pct=0.52,
-                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED, "BEAR_TREND": StrategyStatus.PAUSED}
+                regime_status={"BULL_TREND": StrategyStatus.PAUSED, "RANGE": StrategyStatus.PAUSED}
             ),
             StrategyArchetype.MEAN_REVERSION_LONG.value: StrategyPerformance(
                 strategy_id=StrategyArchetype.MEAN_REVERSION_LONG.value,
@@ -553,7 +564,7 @@ class StrategyRegistry:
 
         if not perf:
             # Dynamic Safeguard: Unregistered continuation shorts must NOT bypass regime kill switches
-            if "SHORT" in strat_upper and norm_regime in ["RANGE", "BEAR_TREND"]:
+            if "SHORT" in strat_upper and norm_regime in ["BULL_TREND", "RANGE"]:
                 if any(k in strat_upper for k in ["BREAKOUT", "BREAKDOWN", "MOMENTUM", "TREND", "COILING", "EXPANSION"]):
                     if is_decoupled_trend:
                         return True, f"Eligible: Decoupled independent {strategy_id} active during macro consolidation"

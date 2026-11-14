@@ -75,6 +75,7 @@ NEGATION_TERMS = {
 # to completely eliminate false positives with common English words (e.g. 'near', 'one', 'link', 'ai')
 COIN_NAME_RULES: Dict[str, Dict[str, Any]] = {
     "BTC": {"names": ["bitcoin", "satoshi", "btc"], "ticker": "BTC", "is_ambiguous": False},
+    "BCH": {"names": ["bitcoin cash", "bch"], "ticker": "BCH", "is_ambiguous": False},
     "ETH": {"names": ["ethereum", "ether", "vitalik", "eth"], "ticker": "ETH", "is_ambiguous": False},
     "SOL": {"names": ["solana", "sol"], "ticker": "SOL", "is_ambiguous": False},
     "BNB": {"names": ["binance coin", "bnb", "cz binance"], "ticker": "BNB", "is_ambiguous": False},
@@ -1385,8 +1386,12 @@ class FundamentalIntelligenceService:
         matched = []
 
         for sym, rule in COIN_NAME_RULES.items():
+            check_text = t_lower
+            if sym == "BTC" and re.search(r"\bbitcoin\s+(cash|sv|gold|diamond)\b", t_lower) and not re.search(r"\bbtc\b", t_lower):
+                check_text = re.sub(r"\bbitcoin\s+(cash|sv|gold|diamond)\b", "", t_lower)
+
             # 1. Unambiguous full names (case-insensitive)
-            if any(re.search(rf"\b{re.escape(name)}\b", t_lower) for name in rule["names"]):
+            if any(re.search(rf"\b{re.escape(name)}\b", check_text) for name in rule["names"]):
                 matched.append(sym)
                 continue
 
@@ -1763,6 +1768,13 @@ class FundamentalIntelligenceService:
         now_utc = datetime.now(timezone.utc)
         for ev in events:
             syms = [s.upper() for s in ev.get("symbols", [])]
+            # Disambiguate: Bitcoin Cash / SV / Gold events must not trigger core BTC
+            if clean_base == "BTC":
+                ev_t_lower = (ev.get("title") or "").lower()
+                if re.search(r"\bbitcoin\s+(cash|sv|gold|diamond)\b", ev_t_lower) and not re.search(r"\bbtc\b", ev_t_lower):
+                    continue
+                if "BCH" in syms and "BTC" not in syms:
+                    continue
             if clean_base in syms or "ALL" in syms:
                 has_upcoming_event = True
                 asset_event = ev
