@@ -195,7 +195,7 @@ class BtcPredictiveMarketShield:
             regime_v16 not in ['BULL_TREND', 'BEAR_TREND', 'BREAKOUT', 'HIGH_VOLATILITY'] and adx_val < 20.0
         )
         # Flash dump cascade: Extreme liquidation event
-        is_dump_cascade = (ret_15m <= -0.025) or (ret_1h <= -0.05) or (c_now < ema50_1h * 0.95)
+        is_dump_cascade = (ret_15m <= -0.025) or (ret_1h <= -0.05) or (ret_4h <= -0.08)
 
         # Macro Squeeze Transition to High Volatility
         prev_code = str(self.state.get("status_code", ""))

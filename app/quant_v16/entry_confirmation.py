@@ -451,7 +451,7 @@ class EntryConfirmationEngine:
                 prior_high_window = df.iloc[start_idx:end_idx]
                 prior_swing_high = float(prior_high_window["high"].max())
                 rejection_ceiling = prior_swing_high + (0.10 * active_atr)
-                if c_high > prior_swing_high and (c_close <= prior_swing_high or (c_close <= rejection_ceiling and upper_wick_ratio >= 0.25)):
+                if c_high > prior_swing_high and upper_wick_ratio >= 0.35 and (c_close <= prior_swing_high or c_close <= rejection_ceiling):
                     return False, f"Bull Trap Liquidity Sweep Fakeout: Price swept prior high ({prior_swing_high:.4f}) but rejected with {upper_wick_ratio*100:.0f}% upper wick", metrics
 
             # Rejection of Long: Extreme upper wick rejection fakeout on green candle
@@ -531,7 +531,7 @@ class EntryConfirmationEngine:
                 prior_low_window = df.iloc[start_idx:end_idx]
                 prior_swing_low = float(prior_low_window["low"].min())
                 reclaim_floor = prior_swing_low - (0.10 * active_atr)
-                if c_low < prior_swing_low and (c_close >= prior_swing_low or (c_close >= reclaim_floor and lower_wick_ratio >= 0.25)):
+                if c_low < prior_swing_low and lower_wick_ratio >= 0.35 and (c_close >= prior_swing_low or c_close >= reclaim_floor):
                     return False, f"Bear Trap Liquidity Sweep Absorption: Price swept prior low ({prior_swing_low:.4f}) but absorbed with {lower_wick_ratio*100:.0f}% absorption wick", metrics
 
             # Rejection of Short: Extreme lower wick absorption fakeout on red candle

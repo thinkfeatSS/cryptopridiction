@@ -607,6 +607,120 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
             self.assertAlmostEqual(sig_svc._LIVE_PRICES_CACHE.get("BTC/USDT"), 95000.0, places=2)
             self.assertAlmostEqual(sig_svc._LIVE_PRICES_CACHE.get("0G/USDT"), 0.1554, places=4)
 
+    def test_13_bear_trap_wick_ratio_and_btc_shield_dump_cascade(self):
+        """
+        Verify that:
+        1. Bear trap liquidity sweep requires significant absorption wick (>= 35%),
+           allowing solid red breakdown candles touching support to confirm short entry.
+        2. Bull trap liquidity sweep requires significant rejection wick (>= 35%),
+           allowing solid green breakout candles touching resistance to confirm long entry.
+        3. BTC Market Shield does not falsely trigger FLASH_DUMP / BEAR_CASCADE_BLACKOUT
+           merely because price is below 1H EMA50, preserving normal BEAR_TREND short alpha.
+        """
+        # --- 1. SHORT Breakdown without absorption wick ---
+        # Prior low was 100.0. Trigger candle sweeps low to 99.8, closes at 100.05 (above 100.0).
+        # Range = 1.0 (High 100.8, Low 99.8). Lower wick = 100.05 - 99.8 = 0.25 (25% < 35%). Red body = 0.65.
+        bars_short_breakdown = [
+            {"open": 101.0, "high": 102.0, "low": 100.0, "close": 100.5, "volume": 1000},
+            {"open": 100.5, "high": 101.0, "low": 100.0, "close": 100.2, "volume": 1000},
+            {"open": 100.2, "high": 100.5, "low": 100.0, "close": 100.1, "volume": 1000},
+            {"open": 100.1, "high": 100.3, "low": 100.0, "close": 100.1, "volume": 1000},
+            {"open": 100.7, "high": 100.8, "low": 99.8, "close": 100.02, "volume": 5000},  # Low 99.8 < 100.0, lower wick 0.22/1.0 = 22% (<35%)
+            {"open": 100.02, "high": 100.05, "low": 99.8, "close": 99.9, "volume": 1000},   # Live candle
+        ]
+        df_sb = pd.DataFrame(bars_short_breakdown)
+        conf_sb, reason_sb, metrics_sb = EntryConfirmationEngine.validate_candle_trigger(
+            df_sb, direction="SHORT", current_price=99.9
+        )
+        self.assertTrue(conf_sb, f"Breakdown candle with small wick should confirm short. Reason: {reason_sb}")
+        self.assertNotIn("Bear Trap Liquidity Sweep", reason_sb)
+
+        # --- 2. SHORT Bear Trap with genuine absorption wick (>= 35%) ---
+        bars_short_trap = [
+            {"open": 101.0, "high": 102.0, "low": 100.0, "close": 100.5, "volume": 1000},
+            {"open": 100.5, "high": 101.0, "low": 100.0, "close": 100.2, "volume": 1000},
+            {"open": 100.2, "high": 100.5, "low": 100.0, "close": 100.1, "volume": 1000},
+            {"open": 100.1, "high": 100.3, "low": 100.0, "close": 100.1, "volume": 1000},
+            {"open": 100.4, "high": 100.5, "low": 99.0, "close": 100.1, "volume": 5000},  # Swept 99.0, closed 100.1, lower wick (100.1-99.0)/1.5 = 73% (>=35%)
+            {"open": 100.1, "high": 100.3, "low": 100.0, "close": 100.2, "volume": 1000},
+        ]
+        df_st = pd.DataFrame(bars_short_trap)
+        conf_st, reason_st, _ = EntryConfirmationEngine.validate_candle_trigger(
+            df_st, direction="SHORT", current_price=100.2
+        )
+        self.assertFalse(conf_st, "Bear trap with 73% absorption wick must be vetoed")
+        self.assertIn("Bear Trap Liquidity Sweep Absorption", reason_st)
+
+        # --- 3. LONG Bull Trap with genuine rejection wick (>= 35%) ---
+        bars_long_trap = [
+            {"open": 99.0, "high": 100.0, "low": 98.0, "close": 99.5, "volume": 1000},
+            {"open": 99.5, "high": 100.0, "low": 99.0, "close": 99.8, "volume": 1000},
+            {"open": 99.8, "high": 100.0, "low": 99.2, "close": 99.9, "volume": 1000},
+            {"open": 99.9, "high": 100.0, "low": 99.5, "close": 99.9, "volume": 1000},
+            {"open": 99.8, "high": 101.5, "low": 99.7, "close": 99.9, "volume": 5000},   # Swept 101.5, closed 99.9, upper wick (101.5-99.9)/1.8 = 88% (>=35%)
+            {"open": 99.9, "high": 100.0, "low": 99.8, "close": 99.9, "volume": 1000},
+        ]
+        df_lt = pd.DataFrame(bars_long_trap)
+        conf_lt, reason_lt, _ = EntryConfirmationEngine.validate_candle_trigger(
+            df_lt, direction="LONG", current_price=99.9
+        )
+        self.assertFalse(conf_lt, "Bull trap with 88% rejection wick must be vetoed")
+        self.assertIn("Bull Trap Liquidity Sweep Fakeout", reason_lt)
+
+        # --- 4. BTC Shield Dump Cascade vs Normal Bear Trend ---
+        from app.engine.scanner.btc_shield import BtcPredictiveMarketShield
+        shield = BtcPredictiveMarketShield()
+
+        # Case A: BTC below 1H EMA50 but with normal intraday returns (e.g. -0.15% on 1h, +0.02% on 15m)
+        # Price is $64,600, EMA50 is ~$68,000 (c_now < ema50 * 0.95), but market is NOT flash dumping.
+        n = 60
+        prices_1h = np.linspace(70000.0, 64600.0, n)
+        # Make the last two candles flat
+        prices_1h[-1] = 64600.0
+        prices_1h[-2] = 64650.0 # ret_1h = -0.07%
+        df_1h_norm = pd.DataFrame({
+            "open": prices_1h * 1.001,
+            "high": prices_1h * 1.002,
+            "low": prices_1h * 0.998,
+            "close": prices_1h,
+            "volume": np.full(n, 500.0)
+        })
+        prices_15m = np.linspace(64630.0, 64600.0, 20)
+        prices_15m[-1] = 64600.0
+        prices_15m[-2] = 64590.0 # ret_15m = +0.01%
+        df_15m_norm = pd.DataFrame({
+            "open": prices_15m * 1.0005,
+            "high": prices_15m * 1.001,
+            "low": prices_15m * 0.999,
+            "close": prices_15m,
+            "volume": np.full(20, 100.0)
+        })
+        btc_dfs_norm = {"15m": df_15m_norm, "1h": df_1h_norm}
+        state_norm = shield.evaluate_regime(btc_dfs_norm, live_btc_price=64600.0)
+
+        # Must NOT be classified as FLASH_DUMP or BEAR_CASCADE_BLACKOUT
+        self.assertNotEqual(state_norm.get("regime"), "FLASH_DUMP")
+        self.assertNotEqual(state_norm.get("status_code"), "BEAR_CASCADE_BLACKOUT")
+        self.assertTrue(state_norm.get("altcoin_shorts_allowed"))
+
+        # Case B: Acute Flash Dump Cascade (-3.0% in 15m)
+        prices_15m_dump = np.linspace(67000.0, 67000.0, 20)
+        prices_15m_dump[-1] = 64900.0 # -3.1% dump
+        prices_15m_dump[-2] = 67000.0
+        df_15m_dump = pd.DataFrame({
+            "open": prices_15m_dump * 1.001,
+            "high": prices_15m_dump * 1.002,
+            "low": prices_15m_dump * 0.998,
+            "close": prices_15m_dump,
+            "volume": np.full(20, 5000.0)
+        })
+        btc_dfs_dump = {"15m": df_15m_dump, "1h": df_1h_norm}
+        state_dump = shield.evaluate_regime(btc_dfs_dump, live_btc_price=64900.0)
+        self.assertEqual(state_dump.get("regime"), "FLASH_DUMP")
+        self.assertEqual(state_dump.get("status_code"), "BEAR_CASCADE_BLACKOUT")
+        self.assertFalse(state_dump.get("altcoin_longs_allowed"))
+
+
 
 if __name__ == "__main__":
     unittest.main()
