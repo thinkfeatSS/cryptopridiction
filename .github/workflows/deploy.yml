@@ -1,0 +1,27 @@
+name: Production CD
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: github.repository == 'thinkfeatSS/cryptopridiction'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST || '187.52.116.72' }}
+          username: ${{ secrets.VPS_USER || 'root' }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          passphrase: ""
+          script: |
+            cd /root/crypto
+            git pull origin main
+            chmod +x deploy.sh
+            ./deploy.sh
