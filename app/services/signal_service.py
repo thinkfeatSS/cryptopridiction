@@ -2230,12 +2230,15 @@ class SignalService:
         return updated
 
     def _sync_updates_to_tracker_csv(self, signals_list: List[SignalAudit]):
-        """Syncs updated status, outcome_label, sl_price, exit_price, realized_return_pct to trader_signals_tracker.csv."""
-        # 1. Synchronize to trader_signals_tracker.csv
-        try:
-            csv_path = os.path.join(settings.EXPORT_DIR, "trader_signals_tracker.csv")
-            if os.path.exists(csv_path):
-                updated_map = {str(s.signal_id).strip(): s for s in signals_list if s.signal_id}
+        """Syncs updated status, outcome_label, sl_price, exit_price, realized_return_pct to trader_signals_tracker.csv and variants."""
+        # 1. Synchronize to trader_signals_tracker.csv and all tracker variants
+        target_csv_names = ["trader_signals_tracker.csv", "today_trader_signals_tracker.csv", "latest_signals_tracker.csv"]
+        updated_map = {str(s.signal_id).strip(): s for s in signals_list if s.signal_id}
+        for cname in target_csv_names:
+            csv_path = os.path.join(settings.EXPORT_DIR, cname)
+            if not os.path.exists(csv_path) or os.path.getsize(csv_path) < 10:
+                continue
+            try:
                 import csv
                 rows = []
                 fieldnames = []
@@ -2303,8 +2306,8 @@ class SignalService:
                     for r in rows:
                         writer.writerow(r)
                 os.replace(temp, csv_path)
-        except Exception as e:
-            logger.warning(f"[SIGNAL SERVICE ⚠️] Failed syncing updates to {csv_path}: {e}")
+            except Exception as e:
+                logger.warning(f"[SIGNAL SERVICE ⚠️] Failed syncing updates to {csv_path}: {e}")
 
         # 2. Also synchronize to v16_dynamic_states.json to guarantee 100% dashboard parity
         try:

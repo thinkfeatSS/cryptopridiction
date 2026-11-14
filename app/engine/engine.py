@@ -511,7 +511,7 @@ class UnifiedCryptoEngine:
                 if s.get("is_trade_active") and s.get("dominant_direction") in ["LONG", "SHORT"]
                 and not s.get("is_ntz_active", False)
                 and "NO_TRADE_ZONE" not in s.get("signal_status", "")
-                and str(s.get("horizon") or s.get("dominant_timeframe") or "15M").upper() in ["15M", "15M SCALP", "SCALP"]
+                and any(h in str(s.get("horizon") or s.get("dominant_timeframe") or "").upper() for h in ["15M", "5M", "1H", "4H", "12H", "24H", "1D", "SWING", "SCALP", "DAY", "7D", "15D", "30D"])
             ]
             for s in active_trade_signals:
                 curr_sm = float(s.get("sizing_multiplier", 1.0) or 1.0)
@@ -1684,7 +1684,8 @@ class UnifiedCryptoEngine:
                                     pass
 
                             if is_still_active:
-                                active_pairs.add((sym_r, hz_r))
+                                active_pairs.add((sym_r, norm_hz_r))
+                                active_pairs.add((sym_r.replace("/", "").replace(":USDT", "").replace("-", ""), norm_hz_r))
                             elif enable_expiry:
                                 # Mark stale historical pending trade as expired breakeven (clean close)
                                 row["status"] = "EXPIRED_HORIZON"
@@ -1728,8 +1729,8 @@ class UnifiedCryptoEngine:
             else:
                 norm_hz = "15M"
 
-            # Strict 15-Minute Execution Horizon Only: Suppress all other execution horizons (intraday, day trades, swings)
-            if norm_hz != "15M":
+            # Institutional Execution Horizons: 15M (Scalp), 1H (Day/Intraday), 24H (Daily Swing)
+            if norm_hz not in ["15M", "1H", "24H"]:
                 continue
 
             sig_id = s.get("trade_id") or s.get("signal_id") or f"SIG_{now_utc.strftime('%Y%m%d_%H%M%S')}_{sym_clean}_{norm_hz}"
@@ -1741,12 +1742,14 @@ class UnifiedCryptoEngine:
             if self.is_symbol_quarantined(sym)[0]:
                 continue
             sym_last_emitted = self._symbol_cooldown_registry.get(sym, 0.0)
-            cooldown_thresh = 1800 if norm_hz == "15M" else (3600 if norm_hz == "1H" else 7200)
-            if (time.time() - sym_last_emitted) < cooldown_thresh and norm_hz in ["15M", "1H"]:
+            # Rational intra-candle cooldown (10m for 15M, 30m for 1H, 1h for 24H): allows next candle close to generate fresh setup
+            cooldown_thresh = 600 if norm_hz == "15M" else (1800 if norm_hz == "1H" else 3600)
+            if (time.time() - sym_last_emitted) < cooldown_thresh:
                 continue
 
             # Prevent duplicate signal flood only if coin currently has an unexpired active trade in this horizon
-            if (sym, norm_hz) in active_pairs:
+            sym_clean_check = sym.replace("/", "").replace(":USDT", "").replace("-", "")
+            if (sym, norm_hz) in active_pairs or (sym_clean_check, norm_hz) in active_pairs:
                 continue
 
             ob_setup = s.get("order_block_setup")
