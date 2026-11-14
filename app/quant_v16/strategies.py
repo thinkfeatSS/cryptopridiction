@@ -147,7 +147,7 @@ class StrategyRegistry:
     """
 
     def __init__(self, persistence_file: Optional[str] = None):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.strategies: Dict[str, StrategyPerformance] = {}
         export_dir = os.getenv("EXPORT_DIR", "./export_app_data")
         self.persistence_file = persistence_file or os.path.join(export_dir, "v16_strategy_priors.json")
