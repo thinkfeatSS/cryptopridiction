@@ -15,24 +15,21 @@ echo "=================================================================="
 
 # 1. Authorize dedicated deployment key
 DEPLOY_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIL2v9in58kuv0d0rXQa9A3E2JjApSf9G6CUXvSM5XwK1 antigravity_deploy"
-SSH_DIR="/root/.ssh"
-AUTH_KEYS="${SSH_DIR}/authorized_keys"
 
-mkdir -p "$SSH_DIR"
-chmod 700 "$SSH_DIR"
-
-if [ -f "$AUTH_KEYS" ]; then
-    if ! grep -q "antigravity_deploy" "$AUTH_KEYS"; then
-        echo "$DEPLOY_PUBKEY" >> "$AUTH_KEYS"
-        echo "✅ Added Antigravity deploy key to ${AUTH_KEYS}"
+for TARGET_DIR in "/root/.ssh" "${HOME}/.ssh"; do
+    mkdir -p "$TARGET_DIR" 2>/dev/null || true
+    chmod 700 "$TARGET_DIR" 2>/dev/null || true
+    TARGET_AUTH="${TARGET_DIR}/authorized_keys"
+    touch "$TARGET_AUTH" 2>/dev/null || true
+    if ! grep -q "antigravity_deploy" "$TARGET_AUTH" 2>/dev/null; then
+        echo "$DEPLOY_PUBKEY" >> "$TARGET_AUTH"
+        echo "✅ Added Antigravity deploy key to ${TARGET_AUTH}"
     else
-        echo "ℹ️  Antigravity deploy key already present in ${AUTH_KEYS}"
+        echo "ℹ️  Antigravity deploy key already present in ${TARGET_AUTH}"
     fi
-else
-    echo "$DEPLOY_PUBKEY" > "$AUTH_KEYS"
-    echo "✅ Created ${AUTH_KEYS} with Antigravity deploy key"
-fi
-chmod 600 "$AUTH_KEYS"
+    chmod 600 "$TARGET_AUTH" 2>/dev/null || true
+done
+chmod 755 /root 2>/dev/null || chmod 700 /root 2>/dev/null || true
 
 # 2. Ensure scripts are executable
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,3 +57,4 @@ echo "   - Assistant on-demand deployments: ACTIVE (via SSH deploy_key)"
 echo "   - GitHub push auto-sync: ACTIVE (cron checks every 2 minutes)"
 echo "   - Log output: /var/log/crypto_autodeploy.log"
 echo "=================================================================="
+

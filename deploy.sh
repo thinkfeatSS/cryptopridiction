@@ -56,6 +56,7 @@ fi
 
 # 5. Build and launch Docker containers with zero downtime
 echo "📦 Building and updating Docker containers..."
+git rev-parse --short HEAD > app/.git_commit 2>/dev/null || true
 docker compose up -d --build
 
 # 6. Wait for Backend Service Health

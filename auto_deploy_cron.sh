@@ -36,3 +36,4 @@ if [ "$LOCAL" != "$REMOTE" ]; then
     ./deploy.sh >> "$LOG_FILE" 2>&1
     echo "[$(date -u '+%Y-%m-%d %H:%M:%S UTC')] ✅ Deployment to $REMOTE complete!" >> "$LOG_FILE"
 fi
+

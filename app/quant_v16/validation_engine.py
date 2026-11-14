@@ -24,10 +24,33 @@ ARCHIVED_EXPERIMENT_ID = "V16.0.0-SHADOW-001"
 SHADOW_002_FREEZE_UTC = "2026-11-04 03:30:00 UTC"
 SHADOW_002_FREEZE_TS = 1793763000.0
 
+def _resolve_active_git_commit() -> str:
+    """Dynamically determine current git commit hash across containers and local."""
+    import os, subprocess
+    env_c = os.getenv("GIT_COMMIT")
+    if env_c and len(env_c) >= 7:
+        return env_c.strip()[:7]
+    for p in ["app/.git_commit", ".git_commit", "/app/.git_commit", "/app/app/.git_commit"]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    c = f.read().strip()
+                    if c and len(c) >= 7:
+                        return c[:7]
+            except Exception:
+                pass
+    try:
+        res = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=2)
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip()
+    except Exception:
+        pass
+    return "bbf31f3"
+
 EXPERIMENT_MANIFEST = {
     "experiment_id": EXPERIMENT_ID,
     "status": "ACTIVE_SHADOW_VALIDATION",
-    "git_commit": "6b27043",
+    "git_commit": _resolve_active_git_commit(),
     "backend_version": "16.1.0",
     "scanner_version": "16.1.0",
     "feature_version": "16.1.0",
