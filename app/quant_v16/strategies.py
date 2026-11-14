@@ -183,11 +183,44 @@ class StrategyRegistry:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 loaded_strats = data.get("strategies", {})
-                # Safeguard against loading corrupted priors where strategies collapsed to <= 0.40 PF or were erroneously mass-disabled
-                disabled_count = sum(1 for v in loaded_strats.values() if v.get("status") == "DISABLED" or float(v.get("rolling_50_pf", 1.0) or 1.0) <= 0.40)
-                if len(loaded_strats) > 10 and (disabled_count / len(loaded_strats)) > 0.40:
-                    import logging
-                    logging.getLogger("strategies").warning(f"[STRATEGY REGISTRY ⚠️] Detected corrupted strategy priors on disk ({disabled_count}/{len(loaded_strats)} disabled/collapsed). Restoring clean baseline defaults.")
+                import logging
+                strat_logger = logging.getLogger("strategies")
+
+                # Safeguard 1: Mass-collapse / pollution detection (>= 25% paused or disabled)
+                disabled_or_paused = sum(
+                    1 for v in loaded_strats.values()
+                    if v.get("status") in ["DISABLED", "PAUSED"] or float(v.get("rolling_50_pf", 1.0) or 1.0) < 0.80
+                )
+                if len(loaded_strats) > 10 and (disabled_or_paused / len(loaded_strats)) >= 0.25:
+                    strat_logger.warning(
+                        f"[STRATEGY REGISTRY ⚠️] Detected polluted strategy priors on disk ({disabled_or_paused}/{len(loaded_strats)} disabled/paused). Restoring clean calibrated baseline defaults."
+                    )
+                    self._init_defaults()
+                    self.save_to_disk()
+                    return True
+
+                # Safeguard 2: Synthetic unit-test pollution guard
+                # If disk priors report high trade counts on paused/disabled strategies while authoritative tracker has few or no records, restore defaults
+                csv_path = os.path.join(os.path.dirname(os.path.abspath(path)), "trader_signals_tracker.csv")
+                csv_trades_count = 0
+                if os.path.exists(csv_path):
+                    try:
+                        with open(csv_path, "r", encoding="utf-8") as f_csv:
+                            csv_trades_count = max(0, sum(1 for _ in f_csv) - 1)
+                    except Exception:
+                        pass
+
+                is_test_polluted = False
+                for k, v in loaded_strats.items():
+                    r_cnt = int(v.get("resolved_count", 0))
+                    if r_cnt > max(50, csv_trades_count * 2) and v.get("status") in ["PAUSED", "DISABLED"]:
+                        is_test_polluted = True
+                        break
+
+                if is_test_polluted:
+                    strat_logger.warning(
+                        f"[STRATEGY REGISTRY ⚠️] Strategy priors on disk contain synthetic test counts exceeding live tracker ({csv_trades_count} actual trades). Restoring clean baseline defaults."
+                    )
                     self._init_defaults()
                     self.save_to_disk()
                     return True
