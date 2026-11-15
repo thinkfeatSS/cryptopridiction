@@ -454,15 +454,41 @@ class PaperTradingBot:
                 alt_longs_ok = btc_shield_state.get("altcoin_longs_allowed", True)
                 alt_shorts_ok = btc_shield_state.get("altcoin_shorts_allowed", True)
 
-                if dir_check == "LONG" and not alt_longs_ok:
-                    reg_lbl = btc_shield_state.get("regime") or btc_shield_state.get("v16_regime") or "BEAR_TREND"
-                    print(f"[PAPER BOT 🛑 BETA VETO] Blocked LONG entry for {signal.get('symbol')}: BTC Beta Shield ({reg_lbl}) strictly disallows altcoin longs.")
-                    return False
+                # Extreme V-Bottom Counter-Trend Setup Detection:
+                # While trend-following shorts are barred during oversold climaxes (RSI <= 28),
+                # counter-trend long setups (such as Turtle Soup / Liquidity Sweep Reclaims) are permitted
+                # to capitalize on bottom absorption once buyer wick confirmation is established.
+                is_v_bottom_counter_trend = bool(
+                    dir_check == "LONG" and (
+                        signal.get("is_turtle_soup") or
+                        signal.get("is_v_bottom_reclaim") or
+                        signal.get("is_sweep_reclaim") or
+                        any(k in str(signal.get("strategy") or "").upper() for k in ["TURTLE_SOUP", "LIQUIDITY_RECLAIM", "EXTREME_V_BOTTOM"]) or
+                        any(k in str(signal.get("thesis") or "").upper() for k in ["TURTLE_SOUP", "LIQUIDITY_RECLAIM", "EXTREME_V_BOTTOM", "BOTTOM_ABSORPTION"]) or
+                        signal.get("pattern") in ["EXTREME_V_BOTTOM_RECLAIM", "LIQUIDITY_SWEEP_RECLAIM"] or
+                        (signal.get("metrics") and (signal["metrics"].get("is_v_bottom_reclaim") or signal["metrics"].get("is_sweep_reclaim")))
+                    )
+                )
 
-                if dir_check == "SHORT" and not alt_shorts_ok:
-                    reg_lbl = btc_shield_state.get("regime") or btc_shield_state.get("v16_regime") or "BULL_TREND"
-                    print(f"[PAPER BOT 🛑 BETA VETO] Blocked SHORT entry for {signal.get('symbol')}: BTC Beta Shield ({reg_lbl}) strictly disallows altcoin shorts.")
-                    return False
+                if dir_check == "LONG" and not alt_longs_ok:
+                    if not is_v_bottom_counter_trend:
+                        reg_lbl = btc_shield_state.get("regime") or btc_shield_state.get("v16_regime") or "BEAR_TREND"
+                        print(f"[PAPER BOT 🛑 BETA VETO] Blocked LONG entry for {signal.get('symbol')}: BTC Beta Shield ({reg_lbl}) strictly disallows altcoin longs.")
+                        return False
+                    else:
+                        print(f"[PAPER BOT 🐢 V-BOTTOM PERMITTED] Counter-trend LONG authorized for {signal.get('symbol')}: Turtle Soup / Liquidity Reclaim bottom absorption confirmed during oversold climax.")
+
+                if dir_check == "SHORT":
+                    # Oversold Capitulation Climax Veto (RSI <= 28.0): Bar trend-following shorts
+                    rsi_check = float(signal.get("rsi") or signal.get("rsi_14") or (signal.get("metrics") or {}).get("rsi_14") or 50.0)
+                    if rsi_check <= 28.0:
+                        print(f"[PAPER BOT 🛑 OVERSOLD VETO] Blocked SHORT entry for {signal.get('symbol')}: RSI ({rsi_check:.1f} <= 28.0) is oversold capitulation climax.")
+                        return False
+
+                    if not alt_shorts_ok:
+                        reg_lbl = btc_shield_state.get("regime") or btc_shield_state.get("v16_regime") or "BULL_TREND"
+                        print(f"[PAPER BOT 🛑 BETA VETO] Blocked SHORT entry for {signal.get('symbol')}: BTC Beta Shield ({reg_lbl}) strictly disallows altcoin shorts.")
+                        return False
 
                 # 0c. BTC Chop Index Portfolio Defense Gate (Section 35 & Fix 1)
                 chop_val = float(btc_shield_state.get("chop_index") or btc_shield_state.get("metrics", {}).get("chop_index") or 0.0)

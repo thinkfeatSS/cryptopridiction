@@ -808,11 +808,12 @@ class InstitutionalOrderBlockEngine:
 
                     decision_lbl = f"🎯 [{best_ob.zeiierman_rank_label}] RETEST (LONG)" if structural_trigger_confirmed else f"⏳ [{best_ob.zeiierman_rank_label}] PASSIVE POI (LONG) - AWAITING TRIGGER"
 
+                    is_ts = (trigger_type == "TURTLE_SOUP_SWEEP_RECLAIM")
                     return {
                         "setup_detected": True,
                         "direction": "LONG",
-                        "strategy": "ORDER_BLOCK_LONG",
-                        "decision": decision_lbl,
+                        "strategy": "TURTLE_SOUP_LIQUIDITY_RECLAIM" if is_ts else "ORDER_BLOCK_LONG",
+                        "decision": f"🐢 [{best_ob.zeiierman_rank_label}] TURTLE SOUP RECLAIM (LONG)" if is_ts else decision_lbl,
                         "block_type": "BULLISH_DEMAND_BLOCK",
                         "state": best_ob.state.value,
                         "zeiierman_rank": best_ob.zeiierman_rank,
@@ -841,6 +842,8 @@ class InstitutionalOrderBlockEngine:
                         "is_passive_poi": True,
                         "structural_trigger_confirmed": structural_trigger_confirmed,
                         "trigger_type": trigger_type,
+                        "is_turtle_soup": is_ts,
+                        "is_v_bottom_reclaim": is_ts,
                         "execution_mode": "MARKET_TRIGGER" if structural_trigger_confirmed else "RESTING_LIMIT",
                         "requires_trigger_confirmation": not structural_trigger_confirmed,
                         "mitigated": (best_ob.retest_count > 0),

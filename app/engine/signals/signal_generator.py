@@ -620,17 +620,35 @@ class SignalGenerationSystem:
                 order_block_setup.get("is_turtle_soup") or
                 "TURTLE_SOUP" in str(order_block_setup.get("strategy", "")).upper() or
                 "LIQUIDITY_RECLAIM" in str(canonical_strategy).upper()
-            )) or (candle_metrics and candle_metrics.get("is_sweep_reclaim"))
+            )) or (candle_metrics and (candle_metrics.get("is_sweep_reclaim") or candle_metrics.get("is_v_bottom_reclaim")))
+        )
+
+        is_v_bottom_counter_trend = bool(
+            direction == "LONG" and (
+                is_liquidity_reclaim or
+                (candle_metrics and candle_metrics.get("is_v_bottom_reclaim")) or
+                (order_block_setup and (order_block_setup.get("is_turtle_soup") or order_block_setup.get("is_v_bottom_reclaim"))) or
+                any(k in str(canonical_strategy).upper() for k in ["TURTLE_SOUP", "LIQUIDITY_RECLAIM", "EXTREME_V_BOTTOM"])
+            )
         )
 
         # Strict BTC Market Beta Shield Gate:
-        # Counter-trend trades against BTC macro trend fail closed (0 exemptions).
+        # While trend-following shorts are barred during oversold climaxes (RSI <= 28),
+        # counter-trend long setups (such as Turtle Soup / Liquidity Sweep Reclaims) are permitted
+        # to capitalize on bottom absorption once buyer wick confirmation is established.
         if direction == "LONG" and not alt_longs_allowed:
-            is_vetoed = True
-            strat_veto_reason = f"LONG direction strictly vetoed by BTC Beta Shield ({active_market_regime})"
-        elif direction == "SHORT" and not alt_shorts_allowed:
-            is_vetoed = True
-            strat_veto_reason = f"SHORT direction strictly vetoed by BTC Beta Shield ({active_market_regime})"
+            if not is_v_bottom_counter_trend:
+                is_vetoed = True
+                strat_veto_reason = f"LONG direction strictly vetoed by BTC Beta Shield ({active_market_regime})"
+        elif direction == "SHORT":
+            # Bar trend-following shorts during oversold climaxes (RSI <= 28)
+            rsi_val = float(candle_metrics.get("rsi_14", 50.0) if candle_metrics else 50.0)
+            if rsi_val <= 28.0:
+                is_vetoed = True
+                strat_veto_reason = f"SHORT direction barred: Oversold Capitulation Climax (RSI {rsi_val:.1f} <= 28.0)"
+            elif not alt_shorts_allowed:
+                is_vetoed = True
+                strat_veto_reason = f"SHORT direction strictly vetoed by BTC Beta Shield ({active_market_regime})"
 
         # BTC Chop Index Defense Gate (decoupled altcoin trends with strong idiosyncratic momentum are exempt):
         btc_chop = float(btc_shield_state.get("chop_index") or btc_shield_state.get("metrics", {}).get("chop_index") or 0.0)
@@ -2424,6 +2442,12 @@ class SignalGenerationSystem:
         has_smc_24h: bool = False,
         smc_dir_24h: Optional[str] = None,
         triad_structure: Optional[Any] = None,
+        rsi_15m: Optional[float] = None,
+        candle_metrics_15m: Optional[Dict[str, Any]] = None,
+        is_v_bottom_setup_15m: bool = False,
+        rsi_1h: Optional[float] = None,
+        candle_metrics_1h: Optional[Dict[str, Any]] = None,
+        is_v_bottom_setup_1h: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         """
         Evaluates discrete multi-horizon qualification gates for 15M Scalp, 1H Intraday, and 24H Swing.
@@ -2570,9 +2594,37 @@ class SignalGenerationSystem:
         htf_4h_str = str(trend_matrix.get("4h", "CONSOLIDATION")).upper()
         htf_1d_str = str(trend_matrix.get("1d", "CONSOLIDATION")).upper()
 
+        # Extreme V-Bottom Counter-Trend Setup Detection on 15M:
+        is_v_bottom_counter_trend_15m = bool(
+            is_v_bottom_setup_15m or
+            (candle_metrics_15m and (candle_metrics_15m.get("is_v_bottom_reclaim") or candle_metrics_15m.get("is_sweep_reclaim"))) or
+            (ob_setup_15m and ob_setup_15m.get("direction") == "LONG" and (
+                ob_setup_15m.get("is_turtle_soup") or
+                "TURTLE_SOUP" in str(ob_setup_15m.get("strategy", "")).upper() or
+                ob_setup_15m.get("is_v_bottom_reclaim")
+            )) or
+            (has_smc_15m and smc_dir_15m == "LONG" and candle_metrics_15m and (
+                candle_metrics_15m.get("is_sweep_reclaim") or
+                candle_metrics_15m.get("is_v_bottom_reclaim") or
+                float(candle_metrics_15m.get("lower_wick_ratio", 0.0) or 0.0) >= 0.25
+            )) or
+            (rsi_15m is not None and rsi_15m <= 28.0 and (
+                (ob_setup_15m and ob_setup_15m.get("direction") == "LONG" and ob_setup_15m.get("structural_trigger_confirmed")) or
+                (candle_metrics_15m and (float(candle_metrics_15m.get("lower_wick_ratio", 0.0) or 0.0) >= 0.25 or candle_metrics_15m.get("is_sweep_reclaim")))
+            ))
+        )
+
+        if is_v_bottom_counter_trend_15m and cand_15m_dir != "LONG":
+            cand_15m_dir = "LONG"
+            q_15m_qualified = True
+
         is_htf_conflict_15m = False
         if cand_15m_dir == "SHORT":
-            if htf_4h_str == "BULLISH":
+            # Oversold Capitulation Climax Guard:
+            # While trend-following shorts are barred during oversold climaxes (RSI <= 28.0)
+            if rsi_15m is not None and rsi_15m <= 28.0:
+                is_htf_conflict_15m = True
+            elif htf_4h_str == "BULLISH":
                 is_htf_conflict_15m = True
             elif t_1h_str == "BULLISH":
                 is_htf_conflict_15m = True
@@ -2581,7 +2633,13 @@ class SignalGenerationSystem:
             elif not (has_valid_institutional_trigger_15m or (triad_structure and getattr(triad_structure, "scenario", "") == "SCENARIO_C_TREND_PULLBACK_ENTRY")) and t_15m_str == "BULLISH":
                 is_htf_conflict_15m = True
         elif cand_15m_dir == "LONG":
-            if htf_4h_str == "BEARISH":
+            if is_v_bottom_counter_trend_15m:
+                # Extreme V-Bottom Counter-Trend Setups:
+                # While trend-following shorts are barred during oversold climaxes (RSI <= 28),
+                # counter-trend long setups (such as Turtle Soup / Liquidity Sweep Reclaims) are permitted
+                # to capitalize on bottom absorption once buyer wick confirmation is established.
+                is_htf_conflict_15m = False
+            elif htf_4h_str == "BEARISH":
                 is_htf_conflict_15m = True
             elif t_1h_str == "BEARISH":
                 is_htf_conflict_15m = True
@@ -2593,7 +2651,7 @@ class SignalGenerationSystem:
         # Macro Pullback Exhaustion Trap (Phase 4):
         # If 15M was attempting to buy counter-trend into HTF Bearish Resistance, but touches a verified Bearish OB or SMC Supply,
         # ONLY invert direction if the OB has an active, confirmed structural trigger (NOT a passive POI)!
-        if is_htf_conflict_15m and cand_15m_dir == "LONG" and htf_4h_str == "BEARISH":
+        if is_htf_conflict_15m and cand_15m_dir == "LONG" and htf_4h_str == "BEARISH" and not is_v_bottom_counter_trend_15m:
             has_bearish_exhaustion = bool(
                 (has_ob_15m and ob_setup_15m.get("direction") == "SHORT" and ob_setup_15m.get("structural_trigger_confirmed", False) and not ob_setup_15m.get("is_passive_poi", False)) or
                 (has_smc_15m and smc_dir_15m == "SHORT")
@@ -2658,11 +2716,13 @@ class SignalGenerationSystem:
             "bear_aligned_count": bear_cnt_15m,
             "chop_aligned_count": sum(1 for t in trends_15m if t == "CONSOLIDATION"),
             "archetype": matrix_eval.get("archetype"),
-            "strategy": matrix_eval.get("strategy"),
+            "strategy": "TURTLE_SOUP_LIQUIDITY_RECLAIM" if is_v_bottom_counter_trend_15m else matrix_eval.get("strategy"),
             "has_order_block_touch": has_ob_15m,
             "has_order_block_trigger": has_ob_trigger_15m,
             "is_passive_poi": bool(has_ob_15m and not has_ob_trigger_15m),
             "has_smc_setup": has_smc_15m,
+            "is_turtle_soup": is_v_bottom_counter_trend_15m,
+            "is_v_bottom_reclaim": is_v_bottom_counter_trend_15m,
             "order_block_rank": ob_setup_15m.get("zeiierman_rank") if has_ob_15m else None,
             "conflicts": (
                 [f"COLD_START_HORIZON_ACCUMULATION: 15M Scalp requires >= 15 historical candles (3.75h). Under-accumulated horizons: {cold_start_tfs_15m}."]
@@ -2763,15 +2823,41 @@ class SignalGenerationSystem:
             q_1h_qualified = False
             q_1h_direction = None
 
+        # Extreme V-Bottom Counter-Trend Setup Detection on 1H:
+        is_v_bottom_counter_trend_1h = bool(
+            is_v_bottom_setup_1h or
+            (candle_metrics_1h and (candle_metrics_1h.get("is_v_bottom_reclaim") or candle_metrics_1h.get("is_sweep_reclaim"))) or
+            (ob_setup_1h and ob_setup_1h.get("direction") == "LONG" and (
+                ob_setup_1h.get("is_turtle_soup") or
+                "TURTLE_SOUP" in str(ob_setup_1h.get("strategy", "")).upper() or
+                ob_setup_1h.get("is_v_bottom_reclaim")
+            )) or
+            (has_smc_1h and smc_dir_1h == "LONG" and candle_metrics_1h and (
+                candle_metrics_1h.get("is_sweep_reclaim") or
+                candle_metrics_1h.get("is_v_bottom_reclaim") or
+                float(candle_metrics_1h.get("lower_wick_ratio", 0.0) or 0.0) >= 0.25
+            )) or
+            (rsi_1h is not None and rsi_1h <= 28.0 and (
+                (ob_setup_1h and ob_setup_1h.get("direction") == "LONG" and ob_setup_1h.get("structural_trigger_confirmed")) or
+                (candle_metrics_1h and (float(candle_metrics_1h.get("lower_wick_ratio", 0.0) or 0.0) >= 0.25 or candle_metrics_1h.get("is_sweep_reclaim")))
+            ))
+        )
+
+        if is_v_bottom_counter_trend_1h and cand_1h_dir != "LONG":
+            cand_1h_dir = "LONG"
+            q_1h_qualified = True
+
         # Pillar 2: Strict Higher-Timeframe Trend Confluence (Anchor = 4H, Context = 1D)
         is_htf_conflict_1h = bool(
             cand_1h_dir and (
-                (cand_1h_dir == "SHORT" and (htf_4h_str == "BULLISH" or htf_1d_str == "BULLISH")) or
-                (cand_1h_dir == "LONG" and (htf_4h_str == "BEARISH" or htf_1d_str == "BEARISH"))
+                (cand_1h_dir == "SHORT" and (
+                    (rsi_1h is not None and rsi_1h <= 28.0) or htf_4h_str == "BULLISH" or htf_1d_str == "BULLISH"
+                )) or
+                (cand_1h_dir == "LONG" and not is_v_bottom_counter_trend_1h and (htf_4h_str == "BEARISH" or htf_1d_str == "BEARISH"))
             )
         )
         # Macro Pullback Exhaustion Trap (Phase 4):
-        if is_htf_conflict_1h and cand_1h_dir == "LONG" and (htf_4h_str == "BEARISH" or htf_1d_str == "BEARISH"):
+        if is_htf_conflict_1h and cand_1h_dir == "LONG" and (htf_4h_str == "BEARISH" or htf_1d_str == "BEARISH") and not is_v_bottom_counter_trend_1h:
             has_bearish_exhaustion_1h = bool(
                 (has_ob_1h and ob_setup_1h.get("direction") == "SHORT") or
                 (has_smc_1h and smc_dir_1h == "SHORT")
@@ -2804,11 +2890,13 @@ class SignalGenerationSystem:
             "bear_aligned_count": bear_cnt_1h,
             "chop_aligned_count": sum(1 for t in trends_1h if t == "CONSOLIDATION"),
             "archetype": matrix_eval.get("archetype"),
-            "strategy": matrix_eval.get("strategy"),
+            "strategy": "TURTLE_SOUP_LIQUIDITY_RECLAIM" if is_v_bottom_counter_trend_1h else matrix_eval.get("strategy"),
             "has_order_block_touch": has_ob_1h,
             "has_order_block_trigger": has_ob_trigger_1h,
             "is_passive_poi": bool(has_ob_1h and not has_ob_trigger_1h),
             "has_smc_setup": has_smc_1h,
+            "is_turtle_soup": is_v_bottom_counter_trend_1h,
+            "is_v_bottom_reclaim": is_v_bottom_counter_trend_1h,
             "order_block_rank": ob_setup_1h.get("zeiierman_rank") if has_ob_1h else None,
             "conflicts": (
                 [f"COLD_START_HORIZON_ACCUMULATION: 1H Intraday requires >= 15 historical candles (15h). Under-accumulated horizons: {cold_start_tfs_1h}."]
@@ -3521,11 +3609,15 @@ class SignalGenerationSystem:
         # Check active SMC Price Action Setups on 15M, 1H, and 24H charts
         has_smc_15m = False
         smc_dir_15m = None
+        m_l_15m = {}
+        rsi_15m = 50.0
         df_15m = dfs_9.get("15m")
         if df_15m is not None and len(df_15m) >= 4:
             c_l, _, m_l = EntryConfirmationEngine.validate_candle_trigger(df_15m, direction="LONG", current_price=current_price, spread_bps=spread_bps)
             c_s, _, m_s = EntryConfirmationEngine.validate_candle_trigger(df_15m, direction="SHORT", current_price=current_price, spread_bps=spread_bps)
-            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion")):
+            m_l_15m = m_l
+            rsi_15m = float(m_l.get("rsi_14", 50.0))
+            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion") or m_l.get("is_v_bottom_reclaim")):
                 has_smc_15m = True
                 smc_dir_15m = "LONG"
             elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing") or m_s.get("is_squeeze_expansion")):
@@ -3534,11 +3626,15 @@ class SignalGenerationSystem:
 
         has_smc_1h = False
         smc_dir_1h = None
+        m_l_1h = {}
+        rsi_1h = 50.0
         df_1h = dfs_9.get("1h")
         if df_1h is not None and len(df_1h) >= 4:
             c_l, _, m_l = EntryConfirmationEngine.validate_candle_trigger(df_1h, direction="LONG", current_price=current_price, spread_bps=spread_bps)
             c_s, _, m_s = EntryConfirmationEngine.validate_candle_trigger(df_1h, direction="SHORT", current_price=current_price, spread_bps=spread_bps)
-            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion")):
+            m_l_1h = m_l
+            rsi_1h = float(m_l.get("rsi_14", 50.0))
+            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion") or m_l.get("is_v_bottom_reclaim")):
                 has_smc_1h = True
                 smc_dir_1h = "LONG"
             elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing") or m_s.get("is_squeeze_expansion")):
@@ -3551,7 +3647,7 @@ class SignalGenerationSystem:
         if df_24h is not None and len(df_24h) >= 4:
             c_l, _, m_l = EntryConfirmationEngine.validate_candle_trigger(df_24h, direction="LONG", current_price=current_price, spread_bps=spread_bps)
             c_s, _, m_s = EntryConfirmationEngine.validate_candle_trigger(df_24h, direction="SHORT", current_price=current_price, spread_bps=spread_bps)
-            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion")):
+            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion") or m_l.get("is_v_bottom_reclaim")):
                 has_smc_24h = True
                 smc_dir_24h = "LONG"
             elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing") or m_s.get("is_squeeze_expansion")):
@@ -3572,6 +3668,12 @@ class SignalGenerationSystem:
             has_smc_24h=has_smc_24h,
             smc_dir_24h=smc_dir_24h,
             triad_structure=triad_structure,
+            rsi_15m=rsi_15m,
+            candle_metrics_15m=m_l_15m,
+            is_v_bottom_setup_15m=bool(m_l_15m.get("is_v_bottom_reclaim")),
+            rsi_1h=rsi_1h,
+            candle_metrics_1h=m_l_1h,
+            is_v_bottom_setup_1h=bool(m_l_1h.get("is_v_bottom_reclaim")),
         )
 
         has_ob_15m = bool(ob_setup_15m and ob_setup_15m.get("setup_detected"))

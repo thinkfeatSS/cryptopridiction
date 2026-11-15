@@ -1858,6 +1858,226 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_24_extreme_v_bottom_counter_trend_setups_and_oversold_short_veto(self):
+        """
+        Verify Extreme V-Bottom Counter-Trend Setups Rule:
+        While trend-following shorts are barred during oversold climaxes (RSI <= 28),
+        counter-trend long setups (such as Turtle Soup / Liquidity Sweep Reclaims) are permitted
+        to capitalize on bottom absorption once buyer wick confirmation is established.
+        """
+        import pandas as pd
+        import numpy as np
+        import tempfile
+        import shutil
+
+        # -------------------------------------------------------------
+        # 1. EntryConfirmationEngine.validate_candle_trigger tests
+        # -------------------------------------------------------------
+        # Synthesize a 25-candle waterfall cascade with deep oversold RSI (~23-25)
+        np.random.seed(42)
+        base_p = 100.0
+        closes = []
+        for i in range(25):
+            base_p -= 1.5
+            closes.append(base_p)
+
+        # Candle A: Waterfall knife continuing downward with no buyer wick (lower wick = 0.05)
+        df_dump_knife = pd.DataFrame({
+            "open": [c + 0.6 for c in closes],
+            "high": [c + 0.7 for c in closes],
+            "low": [c - 0.1 for c in closes],
+            "close": closes,
+            "volume": [1000.0] * 25
+        })
+
+        # Test A1: Trend-following SHORT must be barred during oversold climax (RSI <= 28.0)
+        c_short, rsn_short, m_short = EntryConfirmationEngine.validate_candle_trigger(
+            df=df_dump_knife,
+            direction="SHORT",
+            current_price=closes[-1],
+            spread_bps=3.0
+        )
+        self.assertFalse(c_short, "Trend-following short must be barred during oversold climax (RSI <= 28)")
+        self.assertIn("Oversold Capitulation Climax", rsn_short)
+        self.assertLessEqual(m_short["rsi_14"], 28.0)
+
+        # Test A2: Long without buyer wick confirmation must also be barred (cannot buy falling knife)
+        c_long_knife, rsn_long_knife, _ = EntryConfirmationEngine.validate_candle_trigger(
+            df=df_dump_knife,
+            direction="LONG",
+            current_price=closes[-1],
+            spread_bps=3.0
+        )
+        self.assertFalse(c_long_knife, "Long falling knife with no buyer wick must be rejected")
+        self.assertIn("Awaiting Buyer Wick Confirmation", rsn_long_knife)
+
+        # Candle B: Oversold V-bottom absorption candle with strong lower wick (lower wick ~57%)
+        df_dump_vbottom = df_dump_knife.copy()
+        # Closed candle (-2): Open 64.0, Low 63.2 (lower wick 0.8 / 1.4 = 57%), Close 64.4, High 64.6
+        df_dump_vbottom.iloc[-2, df_dump_vbottom.columns.get_loc("open")] = 64.0
+        df_dump_vbottom.iloc[-2, df_dump_vbottom.columns.get_loc("low")] = 63.2
+        df_dump_vbottom.iloc[-2, df_dump_vbottom.columns.get_loc("close")] = 64.4
+        df_dump_vbottom.iloc[-2, df_dump_vbottom.columns.get_loc("high")] = 64.6
+        # Live candle (-1): Stable bar at 64.4
+        df_dump_vbottom.iloc[-1, df_dump_vbottom.columns.get_loc("open")] = 64.4
+        df_dump_vbottom.iloc[-1, df_dump_vbottom.columns.get_loc("high")] = 64.5
+        df_dump_vbottom.iloc[-1, df_dump_vbottom.columns.get_loc("low")] = 64.3
+        df_dump_vbottom.iloc[-1, df_dump_vbottom.columns.get_loc("close")] = 64.4
+
+        # Test A3: Counter-trend LONG setup (Turtle Soup / Sweep Reclaim with buyer wick) must be CONFIRMED!
+        c_long_reclaim, rsn_long_reclaim, m_long_reclaim = EntryConfirmationEngine.validate_candle_trigger(
+            df=df_dump_vbottom,
+            direction="LONG",
+            current_price=64.4,
+            spread_bps=3.0
+        )
+        self.assertTrue(c_long_reclaim, "Counter-trend long must be confirmed on bottom absorption with buyer wick")
+        self.assertTrue(m_long_reclaim.get("is_v_bottom_reclaim"))
+        self.assertIn("Extreme V-Bottom Counter-Trend Long Confirmed", rsn_long_reclaim)
+
+        # -------------------------------------------------------------
+        # 2. evaluate_multi_horizon_gates tests
+        # -------------------------------------------------------------
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+        sig_gen = SignalGenerationSystem()
+
+        # Bearish HTF trend matrix (4H BEARISH, 1H BEARISH)
+        trend_matrix_bear = {
+            "5m": "BEARISH",
+            "15m": "BEARISH",
+            "1h": "BEARISH",
+            "4h": "BEARISH",
+            "12h": "BEARISH",
+            "1d": "BEARISH"
+        }
+        preds = {
+            "5m": {"is_cold_start": False, "candle_count": 50},
+            "15m": {"is_cold_start": False, "candle_count": 50},
+            "1h": {"is_cold_start": False, "candle_count": 50},
+            "4h": {"is_cold_start": False, "candle_count": 50},
+            "12h": {"is_cold_start": False, "candle_count": 50},
+            "1d": {"is_cold_start": False, "candle_count": 50}
+        }
+        matrix_eval = {
+            "archetype": "SECULAR_EXPANSION",
+            "trade_permitted": True,
+            "strategy": "MOMENTUM_TREND_EXPANSION",
+            "dominant_direction": "SHORT"
+        }
+
+        # Test B1: Trend-following SHORT with oversold RSI (24.0) must be barred!
+        q_15_short, _, _ = sig_gen.evaluate_multi_horizon_gates(
+            trend_matrix=trend_matrix_bear,
+            horizon_predictions=preds,
+            matrix_eval=matrix_eval,
+            rsi_15m=24.0
+        )
+        self.assertFalse(q_15_short["qualified"], "Trend-following short must not qualify during RSI <= 28 oversold climax")
+
+        # Test B2: Counter-trend LONG (Turtle Soup / Liquidity Sweep Reclaim with buyer wick) must QUALIFY!
+        ob_turtle_soup = {
+            "setup_detected": True,
+            "direction": "LONG",
+            "is_turtle_soup": True,
+            "structural_trigger_confirmed": True,
+            "zeiierman_rank": 2,
+            "strategy": "TURTLE_SOUP_LIQUIDITY_RECLAIM"
+        }
+        q_15_long_ts, _, _ = sig_gen.evaluate_multi_horizon_gates(
+            trend_matrix=trend_matrix_bear,
+            horizon_predictions=preds,
+            matrix_eval=matrix_eval,
+            ob_setup_15m=ob_turtle_soup,
+            has_smc_15m=True,
+            smc_dir_15m="LONG",
+            rsi_15m=24.0,
+            candle_metrics_15m=m_long_reclaim,
+            is_v_bottom_setup_15m=True
+        )
+        self.assertTrue(q_15_long_ts["qualified"], "Extreme V-Bottom Turtle Soup LONG must qualify despite HTF Bearish trend")
+        self.assertEqual(q_15_long_ts["direction"], "LONG")
+        self.assertTrue(q_15_long_ts.get("is_v_bottom_reclaim"))
+
+        # -------------------------------------------------------------
+        # 3. PaperTradingBot.admit_signal tests
+        # -------------------------------------------------------------
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            bot = PaperTradingBot(ledger_file=os.path.join(tmp_dir, "test_vbottom_ledger.json"))
+
+            # BTC Beta Shield in BEAR_TREND (altcoin_longs_allowed = False)
+            btc_shield_bear = {
+                "active": False,
+                "regime": "BEAR_TREND",
+                "v16_regime": "BEAR_TREND",
+                "altcoin_longs_allowed": False,
+                "altcoin_shorts_allowed": True
+            }
+
+            # Test C1: Standard trend-following SHORT with RSI <= 28.0 must be blocked by Paper Bot
+            sig_short_oversold = {
+                "trade_id": "TEST_SHORT_OVERSOLD",
+                "symbol": "BTC/USDT",
+                "desk": "scalp",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "entry_price": 60000.0,
+                "tp1_price": 57000.0,
+                "sl_price": 61500.0,
+                "quality_grade": "Grade A",
+                "ev_net": 0.50,
+                "meta_win_prob_pct": 65.0,
+                "rsi": 24.0
+            }
+            admitted_short = bot.admit_signal(sig_short_oversold, btc_shield_state=btc_shield_bear)
+            self.assertFalse(admitted_short, "Paper Bot must block trend-following short during RSI <= 28 oversold climax")
+
+            # Test C2: Standard LONG without V-bottom absorption is blocked by Beta Shield
+            sig_long_ordinary = {
+                "trade_id": "TEST_LONG_ORDINARY",
+                "symbol": "ETH/USDT",
+                "desk": "scalp",
+                "direction": "LONG",
+                "horizon": "15M",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "entry_price": 3000.0,
+                "tp1_price": 3200.0,
+                "sl_price": 2900.0,
+                "quality_grade": "Grade A",
+                "ev_net": 0.50,
+                "meta_win_prob_pct": 65.0
+            }
+            admitted_ord_long = bot.admit_signal(sig_long_ordinary, btc_shield_state=btc_shield_bear)
+            self.assertFalse(admitted_ord_long, "Ordinary LONG must be vetoed by BTC Beta Shield in BEAR_TREND")
+
+            # Test C3: Extreme V-Bottom Counter-Trend LONG (Turtle Soup Reclaim) is PERMITTED!
+            sig_long_vbottom = {
+                "trade_id": "TEST_LONG_VBOTTOM_RECLAIM",
+                "symbol": "ETH/USDT",
+                "desk": "scalp",
+                "direction": "LONG",
+                "horizon": "15M",
+                "strategy": "TURTLE_SOUP_LIQUIDITY_RECLAIM",
+                "is_turtle_soup": True,
+                "is_v_bottom_reclaim": True,
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "entry_price": 3000.0,
+                "optimal_entry_limit": 3000.0,
+                "tp1_price": 3200.0,
+                "sl_price": 2900.0,
+                "quality_grade": "Grade A",
+                "ev_net": 0.55,
+                "meta_win_prob_pct": 65.0,
+                "rsi": 24.0
+            }
+            admitted_vbottom_long = bot.admit_signal(sig_long_vbottom, btc_shield_state=btc_shield_bear)
+            self.assertTrue(admitted_vbottom_long, "Extreme V-Bottom Turtle Soup LONG must be permitted by Paper Bot")
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

@@ -484,6 +484,27 @@ class EntryConfirmationEngine:
             if is_flash_liquidity_drain:
                 return False, f"Intraday Flash Liquidity Drain: {flash_drain_reason}. Trading halted to eliminate slippage traps on thin books.", metrics
 
+            # Extreme V-Bottom Counter-Trend Setup Gate:
+            # While trend-following shorts are barred during oversold climaxes (RSI <= 28.0),
+            # counter-trend long setups (such as Turtle Soup / Liquidity Sweep Reclaims) are permitted
+            # to capitalize on bottom absorption once buyer wick confirmation is established.
+            if rsi_14 <= 28.0:
+                is_buyer_wick_confirmed = bool(
+                    is_sweep_reclaim or
+                    lower_wick_ratio >= 0.25 or
+                    (is_green and lower_wick_ratio >= 0.20 and upper_wick_ratio < 0.45) or
+                    is_volume_absorption or
+                    (body_ratio <= 0.20 and close_pos_in_range >= 0.35 and lower_wick_ratio >= 0.20)
+                )
+                if is_buyer_wick_confirmed:
+                    metrics["is_v_bottom_reclaim"] = True
+                    metrics["is_counter_trend_allowed"] = True
+                    metrics["is_sweep_reclaim"] = is_sweep_reclaim
+                    metrics["pattern"] = "EXTREME_V_BOTTOM_RECLAIM"
+                    return True, f"Extreme V-Bottom Counter-Trend Long Confirmed (RSI {rsi_14:.1f} <= 28.0 bottom absorption with {lower_wick_ratio*100:.0f}% buyer wick)", metrics
+                else:
+                    return False, f"Awaiting Buyer Wick Confirmation: Oversold climax (RSI {rsi_14:.1f} <= 28.0) requires bottom absorption wick (got {lower_wick_ratio*100:.0f}% < 25%)", metrics
+
             # Rejection of Long: Heavy Red Marubozu (Waterfall knife catch)
             # Low lower wick (<15%) and close at bottom quartile (<= 25% of range)
             if is_red and lower_wick_ratio < 0.15 and close_pos_in_range <= 0.25 and body_ratio >= 0.65:
@@ -561,9 +582,10 @@ class EntryConfirmationEngine:
         # ----------------------------------------------------------------------
         elif dir_upper in ["SHORT", "BEARISH", "SELL"]:
             # Rejection of Short: Oversold Capitulation Climax (Extreme RSI Oversold Exhaustion)
-            oversold_bound = max(22.0, min(32.0, 30.0 - 2.0 * max(0.0, expansion_ratio - 1.0)))
-            if rsi_14 <= oversold_bound:
-                return False, f"Oversold Capitulation Climax (RSI {rsi_14:.1f} <= {oversold_bound:.1f}). Short entry barred to prevent selling into short squeeze bounces.", metrics
+            # While trend-following shorts are barred during oversold climaxes (RSI <= 28.0)
+            oversold_bound = max(28.0, min(32.0, 30.0 - 2.0 * max(0.0, expansion_ratio - 1.0)))
+            if rsi_14 <= 28.0 or rsi_14 <= oversold_bound:
+                return False, f"Oversold Capitulation Climax (RSI {rsi_14:.1f} <= {max(28.0, oversold_bound):.1f}). Short entry barred to prevent selling into short squeeze bounces.", metrics
 
             # Rejection of Short: Intraday Flash Liquidity Drain
             if is_flash_liquidity_drain:
