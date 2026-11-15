@@ -720,6 +720,104 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         self.assertEqual(state_dump.get("status_code"), "BEAR_CASCADE_BLACKOUT")
         self.assertFalse(state_dump.get("altcoin_longs_allowed"))
 
+    def test_14_adverse_limit_penetration_and_dynamic_blowout_guard(self):
+        """
+        Forensic Regression Test for Losing Signal S_USDT_15M_1794695654:
+        1. validate_resting_limit_fill defers fill if price has blown adversely past the limit
+           (e.g., green rocket > 0.40% through Short limit or red waterfall < -0.40% through Long limit).
+        2. PaperTradingBot dynamic blowout guard tightens base_blowout_pct based on SL distance
+           (45% of SL distance), cancelling resting orders before they can fill into a breakout.
+        3. anchor_to_lower_high_and_ob and anchor_to_higher_low_and_ob enforce >= 1.40x ATR
+           and >= 1.80% SL noise floor, preventing 1.08x ATR noise stop-outs.
+        """
+        # 1. validate_resting_limit_fill adverse overshoot protection
+        limit_short = 0.03244
+        # Case A: Clean touch at limit price
+        conf_clean, rsn_clean, _ = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="SHORT", limit_price=limit_short, current_price=0.03244
+        )
+        self.assertTrue(conf_clean, f"Clean touch must confirm fill. Reason: {rsn_clean}")
+
+        # Case B: Price has not reached limit yet (below limit for Short)
+        conf_below, rsn_below, _ = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="SHORT", limit_price=limit_short, current_price=0.03220
+        )
+        self.assertFalse(conf_below, "Price below short limit must not trigger fill")
+
+        # Case C: Price has blown past limit (+0.80% above limit into green rocket)
+        price_rocket = limit_short * 1.0080 # 0.03270
+        conf_rocket, rsn_rocket, tel_rocket = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="SHORT", limit_price=limit_short, current_price=price_rocket
+        )
+        self.assertFalse(conf_rocket, "Price surging +0.80% past short limit must defer fill")
+        self.assertEqual(tel_rocket.get("fill_state"), "ADVERSE_PENETRATION_DEFERRED")
+        self.assertIn("Adverse price surge", rsn_rocket)
+
+        # Case D: Symmetric check for LONG (red waterfall dump -0.80% below Long limit)
+        limit_long = 100.0
+        price_dump = 99.20
+        conf_dump, rsn_dump, tel_dump = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="LONG", limit_price=limit_long, current_price=price_dump
+        )
+        self.assertFalse(conf_dump, "Price dumping -0.80% through long limit must defer fill")
+        self.assertEqual(tel_dump.get("fill_state"), "ADVERSE_PENETRATION_DEFERRED")
+        self.assertIn("Adverse price dump", rsn_dump)
+
+        # 2. Dynamic Blowout Guard in PaperTradingBot
+        import tempfile
+        import shutil
+        from datetime import datetime, timezone
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            ledger_path = os.path.join(tmp_dir, "test_ledger_blowout.json")
+            bot = PaperTradingBot(ledger_file=ledger_path)
+            pos_susdt = {
+                "trade_id": "TEST_SUSDT_SHORT",
+                "symbol": "S/USDT",
+                "desk": "scalp",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "entry_price": 0.03244,
+                "optimal_entry_limit": 0.03244,
+                "sl_price": 0.033006, # SL distance = 1.74%
+                "tp1_price": 0.031167,
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["open_positions"] = [pos_susdt]
+
+            # Price surges to 0.03272 (+0.86% through limit, > 45% of 1.74% SL distance = 0.78% blowout gate)
+            bot.on_tick(live_prices={"S/USDT": 0.03272})
+
+            # Position must be cancelled for blowout, NOT filled
+            self.assertEqual(len(bot.data["open_positions"]), 0, "Blown-out resting limit must be cancelled")
+            canc_list = bot.data.get("cancelled_orders", [])
+            self.assertEqual(len(canc_list), 1)
+            self.assertEqual(canc_list[0]["cancellation_reason"], "CANCELLED_EXTREME_MACRO_BLOWOUT")
+            self.assertIn("Price rallied", canc_list[0]["cancellation_detail"])
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        # 3. Volatility noise floor: >= 1.40x ATR and >= 1.80% SL distance
+        df_15m_s = pd.DataFrame({
+            "open": [0.0322, 0.0323, 0.0321, 0.0322, 0.0324, 0.0322],
+            "high": [0.0326, 0.0325, 0.0324, 0.0326, 0.0326, 0.0324],
+            "low": [0.0318, 0.0319, 0.0318, 0.0317, 0.0319, 0.0318],
+            "close": [0.0323, 0.0321, 0.0322, 0.0324, 0.0322, 0.0322],
+            "volume": [1000, 1000, 1000, 1000, 1000, 1000]
+        })
+        res_short = EntryConfirmationEngine.anchor_to_lower_high_and_ob(
+            df_15m=df_15m_s,
+            lh_pivot_price=0.03244,
+            current_price=0.0322,
+            spread_bps=5.0
+        )
+        sl_dist_short = (res_short["sl_price"] - res_short["entry_price"]) / res_short["entry_price"]
+        self.assertGreaterEqual(sl_dist_short, 0.0180, f"SL distance must be at least 1.80%, got {sl_dist_short:.4%}")
+        self.assertGreaterEqual(res_short["risk_reward_ratio"], 2.0, "1:2 R:R must be preserved")
+
 
 
 if __name__ == "__main__":

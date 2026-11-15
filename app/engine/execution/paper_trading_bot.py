@@ -1329,13 +1329,15 @@ class PaperTradingBot:
                         continue
 
                     # A. Extreme Macro Impulse / Adverse Blowout Guard
-                    # Base threshold: 1.20% adverse penetration through resting limit.
+                    # Base threshold: dynamically scaled to Stop Loss distance (max 45% of SL distance) with a 0.50% floor and 1.20% ceiling.
                     # Hyper-Volatile Latency-Adaptive gate (Fix 7): In high-volatility events, network ping is ~150ms.
-                    # If queueing latency exceeds 800ms, dynamically tighten blowout gate from 1.20% down to 0.80%:
-                    base_blowout_pct = 1.20
+                    # If queueing latency exceeds 800ms, dynamically tighten blowout gate:
+                    sl_p_val = float(pos.get("sl_price") or 0.0)
+                    sl_dist_pct = (abs(sl_p_val - limit_p) / max(1e-8, limit_p)) * 100.0 if sl_p_val > 0 else 2.0
+                    base_blowout_pct = min(1.20, max(0.50, sl_dist_pct * 0.45))
                     if tick_latency_ms > 800.0:
                         lag_penalty = min(0.40, ((tick_latency_ms - 800.0) / 2000.0) * 0.40)
-                        effective_blowout_pct = max(0.80, base_blowout_pct - lag_penalty)
+                        effective_blowout_pct = max(0.40, base_blowout_pct - lag_penalty)
                     else:
                         effective_blowout_pct = base_blowout_pct
 

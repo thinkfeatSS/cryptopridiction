@@ -879,13 +879,24 @@ class EntryConfirmationEngine:
         dir_upper = str(direction).upper()
         is_long = dir_upper in ["LONG", "BULLISH", "BUY"]
 
-        # 1. Price touch verification (with dynamic micro-bracket touch tolerance)
+        # 1. Price touch verification (with dynamic micro-bracket touch tolerance and adverse momentum surge guard)
         max_allowed_long_p = limit_price + touch_tolerance
         min_allowed_short_p = limit_price - touch_tolerance
         if is_long and current_price > max_allowed_long_p:
             return False, f"Price (${current_price:,.4f}) above Long limit (${limit_price:,.4f})", {}
         elif not is_long and current_price < min_allowed_short_p:
             return False, f"Price (${current_price:,.4f}) below Short limit (${limit_price:,.4f})", {}
+
+        # Adverse Momentum / Penetration Guard:
+        # If price has blown far past the limit level in the adverse direction (e.g., rocket through short or dump through long),
+        # defer fill to prevent shorting into a vertical impulse rocket or buying a knife.
+        max_adverse_overshoot = max(touch_tolerance * 3.0, limit_price * 0.0040)
+        if is_long and current_price < (limit_price - max_adverse_overshoot):
+            overshoot_pct = ((limit_price - current_price) / max(1e-8, limit_price)) * 100.0
+            return False, f"Adverse price dump (${current_price:,.4f} is -{overshoot_pct:.2f}% below Long limit ${limit_price:,.4f}). Awaiting bounce stabilization.", {"fill_state": "ADVERSE_PENETRATION_DEFERRED"}
+        elif not is_long and current_price > (limit_price + max_adverse_overshoot):
+            overshoot_pct = ((current_price - limit_price) / max(1e-8, limit_price)) * 100.0
+            return False, f"Adverse price surge (${current_price:,.4f} is +{overshoot_pct:.2f}% above Short limit ${limit_price:,.4f}). Awaiting rejection stabilization.", {"fill_state": "ADVERSE_PENETRATION_DEFERRED"}
 
         # 2. Extract Top-5 OBI metrics
         depth_info = EntryConfirmationEngine.calculate_top5_obi(depth_data)
@@ -1062,13 +1073,13 @@ class EntryConfirmationEngine:
         ob_is_local = (bullish_ob_low is not None and 0 < float(bullish_ob_low) and (hl_price - float(bullish_ob_low)) <= (1.50 * atr_15m))
         structural_floor = min(hl_price, float(bullish_ob_low)) if ob_is_local else hl_price
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
-        vol_cushion = max(0.65 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0070)
-        min_sl_dist = max(1.10 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0150)
+        vol_cushion = max(0.85 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0080)
+        min_sl_dist = max(1.40 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0180)
         sl_price = format_dynamic_precision(min(structural_floor - vol_cushion, entry_price - min_sl_dist))
 
         # Invariant assertion: SL must be strictly below Entry by at least the noise floor
         if sl_price >= entry_price or (entry_price - sl_price) < (min_sl_dist * 0.90):
-            sl_price = format_dynamic_precision(entry_price - max(1.00 * atr_15m, min_sl_dist))
+            sl_price = format_dynamic_precision(entry_price - max(1.20 * atr_15m, min_sl_dist))
 
         risk_amount = max(1e-8, entry_price - sl_price)
 
@@ -1216,13 +1227,13 @@ class EntryConfirmationEngine:
         ob_is_local = (bearish_ob_high is not None and float(bearish_ob_high) > 0 and (float(bearish_ob_high) - lh_price) <= (1.50 * atr_15m))
         structural_ceiling = max(lh_price, float(bearish_ob_high)) if ob_is_local else lh_price
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
-        vol_cushion = max(0.65 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0070)
-        min_sl_dist = max(1.10 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0150)
+        vol_cushion = max(0.85 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0080)
+        min_sl_dist = max(1.40 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0180)
         sl_price = format_dynamic_precision(max(structural_ceiling + vol_cushion, entry_price + min_sl_dist))
 
         # Invariant assertion: SL must be strictly above Entry by at least the noise floor
         if sl_price <= entry_price or (sl_price - entry_price) < (min_sl_dist * 0.90):
-            sl_price = format_dynamic_precision(entry_price + max(1.00 * atr_15m, min_sl_dist))
+            sl_price = format_dynamic_precision(entry_price + max(1.20 * atr_15m, min_sl_dist))
 
         risk_amount = max(1e-8, sl_price - entry_price)
 
