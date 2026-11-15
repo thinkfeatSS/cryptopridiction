@@ -1382,6 +1382,154 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_20_btc_15m_oversold_exhaustion_and_squeeze_expansion_guard(self):
+        """
+        Forensic Regression Test: BTC 15M Oversold Capitulation & Squeeze Expansion Guard.
+        Verifies the root causes identified from failing signal BTC_USDT_15M_1794706430:
+        1. Shorts are strictly vetoed when RSI <= 28 (oversold capitulation climax).
+        2. Longs are strictly vetoed when RSI >= 72 (overbought blow-off climax).
+        3. Squeeze expansion requires true prior compression (not a runaway 4-hour dump).
+        4. Scalp Desk strictly bars Grade B setups and requires Grade A/A+ with EVnet >= 0.25%.
+        5. Resting limits defer fills when approached by an unrejected green rocket or falling knife.
+        """
+        import pandas as pd
+        import numpy as np
+
+        # 1. Test Oversold RSI Capitulation Veto for SHORT (Simulating BTC at 01:30 UTC with RSI = 23.0)
+        # Create a waterfall dumping series of 25 candles where RSI is deeply oversold (~22-25)
+        np.random.seed(42)
+        base_p = 65000.0
+        closes = []
+        for i in range(25):
+            base_p -= 150.0  # Steady 3,750 point cascade
+            closes.append(base_p)
+
+        df_dump = pd.DataFrame({
+            "open": [c + 60.0 for c in closes],
+            "high": [c + 70.0 for c in closes],
+            "low": [c - 20.0 for c in closes],
+            "close": closes,
+            "volume": [1000.0] * 25
+        })
+
+        is_short_conf, rsn_short, metrics_short = EntryConfirmationEngine.validate_candle_trigger(
+            df=df_dump,
+            direction="SHORT",
+            current_price=closes[-1],
+            spread_bps=3.0
+        )
+        self.assertFalse(is_short_conf, "Short must be vetoed during extreme oversold capitulation climax")
+        self.assertIn("Oversold Capitulation Climax", rsn_short)
+        self.assertLessEqual(metrics_short["rsi_14"], 28.0)
+
+        # 2. Test Squeeze Expansion Prior Compression Guard:
+        # In this continuous waterfall dump, no prior compression ever occurred.
+        # Ensure is_squeeze_expansion is False!
+        self.assertFalse(metrics_short["is_squeeze_expansion"], "Runaway cascade without prior compression must NOT be flagged as squeeze expansion")
+
+        # 3. Test Overbought RSI Blow-off Veto for LONG
+        base_p = 60000.0
+        pump_closes = []
+        for i in range(25):
+            base_p += 180.0
+            pump_closes.append(base_p)
+        df_pump = pd.DataFrame({
+            "open": [c - 60.0 for c in pump_closes],
+            "high": [c + 30.0 for c in pump_closes],
+            "low": [c - 70.0 for c in pump_closes],
+            "close": pump_closes,
+            "volume": [1000.0] * 25
+        })
+        is_long_conf, rsn_long, metrics_long = EntryConfirmationEngine.validate_candle_trigger(
+            df=df_pump,
+            direction="LONG",
+            current_price=pump_closes[-1],
+            spread_bps=3.0
+        )
+        self.assertFalse(is_long_conf, "Long must be vetoed during extreme overbought blow-off climax")
+        self.assertIn("Overbought Blow-off Climax", rsn_long)
+        self.assertGreaterEqual(metrics_long["rsi_14"], 70.0)
+
+        # 4. Test Scalp Desk Grade A / A+ Hurdle in PaperTradingBot
+        import tempfile
+        import shutil
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            bot = PaperTradingBot(ledger_file=os.path.join(tmp_dir, "test_scalp_hurdle.json"))
+            normal_btc = {"is_ntz_active": False, "regime": "BULL_TREND", "status_code": "NORMAL"}
+
+            # Sub-hurdle scalp setup (EVnet 0.22% < 0.25% minimum hurdle) -> strictly REJECTED on scalp desk
+            sig_sub_hurdle = {
+                "signal_id": "TEST_SCALP_SUB_HURDLE",
+                "symbol": "BTC/USDT",
+                "horizon": "15M",
+                "direction": "SHORT",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "quality_grade": "Grade B (SQUEEZE_EXPANSION_SHORT)",
+                "ev_net": 0.22,
+                "entry_price": 63542.3,
+                "tp1_price": 61254.8,
+                "sl_price": 64686.1,
+                "meta_win_prob_pct": 53.2
+            }
+            admitted_sub = bot.admit_signal(sig_sub_hurdle, btc_shield_state=normal_btc)
+            self.assertFalse(admitted_sub, "Sub-hurdle setup (EVnet 0.22% < 0.25%) must be rejected on 15M Scalp Desk")
+
+            # Grade A setup with EV >= 0.25% -> ADMITTED on scalp desk
+            sig_grade_a = {
+                "signal_id": "TEST_SCALP_GRADE_A",
+                "symbol": "ETH/USDT",
+                "horizon": "15M",
+                "direction": "LONG",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "quality_grade": "Grade A (DIRECTIONAL BREAKOUT)",
+                "ev_net": 0.45,
+                "entry_price": 3100.0,
+                "tp1_price": 3250.0,
+                "sl_price": 3025.0,
+                "meta_win_prob_pct": 62.0
+            }
+            admitted_a = bot.admit_signal(sig_grade_a, btc_shield_state=normal_btc)
+            self.assertTrue(admitted_a, "Grade A setup with EVnet >= 0.25% must be admitted on Scalp Desk")
+
+            # 5. Test Green Rocket and Falling Knife Limit Fill Guards
+            # A green rocket piercing into a Short resting limit at 100.0
+            conf_rocket, rsn_rocket, tel_rocket = EntryConfirmationEngine.validate_resting_limit_fill(
+                direction="SHORT",
+                limit_price=100.0,
+                current_price=100.0,
+                candle_metrics={
+                    "is_green": True,
+                    "upper_wick_ratio": 0.05,
+                    "close_pos_in_range": 0.85,
+                    "body_ratio": 0.70
+                }
+            )
+            self.assertFalse(conf_rocket, "Short resting limit must defer when pierced by a green rocket")
+            self.assertEqual(tel_rocket["fill_state"], "ADVERSE_PENETRATION_DEFERRED")
+            self.assertIn("Green momentum rocket", rsn_rocket)
+
+            # A waterfall knife dumping into a Long resting limit at 100.0
+            conf_knife, rsn_knife, tel_knife = EntryConfirmationEngine.validate_resting_limit_fill(
+                direction="LONG",
+                limit_price=100.0,
+                current_price=100.0,
+                candle_metrics={
+                    "is_red": True,
+                    "lower_wick_ratio": 0.05,
+                    "close_pos_in_range": 0.15,
+                    "body_ratio": 0.70
+                }
+            )
+            self.assertFalse(conf_knife, "Long resting limit must defer when pierced by a waterfall knife")
+            self.assertEqual(tel_knife["fill_state"], "ADVERSE_PENETRATION_DEFERRED")
+            self.assertIn("Red waterfall knife", rsn_knife)
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

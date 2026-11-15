@@ -681,13 +681,19 @@ class PaperTradingBot:
                 print(f"[PAPER BOT 🛑 SPREAD DEGRADED R:R] Blocked entry for {sym}: Spread widening ({spread_bps:.1f} bps) degraded effective R:R ({effective_rr:.2f} < 1.20).")
                 return False
 
-            # Canonical V16 Market Opportunity Hurdle Gating (EVnet > 0.00% hurdle strictly enforced)
+            # Canonical V16 Market Opportunity Hurdle Gating (EVnet > 0.00% hurdle strictly enforced, >= 0.25% for Scalp)
             is_acceptable_grade = any(g in quality_grade for g in ["A+", "GRADE A", "GRADE B", "A", "B"]) and "GRADE C" not in quality_grade
             if not is_acceptable_grade:
                 print(f"[PAPER BOT [QUALITY GATE]] Rejected for {symbol}: Ineligible grade ({quality_grade})")
                 return False
-            if ev_net <= 0.00:
-                print(f"[PAPER BOT [QUALITY GATE]] Rejected for {symbol}: Requires positive EVnet > 0.00% (got {ev_net:.2f}%)")
+
+            min_desk_ev = 0.25 if desk_key == "scalp" else 0.00
+            sig_ev_raw = signal.get("ev_net")
+            sig_ev_val = float(sig_ev_raw) if (sig_ev_raw is not None and not (isinstance(sig_ev_raw, float) and math.isnan(sig_ev_raw))) else None
+            effective_gate_ev = min(ev_net, sig_ev_val) if sig_ev_val is not None else ev_net
+
+            if effective_gate_ev < min_desk_ev:
+                print(f"[PAPER BOT [QUALITY GATE]] Rejected for {symbol}: Requires EVnet >= {min_desk_ev:.2f}% (got {effective_gate_ev:.2f}%)")
                 return False
 
             # Desk Allocation & Runner Fractional Slot Accounting (Fix 4)

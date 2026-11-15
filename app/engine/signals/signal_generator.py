@@ -2023,7 +2023,9 @@ class SignalGenerationSystem:
             elif ev_net_val >= 0.25 and p_tp1 >= 0.50:
                 grade_prefix = "⚖️ Grade B"
             else:
-                grade_prefix = "⚖️ Grade B"
+                grade_prefix = "Grade C"
+                trade_active = False
+                status = "HOLD_SUB_HURDLE_GRADE_C"
 
             # Dynamic conviction strictly tied to calibrated probability
             calibrated_conviction = round(float(np.clip(calibrated_win_p * 100.0, 50.0, 95.0)), 1)

@@ -366,6 +366,24 @@ class EntryConfirmationEngine:
             except Exception:
                 is_vwap_bounce = False
 
+        # 14-period Wilder RSI calculation on closing prices
+        rsi_14 = 50.0
+        if len(df) >= 15 and "close" in df.columns:
+            try:
+                c_series = df["close"].astype(float)
+                delta = c_series.diff()
+                gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+                loss = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+                last_loss = float(loss.iloc[-1])
+                last_gain = float(gain.iloc[-1])
+                if last_loss > 1e-10:
+                    rs_val = last_gain / last_loss
+                    rsi_14 = round(float(100.0 - (100.0 / (1.0 + rs_val))), 2)
+                else:
+                    rsi_14 = 100.0 if last_gain > 0 else 50.0
+            except Exception:
+                rsi_14 = 50.0
+
         # Institutional Pattern: Keltner-Bollinger Squeeze Expansion Momentum Eruption
         is_squeeze_expansion = False
         if len(df) >= 20:
@@ -378,12 +396,34 @@ class EntryConfirmationEngine:
                 atr20 = float((h20 - l20).mean())
                 kc_upper = ma20 + (1.5 * atr20)
                 kc_lower = ma20 - (1.5 * atr20)
+
+                # Prior Compression Check:
+                # Squeeze occurs when Bollinger Bands are compressed inside Keltner Channels (std20 <= 0.75 * atr20).
+                # To be an expansion OUT of a squeeze, at least one of the prior 2 to 12 bars must have been in compression.
+                had_prior_compression = False
+                n_available = len(df) - 1
+                if n_available >= 15:
+                    lookback_squeeze = min(12, max(1, n_available - 14))
+                    for i in range(2, lookback_squeeze + 2):
+                        start_k = max(0, len(df) - i - 19)
+                        end_k = len(df) - i + 1
+                        c_win = df["close"].iloc[start_k:end_k].astype(float)
+                        if len(c_win) >= 10:
+                            s_win = float(c_win.std(ddof=0))
+                            h_win = df["high"].iloc[start_k:end_k].astype(float)
+                            l_win = df["low"].iloc[start_k:end_k].astype(float)
+                            a_win = float((h_win - l_win).mean())
+                            if a_win > 0 and (s_win / a_win) <= 0.75:
+                                had_prior_compression = True
+                                break
+
                 # Anti-Whipsaw Guard:
                 # 1. Real body must be decisive (body_ratio >= 0.50).
                 # 2. Rejection wick in expansion direction must be minimal (upper_wick <= 0.28 for Long, lower_wick <= 0.28 for Short).
                 # 3. Candle must close firmly at extreme (close_pos >= 0.70 for Long, <= 0.30 for Short).
-                # 4. Volatility expansion confirmation: std20 >= (0.70 * atr20) confirms Bollinger Bands are expanding outside compression.
-                is_vol_expanding = (std20 >= (0.70 * atr20))
+                # 4. Volatility expansion confirmation: std20 >= (0.75 * atr20) confirms Bollinger Bands are expanding outside compression.
+                # 5. Prior compression must be present: cannot claim squeeze expansion if volatility was already uncoiled and cascading.
+                is_vol_expanding = (std20 >= (0.75 * atr20)) and had_prior_compression
                 if is_long and c_close > kc_upper and is_green and body_ratio >= 0.50 and upper_wick_ratio <= 0.28 and close_pos_in_range >= 0.70 and is_vol_expanding:
                     is_squeeze_expansion = True
                 elif not is_long and c_close < kc_lower and is_red and body_ratio >= 0.50 and lower_wick_ratio <= 0.28 and close_pos_in_range <= 0.30 and is_vol_expanding:
@@ -417,7 +457,8 @@ class EntryConfirmationEngine:
             "news_shock_reason": news_shock_reason,
             "expansion_ratio": round(expansion_ratio, 2),
             "taker_buy_ratio": tb_ratio,
-            "cvd_surge_5": cvd_surge
+            "cvd_surge_5": cvd_surge,
+            "rsi_14": rsi_14
         }
         if swept_price is not None:
             metrics["swept_price"] = swept_price
@@ -434,6 +475,11 @@ class EntryConfirmationEngine:
         # 1. LONG ENTRY CONFIRMATION
         # ----------------------------------------------------------------------
         if dir_upper in ["LONG", "BULLISH", "BUY"]:
+            # Rejection of Long: Overbought Blow-off Climax (Extreme RSI Overbought Exhaustion)
+            overbought_bound = min(78.0, max(68.0, 70.0 + 2.0 * max(0.0, expansion_ratio - 1.0)))
+            if rsi_14 >= overbought_bound:
+                return False, f"Overbought Blow-off Climax (RSI {rsi_14:.1f} >= {overbought_bound:.1f}). Long entry barred to prevent buying the blow-off peak.", metrics
+
             # Rejection of Long: Intraday Flash Liquidity Drain
             if is_flash_liquidity_drain:
                 return False, f"Intraday Flash Liquidity Drain: {flash_drain_reason}. Trading halted to eliminate slippage traps on thin books.", metrics
@@ -514,6 +560,11 @@ class EntryConfirmationEngine:
         # 2. SHORT ENTRY CONFIRMATION
         # ----------------------------------------------------------------------
         elif dir_upper in ["SHORT", "BEARISH", "SELL"]:
+            # Rejection of Short: Oversold Capitulation Climax (Extreme RSI Oversold Exhaustion)
+            oversold_bound = max(22.0, min(32.0, 30.0 - 2.0 * max(0.0, expansion_ratio - 1.0)))
+            if rsi_14 <= oversold_bound:
+                return False, f"Oversold Capitulation Climax (RSI {rsi_14:.1f} <= {oversold_bound:.1f}). Short entry barred to prevent selling into short squeeze bounces.", metrics
+
             # Rejection of Short: Intraday Flash Liquidity Drain
             if is_flash_liquidity_drain:
                 return False, f"Intraday Flash Liquidity Drain: {flash_drain_reason}. Trading halted to eliminate slippage traps on thin books.", metrics
@@ -999,6 +1050,18 @@ class EntryConfirmationEngine:
                 telemetry["fill_state"] = "AWAITING_INFLOW"
                 return False, reason, telemetry
 
+            # C. Waterfall Knife Piercing: If current candle is an unabsorbed red waterfall into limit
+            is_waterfall_knife = bool(
+                c_metrics.get("is_red", False) and
+                l_wick < 0.15 and
+                float(c_metrics.get("close_pos_in_range", 0.5)) <= 0.25 and
+                float(c_metrics.get("body_ratio", 0.5)) >= 0.60
+            )
+            if is_waterfall_knife:
+                reason = f"Red waterfall knife piercing into Long limit (${current_price:,.4f} with lower wick {l_wick*100:.0f}% < 15%). Awaiting buyer absorption."
+                telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
+                return False, reason, telemetry
+
             # Confirmed Long Fill
             reason = f"Long limit fill confirmed by microstructure absorption (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
             telemetry["fill_state"] = "CONFIRMED"
@@ -1015,6 +1078,18 @@ class EntryConfirmationEngine:
             if is_extreme_bid_void or is_toxic_buy_cascade:
                 reason = f"Adverse bid wall pressure (OBI {obi_val:+.2f} > +{obi_threshold:.2f}, CVD {cvd_val:+.2f}). Awaiting ask resistance inflow."
                 telemetry["fill_state"] = "AWAITING_INFLOW"
+                return False, reason, telemetry
+
+            # C. Green Rocket Piercing: If current candle is an unrejected green rocket into limit
+            is_green_rocket = bool(
+                c_metrics.get("is_green", False) and
+                u_wick < 0.15 and
+                float(c_metrics.get("close_pos_in_range", 0.5)) >= 0.75 and
+                float(c_metrics.get("body_ratio", 0.5)) >= 0.60
+            )
+            if is_green_rocket:
+                reason = f"Green momentum rocket piercing into Short limit (${current_price:,.4f} with upper wick {u_wick*100:.0f}% < 15%). Awaiting seller resistance."
+                telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
                 return False, reason, telemetry
 
             # Confirmed Short Fill
