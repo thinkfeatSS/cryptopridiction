@@ -530,12 +530,30 @@ class UnifiedCryptoEngine:
                         active_open_symbols.add(s_sym)
                         active_open_symbols.add(s_sym.replace("/", "").replace("-", ""))
 
-            for s in active_trade_signals[:15]:
+            scalp_emitted_count = 0
+            day_emitted_count = 0
+            swing_emitted_count = 0
+            max_scalp_slots = int(os.getenv("SCALP_DESK_MAX_SLOTS", "50"))
+            max_day_slots = int(os.getenv("DAY_DESK_MAX_SLOTS", "2"))
+            max_swing_slots = int(os.getenv("SWING_DESK_MAX_SLOTS", "3"))
+
+            for s in active_trade_signals:
                 sym_key = s.get("symbol", "")
                 sym_clean_key = sym_key.replace("/", "").replace("-", "")
                 hz_key = str(s.get("horizon", s.get("dominant_timeframe", "1H"))).upper()
                 norm_hz_key = "15M" if any(x in hz_key for x in ["15", "5M", "SCALP"]) else ("24H" if any(x in hz_key for x in ["24", "1D", "SWING", "MACRO", "DAILY", "7D", "15D", "30D"]) else "1H")
                 direction_key = str(s.get("dominant_direction", s.get("direction", "LONG"))).upper()
+
+                # Desk Slot Capacity Allocation (Scalp 15M: 50 slots, Day: 2 slots, Swing: 3 slots)
+                if norm_hz_key == "15M":
+                    if scalp_emitted_count >= max_scalp_slots:
+                        continue
+                elif norm_hz_key == "1H":
+                    if day_emitted_count >= max(2, max_day_slots * 2):
+                        continue
+                elif norm_hz_key == "24H":
+                    if swing_emitted_count >= max(3, max_swing_slots * 2):
+                        continue
 
                 # Zero Post-SL Blocking: If trade has closed / hit SL, active_open_symbols does not contain it.
                 # Only suppress duplicates while an active open position is currently executing.
@@ -548,6 +566,21 @@ class UnifiedCryptoEngine:
                 if (now_ts - last_emitted) < 30.0:
                     continue
 
+                # Anti-Whipsaw Regime Conflict Guard:
+                # In sharp chop/range regimes, prevents getting chopped up by conflicting opposite breakouts
+                # or unconfirmed same-direction re-entries following a recent stop loss.
+                if hasattr(self, "paper_bot") and hasattr(self.paper_bot, "validate_anti_whipsaw_guard"):
+                    is_whipsaw_ok, whipsaw_reason = self.paper_bot.validate_anti_whipsaw_guard(
+                        symbol=sym_key,
+                        direction=direction_key,
+                        norm_horizon=norm_hz_key,
+                        signal=s,
+                        btc_shield_state=btc_shield
+                    )
+                    if not is_whipsaw_ok:
+                        print(f"[ENGINE 🛡️ ANTI-WHIPSAW VETO] Suppressing {direction_key} on {sym_key} ({norm_hz_key}): {whipsaw_reason}")
+                        continue
+
                 # BTC Shield Beta Directional Gate Pre-Screening:
                 alt_longs_ok = btc_shield.get("altcoin_longs_allowed", True) if btc_shield else True
                 alt_shorts_ok = btc_shield.get("altcoin_shorts_allowed", True) if btc_shield else True
@@ -557,6 +590,12 @@ class UnifiedCryptoEngine:
                     continue
 
                 admitted_count += 1
+                if norm_hz_key == "15M":
+                    scalp_emitted_count += 1
+                elif norm_hz_key == "1H":
+                    day_emitted_count += 1
+                elif norm_hz_key == "24H":
+                    swing_emitted_count += 1
                 self._signal_cooldown_registry[cooldown_key] = now_ts
                 self._symbol_cooldown_registry[sym_key] = now_ts
 

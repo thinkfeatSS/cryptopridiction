@@ -135,7 +135,7 @@ class Test15M1H24HSignals(unittest.TestCase):
 
         # Desk slot & margin verification
         desks = self.bot.data["desks"]
-        self.assertEqual(desks["scalp"]["max_slots"], int(os.getenv("SCALP_DESK_MAX_SLOTS", "5")))
+        self.assertEqual(desks["scalp"]["max_slots"], int(os.getenv("SCALP_DESK_MAX_SLOTS", "50")))
         self.assertEqual(desks["scalp"]["allocated_usd"], float(os.getenv("SCALP_DESK_ALLOCATED_USD", "500.0")))
         self.assertEqual(desks["scalp"]["leverage"], 2)
 

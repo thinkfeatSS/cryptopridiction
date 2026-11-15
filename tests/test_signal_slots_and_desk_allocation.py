@@ -25,11 +25,11 @@ class TestSignalSlotsAndDeskAllocation(unittest.TestCase):
             shutil.rmtree(self.test_export_dir, ignore_errors=True)
 
     def test_01_master_desk_slots_and_margin_alignment(self):
-        """Verifies that all desks match the master 10-slot $1,000 portfolio allocation."""
+        """Verifies that all desks match the master portfolio allocation."""
         desks = self.bot.data["desks"]
 
-        # Scalp Desk: 5 slots, $500, 2x leverage (Scalp Mandate)
-        self.assertEqual(desks["scalp"]["max_slots"], int(os.getenv("SCALP_DESK_MAX_SLOTS", "5")))
+        # Scalp Desk: 50 slots, $500, 2x leverage (Scalp Mandate)
+        self.assertEqual(desks["scalp"]["max_slots"], int(os.getenv("SCALP_DESK_MAX_SLOTS", "50")))
         self.assertEqual(desks["scalp"]["allocated_usd"], float(os.getenv("SCALP_DESK_ALLOCATED_USD", "500.0")))
         self.assertEqual(desks["scalp"]["leverage"], 2)
 
@@ -54,7 +54,7 @@ class TestSignalSlotsAndDeskAllocation(unittest.TestCase):
         # Verify Backtest engine alignment
         bt = InstitutionalBacktestEngine(initial_capital=1000.0)
         s_desk, s_alloc, s_slots, s_lev, _ = bt._resolve_desk("15M")
-        self.assertEqual(s_slots, int(os.getenv("SCALP_DESK_MAX_SLOTS", "5")))
+        self.assertEqual(s_slots, int(os.getenv("SCALP_DESK_MAX_SLOTS", "50")))
         self.assertEqual(s_alloc, 0.50)
         self.assertEqual(s_lev, 2)
 

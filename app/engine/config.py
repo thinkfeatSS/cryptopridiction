@@ -58,8 +58,8 @@ ENABLE_SIGNAL_EXPIRY: bool = os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() 
 TOP_N_UNIVERSE = int(os.getenv("TOP_N_UNIVERSE", os.getenv("SCANNER_TOP_N", "75"))) # Dynamically configured 75-coin institutional universe
 MIN_24H_VOLUME_USD = float(os.getenv("MIN_24H_VOLUME_USD", "10000000.0")) # $10M min 24h institutional volume
 
-# Scalp Desk Slot & Capital Allocation (Scalp 15M Mandate: 5 Slots)
-SCALP_DESK_MAX_SLOTS = int(os.getenv("SCALP_DESK_MAX_SLOTS", "5"))
+# Scalp Desk Slot & Capital Allocation (Scalp 15M Mandate: 50 Slots)
+SCALP_DESK_MAX_SLOTS = int(os.getenv("SCALP_DESK_MAX_SLOTS", "50"))
 SCALP_DESK_ALLOCATED_USD = float(os.getenv("SCALP_DESK_ALLOCATED_USD", "500.0"))
 DAY_DESK_MAX_SLOTS = int(os.getenv("DAY_DESK_MAX_SLOTS", "2"))
 DAY_DESK_ALLOCATED_USD = float(os.getenv("DAY_DESK_ALLOCATED_USD", "200.0"))

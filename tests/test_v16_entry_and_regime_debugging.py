@@ -1021,6 +1021,114 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_17_anti_whipsaw_consecutive_loss_defense_and_50_scalp_slots(self):
+        """
+        Verifies:
+        1. Scalp Desk slots expanded to 50 for 15M signals, while preserving Day (2) and Swing (3) caps.
+        2. Anti-Whipsaw Defense intercepts conflicting opposite breakouts in sharp range/chop regimes after SL.
+        3. Anti-Whipsaw Defense permits valid continuation in confirmed trending regimes (ADX >= 25).
+        """
+        import tempfile
+        import shutil
+        from datetime import datetime, timezone
+
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            ledger_path = os.path.join(tmp_dir, "test_whipsaw_ledger.json")
+            bot = PaperTradingBot(ledger_file=ledger_path)
+            desks = bot.data.get("desks", {})
+
+            # 1. Verify 50 Scalp Slots Mandate
+            self.assertEqual(desks["scalp"]["max_slots"], 50, "Scalp Desk must have 50 max slots")
+            self.assertEqual(desks["day"]["max_slots"], 2, "Day Desk must remain at 2 slots")
+            self.assertEqual(desks["swing"]["max_slots"], 3, "Swing Desk must remain at 3 slots")
+
+            # 2. Setup a recently stopped-out LONG trade on OP/USDT
+            closed_sl_trade = {
+                "trade_id": "TEST_OP_LONG_SL",
+                "symbol": "OP/USDT",
+                "desk": "scalp",
+                "direction": "LONG",
+                "horizon": "15M",
+                "entry_price": 2.00,
+                "exit_price": 1.95,
+                "outcome": "LOST",
+                "exit_reason": "STOP_LOSS",
+                "closed_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["closed_trades"] = [closed_sl_trade]
+
+            # Scenario A: In RANGE / CHOP regime (ADX = 18.0), a conflicting SHORT breakout triggers
+            conflicting_short_sig = {
+                "symbol": "OP/USDT",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "dominant_timeframe": "15M",
+                "market_regime": "RANGE",
+                "adx": 18.0,
+                "chop_index": 56.0,
+                "entry_price": 1.94,
+                "sl_price": 2.02,
+                "tp1_price": 1.80,
+                "quality_grade": "Grade A",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "ev_net": 1.5,
+                "conviction": 85.0
+            }
+            btc_chop = {"regime": "RANGE", "is_ntz_active": False}
+
+            # Must be VETOED by Anti-Whipsaw Guard
+            is_ok, reason = bot.validate_anti_whipsaw_guard(
+                symbol="OP/USDT",
+                direction="SHORT",
+                norm_horizon="15M",
+                signal=conflicting_short_sig,
+                btc_shield_state=btc_chop
+            )
+            self.assertFalse(is_ok, "Conflicting SHORT breakout in RANGE after LONG SL must be vetoed")
+            self.assertIn("Conflicting SHORT breakout vetoed", reason)
+
+            # admit_signal must also reject it
+            self.assertFalse(bot.admit_signal(conflicting_short_sig, btc_shield_state=btc_chop))
+
+            # Scenario B: Market transitions to confirmed strong trend (ADX = 32.0, BEAR_TREND)
+            trend_short_sig = dict(conflicting_short_sig)
+            trend_short_sig["market_regime"] = "BEAR_TREND"
+            trend_short_sig["adx"] = 32.0
+            trend_short_sig["chop_index"] = 35.0
+            trend_short_sig["candle_trigger_confirmed"] = True
+            btc_trend = {"regime": "BEAR_TREND", "is_ntz_active": False, "altcoin_shorts_allowed": True}
+
+            is_ok_trend, reason_trend = bot.validate_anti_whipsaw_guard(
+                symbol="OP/USDT",
+                direction="SHORT",
+                norm_horizon="15M",
+                signal=trend_short_sig,
+                btc_shield_state=btc_trend
+            )
+            self.assertTrue(is_ok_trend, f"Trend breakout with ADX >= 25 must be permitted, got: {reason_trend}")
+
+            # Scenario C: Prior trade was WON (not SL)
+            bot.data["closed_trades"] = [{
+                "trade_id": "TEST_OP_LONG_WON",
+                "symbol": "OP/USDT",
+                "direction": "LONG",
+                "outcome": "WON",
+                "exit_reason": "TAKE_PROFIT_1",
+                "closed_at_utc": datetime.now(timezone.utc).isoformat()
+            }]
+            is_ok_won, reason_won = bot.validate_anti_whipsaw_guard(
+                symbol="OP/USDT",
+                direction="SHORT",
+                norm_horizon="15M",
+                signal=conflicting_short_sig,
+                btc_shield_state=btc_chop
+            )
+            self.assertTrue(is_ok_won, "Prior winning trade must not trigger whipsaw stop-out guard")
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

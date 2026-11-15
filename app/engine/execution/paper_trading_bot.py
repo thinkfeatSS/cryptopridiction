@@ -79,8 +79,8 @@ class PaperTradingBot:
                         else:
                             purged_symbols.append(sym)
 
-                    # Resynchronize desk targets to 5-slot Scalp allocation:
-                    # Scalp Desk (5M-30M): $500 (50%), 5 slots, 2x leverage (strictly Grade A / A+ with EVnet >= 0.25%)
+                    # Resynchronize desk targets to 50-slot Scalp allocation:
+                    # Scalp Desk (5M-30M): $500 (50%), 50 slots, 2x leverage (strictly Grade A / A+ with EVnet >= 0.25%)
                     # Day Desk (1H-4H): $250 (25%), 2 slots, 3x leverage
                     # Swing Desk (12H-30D): $250 (25%), 2 slots, 2x leverage
                     desks = loaded.get("desks", {})
@@ -94,7 +94,7 @@ class PaperTradingBot:
                         desks["day"]["leverage"] = 3
                     if "scalp" in desks:
                         desks["scalp"]["allocated_usd"] = float(os.getenv("SCALP_DESK_ALLOCATED_USD", "500.0"))
-                        desks["scalp"]["max_slots"] = int(os.getenv("SCALP_DESK_MAX_SLOTS", "5"))
+                        desks["scalp"]["max_slots"] = int(os.getenv("SCALP_DESK_MAX_SLOTS", "50"))
                         desks["scalp"]["leverage"] = 2
                     for d_key, d_val in desks.items():
                         d_val["active_slots"] = sum(1 for p in valid_positions if p.get("desk") == d_key)
@@ -191,7 +191,7 @@ class PaperTradingBot:
             "winning_trades_count": 0,
             "losing_trades_count": 0,
             "desks": {
-                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": float(os.getenv("SCALP_DESK_ALLOCATED_USD", "500.0")), "max_slots": int(os.getenv("SCALP_DESK_MAX_SLOTS", "5")), "active_slots": 0, "leverage": 2},
+                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": float(os.getenv("SCALP_DESK_ALLOCATED_USD", "500.0")), "max_slots": int(os.getenv("SCALP_DESK_MAX_SLOTS", "50")), "active_slots": 0, "leverage": 2},
                 "day": {"name": "⏳ Day Trading Desk", "allocated_usd": float(os.getenv("DAY_DESK_ALLOCATED_USD", "200.0")), "max_slots": int(os.getenv("DAY_DESK_MAX_SLOTS", "2")), "active_slots": 0, "leverage": 3},
                 "swing": {"name": "🌊 Swing Desk", "allocated_usd": float(os.getenv("SWING_DESK_ALLOCATED_USD", "300.0")), "max_slots": int(os.getenv("SWING_DESK_MAX_SLOTS", "3")), "active_slots": 0, "leverage": 2}
             },
@@ -296,6 +296,117 @@ class PaperTradingBot:
         effective_rr = round(net_reward / max(1e-8, net_risk), 2)
 
         return effective_rr, net_reward, net_risk
+
+    def validate_anti_whipsaw_guard(
+        self,
+        symbol: str,
+        direction: str,
+        norm_horizon: str,
+        signal: Dict[str, Any],
+        btc_shield_state: Optional[Dict[str, Any]] = None
+    ) -> Tuple[bool, str]:
+        """
+        Anti-Whipsaw Consecutive Stop-Loss Defense:
+        Protects against getting chopped up in sharp range/chop environments where an asset
+        stops out and then triggers a conflicting breakout in the opposite direction
+        or an unconfirmed same-direction re-entry at the same chop boundary.
+        
+        Zero hardcoded time lockouts — 100% dynamic, regime-aware, and structural.
+        """
+        if not symbol:
+            return True, "EMPTY_SYMBOL"
+
+        sym_clean = symbol.replace("/", "").replace("-", "").replace(":USDT", "").upper()
+        dir_clean = str(direction).upper()
+        clean_curr_dir = "SHORT" if "SHORT" in dir_clean or "BEAR" in dir_clean else "LONG"
+
+        # 1. Find the most recently closed trade for this symbol
+        closed_trades = self.data.get("closed_trades", [])
+        if not closed_trades:
+            return True, "NO_CLOSED_TRADES"
+
+        recent_trade = None
+        for t in reversed(closed_trades):
+            t_sym = str(t.get("symbol", "")).replace("/", "").replace("-", "").replace(":USDT", "").upper()
+            if t_sym == sym_clean:
+                recent_trade = t
+                break
+
+        if not recent_trade:
+            return True, "NO_PRIOR_TRADE_ON_SYMBOL"
+
+        # Check if the prior trade was stopped out
+        outcome = str(recent_trade.get("outcome", "")).upper()
+        audit_st = str(recent_trade.get("audit_status", "")).upper()
+        exit_reason = str(recent_trade.get("exit_reason", "")).upper()
+        is_sl = "LOST" in outcome or "SL_HIT" in outcome or "LOST" in audit_st or "STOP_LOSS" in exit_reason
+
+        if not is_sl:
+            # Previous trade was profitable or breakeven -> No whipsaw chop stop-out risk
+            return True, "PRIOR_TRADE_NOT_SL"
+
+        # Check recency (e.g. closed within last 8 candles / 2 hours for 15M)
+        closed_at = recent_trade.get("closed_at_utc") or recent_trade.get("closed_at")
+        if closed_at:
+            try:
+                c_dt = datetime.fromisoformat(str(closed_at).replace("Z", "+00:00"))
+                if c_dt.tzinfo is None:
+                    c_dt = c_dt.replace(tzinfo=timezone.utc)
+                age_secs = (datetime.now(timezone.utc) - c_dt).total_seconds()
+                # If the stop loss happened more than 2 hours ago (8 x 15M bars), market cycle has evolved
+                if age_secs > 7200:
+                    return True, "PRIOR_SL_OUTSIDE_WHIPSAW_WINDOW"
+            except Exception:
+                pass
+
+        # 2. Determine active market regime
+        regime = "RANGE"
+        if btc_shield_state:
+            regime = str(btc_shield_state.get("v16_regime") or btc_shield_state.get("regime") or "RANGE").upper()
+        sig_reg = str(signal.get("market_regime") or signal.get("regime") or "").upper()
+        if sig_reg:
+            regime = sig_reg
+
+        adx_val = float(signal.get("adx") or signal.get("adx_15m") or 0.0)
+        chop_val = float(signal.get("chop_index") or signal.get("choppiness_index") or 0.0)
+
+        is_chop_regime = (
+            any(k in regime for k in ["RANGE", "CHOP", "CONSOLIDATION", "COMPRESSION", "LOW_VOLATILITY", "HIGH_VOLATILITY_CHOP", "SQUEEZE"])
+            or (0.0 < adx_val < 22.0)
+            or (chop_val > 52.0)
+        )
+
+        prev_dir = str(recent_trade.get("direction", "LONG")).upper()
+        clean_prev_dir = "SHORT" if "SHORT" in prev_dir or "BEAR" in prev_dir else "LONG"
+
+        if is_chop_regime:
+            # Condition A: Conflicting Breakout (Direction Flip) in Chop
+            if clean_curr_dir != clean_prev_dir:
+                # In chop, opposite breakout after SL is classic whipsaw trap (false range breakout)
+                # Admitted ONLY if physical institutional breakout expansion is proven
+                has_strong_displacement = bool(
+                    signal.get("is_structural_bos")
+                    or signal.get("candle_trigger_confirmed")
+                    or adx_val >= 25.0
+                    or float(signal.get("volume_ratio", 1.0) or 1.0) >= 1.50
+                )
+                if not has_strong_displacement:
+                    return False, f"Conflicting {clean_curr_dir} breakout vetoed in {regime} regime after recent {clean_prev_dir} SL (whipsaw defense)"
+
+            # Condition B: Same-Direction Retrigger in Chop
+            else:
+                # Same-direction re-entry in chop must establish structural Higher Low / Lower High anchor
+                prev_exit_p = float(recent_trade.get("exit_price") or 0.0)
+                curr_entry_p = float(signal.get("entry_price") or signal.get("current_price") or 0.0)
+                if prev_exit_p > 0 and curr_entry_p > 0:
+                    if clean_curr_dir == "LONG" and curr_entry_p <= prev_exit_p * 0.995:
+                        if not signal.get("is_order_block_signal") and not signal.get("candle_trigger_confirmed"):
+                            return False, f"Repeated LONG re-entry in {regime} without structural support anchor"
+                    elif clean_curr_dir == "SHORT" and curr_entry_p >= prev_exit_p * 1.005:
+                        if not signal.get("is_order_block_signal") and not signal.get("candle_trigger_confirmed"):
+                            return False, f"Repeated SHORT re-entry in {regime} without structural resistance anchor"
+
+        return True, "PASS_ANTI_WHIPSAW"
 
     def admit_signal(self, signal: Dict[str, Any], btc_shield_state: Optional[Dict[str, Any]] = None) -> bool:
         """
@@ -461,6 +572,20 @@ class PaperTradingBot:
                 if pos.get("symbol") == symbol or (sig_thesis_id and pos.get("trade_thesis_id") == sig_thesis_id):
                     return False
 
+            # 3b. Anti-Whipsaw Consecutive Stop-Loss Defense:
+            # In sharp range/chop regimes, prevents getting chopped up by conflicting opposite breakouts
+            # or unconfirmed same-direction re-entries following a recent stop loss.
+            is_anti_whipsaw_ok, whipsaw_msg = self.validate_anti_whipsaw_guard(
+                symbol=symbol,
+                direction=direction,
+                norm_horizon=norm_horizon,
+                signal=signal,
+                btc_shield_state=btc_shield_state
+            )
+            if not is_anti_whipsaw_ok:
+                print(f"[PAPER BOT 🛡️ ANTI-WHIPSAW VETO] Blocked {direction} on {symbol}: {whipsaw_msg}")
+                return False
+
             # 4. Resolve Desk strictly matching the horizon
             desks = self.data.get("desks", {})
             desk_key = self.resolve_desk(norm_horizon)
@@ -490,10 +615,10 @@ class PaperTradingBot:
                                 for k in ["COILING", "SQUEEZE", "BREAKOUT", "ORDER_BLOCK", "REVERSAL", "TURTLE_SOUP", "FVG"])
                         )
                         if is_boundary_harvest and allow_boundary:
-                            max_slots = int(desk.get("max_slots", 5))
+                            max_slots = int(desk.get("max_slots", 50))
                             print(f"[PAPER BOT [REGIME GATING]] Scalp boundary harvest slot authorized ({max_slots} slots) in {regime} market regime.")
                         elif is_smc_or_coiling:
-                            max_slots = int(desk.get("max_slots", 5))
+                            max_slots = int(desk.get("max_slots", 50))
                             print(f"[PAPER BOT [REGIME GATING]] Scalp institutional trigger authorized ({max_slots} slots) in {regime} market regime.")
                         else:
                             max_slots = 0
@@ -504,7 +629,7 @@ class PaperTradingBot:
                         max_slots = min(max_slots, 2)
                 elif regime in ["BULL_TREND", "BEAR_TREND"]:
                     if desk_key == "scalp":
-                        max_slots = int(desk.get("max_slots", 5))
+                        max_slots = int(desk.get("max_slots", 50))
                     elif desk_key == "swing":
                         max_slots = max(max_slots, 2)
 
