@@ -1718,6 +1718,146 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_23_microstructure_stalls_adverse_penetration_requires_velocity_stall_or_absorption(self):
+        """
+        Verify Microstructure Stalls Rule:
+        Resting limit orders deferred due to adverse penetration will only fill once price velocity stabilizes
+        (delta < 0.08%) or order flow absorption confirms, preserving capital against momentum impulses.
+        """
+        import tempfile
+        import shutil
+        from datetime import datetime, timezone
+
+        # 1. Unit Test on EntryConfirmationEngine.validate_resting_limit_fill
+        # LONG limit at 100.0
+        # Fresh touch without adverse penetration fills normally
+        conf_fresh, rsn_fresh, tel_fresh = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="LONG",
+            limit_price=100.0,
+            current_price=100.0,
+            was_adverse_penetrated=False
+        )
+        self.assertTrue(conf_fresh, "Fresh limit touch must fill")
+        self.assertEqual(tel_fresh["fill_confirmation_type"], "PRICE_TOUCH_FALLBACK")
+
+        # Post-penetration touch at 100.0 without absorption MUST defer (blind fallback prohibited)
+        conf_post_pen, rsn_post_pen, tel_post_pen = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="LONG",
+            limit_price=100.0,
+            current_price=100.0,
+            was_adverse_penetrated=True
+        )
+        self.assertFalse(conf_post_pen, "Post-penetration order without absorption must defer fill")
+        self.assertEqual(tel_post_pen["fill_state"], "ADVERSE_PENETRATION_DEFERRED")
+        self.assertIn("Post-penetration Long limit deferred", rsn_post_pen)
+
+        # Post-penetration touch with buyer absorption (OBI >= +0.15) confirms fill
+        depth_buyer = {"bids": [[100.0, 50000.0]], "asks": [[100.05, 5000.0]], "has_depth": True}
+        conf_post_absorb, rsn_post_absorb, tel_post_absorb = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="LONG",
+            limit_price=100.0,
+            current_price=100.0,
+            depth_data=depth_buyer,
+            was_adverse_penetrated=True
+        )
+        self.assertTrue(conf_post_absorb, "Post-penetration order with buyer absorption must confirm fill")
+        self.assertEqual(tel_post_absorb["fill_confirmation_type"], "STABILIZED_ABSORPTION_FILL")
+
+        # 2. Integration Test with PaperTradingBot: Momentum Impulses vs. Velocity Stalls
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            ledger_path = os.path.join(tmp_dir, "test_microstructure_stalls_ledger.json")
+            bot = PaperTradingBot(ledger_file=ledger_path)
+
+            # Setup a LONG resting limit order on BTC/USDT at 60,000.0
+            pos_long = {
+                "trade_id": "TEST_LONG_STALL_DEFENSE",
+                "symbol": "BTC/USDT",
+                "desk": "scalp",
+                "direction": "LONG",
+                "horizon": "15M",
+                "entry_price": 60000.0,
+                "optimal_entry_limit": 60000.0,
+                "sl_price": 58500.0, # 2.5% SL
+                "tp1_price": 63000.0, # 5.0% TP1 (R:R = 1:2.0)
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["open_positions"] = [pos_long]
+
+            # Tick 1: Price dumps sharply to 59,640.0 (-0.60% adverse penetration past limit) -> Defer
+            bot.on_tick({"BTC/USDT": 59640.0})
+            self.assertEqual(len(bot.data["open_positions"]), 1)
+            self.assertEqual(pos_long["status"], "RESTING_LIMIT")
+            self.assertTrue(pos_long.get("was_adverse_penetrated"))
+            self.assertEqual(pos_long.get("microstructure_deferral_count"), 1)
+
+            # Tick 2: Price whips into normal touch band at 59,980.0, but velocity is high (delta = 0.57% >= 0.08%) without absorption!
+            # Must strictly defer to preserve capital against impulse knife!
+            bot.on_tick({"BTC/USDT": 59980.0})
+            self.assertEqual(pos_long["status"], "RESTING_LIMIT", "Impulse whip into touch band without absorption must NOT fill")
+            self.assertTrue(pos_long.get("was_adverse_penetrated"))
+            self.assertEqual(pos_long.get("microstructure_deferral_count"), 2)
+
+            # Tick 3: Price moves to 59,850.0 (delta = 0.22% >= 0.08%) -> Still in momentum impulse, must NOT fill
+            bot.on_tick({"BTC/USDT": 59850.0})
+            self.assertEqual(pos_long["status"], "RESTING_LIMIT")
+            self.assertEqual(pos_long.get("microstructure_deferral_count"), 3)
+
+            # Tick 4: Price velocity stabilizes at 59,860.0 (delta = 0.017% < 0.08%)!
+            # Stalled momentum confirmed fill at superior price!
+            bot.on_tick({"BTC/USDT": 59860.0})
+            self.assertEqual(pos_long["status"], "OPEN", "Stalled price velocity (delta < 0.08%) must confirm fill")
+            self.assertEqual(pos_long["entry_price"], 59860.0)
+            self.assertEqual(pos_long["fill_confirmation_type"], "STABILIZED_VELOCITY_STALL_FILL")
+            self.assertTrue(pos_long.get("price_improved"))
+            self.assertFalse(pos_long.get("was_adverse_penetrated"))
+
+            # Scenario B: Post-penetration fill via verified Order Book Absorption
+            pos_short = {
+                "trade_id": "TEST_SHORT_ABSORPTION_DEFENSE",
+                "symbol": "ETH/USDT",
+                "desk": "scalp",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "entry_price": 3000.0,
+                "optimal_entry_limit": 3000.0,
+                "sl_price": 3075.0, # 2.5% SL
+                "tp1_price": 2850.0, # 5.0% TP1
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["open_positions"] = [pos_short]
+
+            # Tick 1: Rocket surge past limit to 3018.0 (+0.60% adverse penetration) -> Defer
+            bot.on_tick({"ETH/USDT": 3018.0})
+            self.assertEqual(pos_short["status"], "RESTING_LIMIT")
+            self.assertTrue(pos_short.get("was_adverse_penetrated"))
+
+            # Tick 2: Price moves to 3005.0 with seller absorption confirmed via depth
+            depth_eth = {
+                "asks": [[3005.0, 500.0]], # Heavy ask wall resistance
+                "bids": [[3004.0, 50.0]],
+                "has_depth": True
+            }
+            cvd_eth = {"cvd_surge": -0.25} # Strong seller aggression
+            bot.on_tick(
+                live_prices={"ETH/USDT": 3005.0},
+                order_book_depths={"ETH/USDT": depth_eth},
+                cvd_metrics={"ETH/USDT": cvd_eth}
+            )
+            self.assertEqual(pos_short["status"], "OPEN", "Seller absorption must confirm fill post-penetration")
+            self.assertEqual(pos_short["entry_price"], 3005.0)
+            self.assertEqual(pos_short["fill_confirmation_type"], "STABILIZED_ABSORPTION_FILL")
+            self.assertTrue(pos_short.get("price_improved"))
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

@@ -918,7 +918,8 @@ class EntryConfirmationEngine:
         cvd_threshold: float = 0.20,
         touch_tolerance: float = 0.0,
         tick_latency_ms: float = 0.0,
-        is_extreme_macro: bool = False
+        is_extreme_macro: bool = False,
+        was_adverse_penetrated: bool = False
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Authoritative Live OBI / CVD Inflow Confirmation for Resting Limit Fills.
@@ -1071,7 +1072,29 @@ class EntryConfirmationEngine:
                 telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
                 return False, reason, telemetry
 
-            # Confirmed Long Fill
+            # Post-Penetration Guard: If order was previously deferred due to adverse penetration,
+            # require verified buyer absorption (OBI >= +0.15, CVD >= +0.10, or lower wick >= 0.18).
+            # Fallback price touches are strictly disallowed until price velocity stabilizes (delta < 0.08%)
+            # or order flow absorption confirms.
+            if was_adverse_penetrated:
+                is_buyer_absorption = (
+                    (obi_val >= 0.15) or
+                    (cvd_val >= 0.10) or
+                    (l_wick >= 0.18) or
+                    (tb_ratio >= 0.52 and cvd_val >= 0.0)
+                )
+                if is_buyer_absorption:
+                    reason = f"Long post-penetration fill confirmed by buyer absorption at ${current_price:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                    telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
+                    telemetry["fill_confirmation_type"] = "STABILIZED_ABSORPTION_FILL"
+                    telemetry["execution_price"] = current_price
+                    return True, reason, telemetry
+                else:
+                    reason = f"Post-penetration Long limit deferred. Awaiting price velocity stabilization (delta < 0.08%) or order flow absorption (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                    telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
+                    return False, reason, telemetry
+
+            # Confirmed Long Fill (Fresh touch without adverse penetration)
             reason = f"Long limit fill confirmed by microstructure absorption (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
             telemetry["fill_state"] = "CONFIRMED"
             telemetry["fill_confirmation_type"] = "LIVE_OBI_CVD_CONFIRMED" if (has_depth and not is_synthetic) else ("SYNTHETIC_MICROSTRUCTURE_CONFIRMED" if is_synthetic else "PRICE_TOUCH_FALLBACK")
@@ -1101,7 +1124,29 @@ class EntryConfirmationEngine:
                 telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
                 return False, reason, telemetry
 
-            # Confirmed Short Fill
+            # Post-Penetration Guard: If order was previously deferred due to adverse penetration,
+            # require verified seller absorption (OBI <= -0.15, CVD <= -0.10, or upper wick >= 0.18).
+            # Fallback price touches are strictly disallowed until price velocity stabilizes (delta < 0.08%)
+            # or order flow absorption confirms.
+            if was_adverse_penetrated:
+                is_seller_absorption = (
+                    (obi_val <= -0.15) or
+                    (cvd_val <= -0.10) or
+                    (u_wick >= 0.18) or
+                    (tb_ratio <= 0.48 and cvd_val <= 0.0)
+                )
+                if is_seller_absorption:
+                    reason = f"Short post-penetration fill confirmed by seller absorption at ${current_price:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                    telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
+                    telemetry["fill_confirmation_type"] = "STABILIZED_ABSORPTION_FILL"
+                    telemetry["execution_price"] = current_price
+                    return True, reason, telemetry
+                else:
+                    reason = f"Post-penetration Short limit deferred. Awaiting price velocity stabilization (delta < 0.08%) or order flow absorption (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                    telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
+                    return False, reason, telemetry
+
+            # Confirmed Short Fill (Fresh touch without adverse penetration)
             reason = f"Short limit fill confirmed by microstructure resistance (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
             telemetry["fill_state"] = "CONFIRMED"
             telemetry["fill_confirmation_type"] = "LIVE_OBI_CVD_CONFIRMED" if (has_depth and not is_synthetic) else ("SYNTHETIC_MICROSTRUCTURE_CONFIRMED" if is_synthetic else "PRICE_TOUCH_FALLBACK")

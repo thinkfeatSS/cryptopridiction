@@ -1776,7 +1776,8 @@ class PaperTradingBot:
                             cvd_threshold=0.20,
                             touch_tolerance=touch_tol,
                             tick_latency_ms=tick_latency_ms,
-                            is_extreme_macro=is_extreme_macro
+                            is_extreme_macro=is_extreme_macro,
+                            was_adverse_penetrated=bool(pos.get("was_adverse_penetrated", False))
                         )
 
                         if not is_confirmed:
@@ -1785,6 +1786,9 @@ class PaperTradingBot:
                             pos["microstructure_deferral_count"] = int(pos.get("microstructure_deferral_count", 0)) + 1
                             pos["last_microstructure_reason"] = fill_reason
                             pos["microstructure_telemetry"] = fill_telemetry
+
+                            if fill_telemetry.get("fill_state") == "ADVERSE_PENETRATION_DEFERRED":
+                                pos["was_adverse_penetrated"] = True
 
                             # Smart Penetration Stabilization / Multi-Tick Velocity Stall Check:
                             # If order was deferred due to adverse penetration, but price velocity has now stalled
@@ -1800,7 +1804,7 @@ class PaperTradingBot:
                             sl_not_breached = (curr_p > sl_p_val) if direction == "LONG" else (curr_p < sl_p_val)
 
                             if (
-                                fill_telemetry.get("fill_state") == "ADVERSE_PENETRATION_DEFERRED"
+                                (fill_telemetry.get("fill_state") == "ADVERSE_PENETRATION_DEFERRED" or pos.get("was_adverse_penetrated"))
                                 and pos["microstructure_deferral_count"] >= 2
                                 and price_delta_pct < 0.08
                                 and sl_not_breached
@@ -1830,28 +1834,33 @@ class PaperTradingBot:
                         # Confirmed fill (standard touch, absorption stabilization, or stalled momentum)
                         pos["status"] = "OPEN"
                         pos["is_limit_resting"] = False
+                        pos["was_adverse_penetrated"] = False
+                        pos["awaiting_microstructure_inflow"] = False
 
                         # Institutional Price Improvement:
                         # If filled via penetration stabilization, execute at the superior current price
-                        if fill_telemetry.get("fill_state") == "STABILIZED_PENETRATION_CONFIRMED":
-                            actual_exec_p = curr_p
+                        if fill_telemetry.get("fill_state") == "STABILIZED_PENETRATION_CONFIRMED" or fill_telemetry.get("fill_confirmation_type") in ["STABILIZED_ABSORPTION_FILL", "STABILIZED_VELOCITY_STALL_FILL"]:
+                            actual_exec_p = fill_telemetry.get("execution_price", curr_p)
                             pos["entry_price"] = actual_exec_p
                             pos["current_price"] = actual_exec_p
-                            pos["price_improved"] = True
+                            pos["price_improved"] = (actual_exec_p != limit_p)
                             pos["price_improvement_pct"] = round(((actual_exec_p - limit_p) / limit_p) * 100.0, 3) if direction == "SHORT" else round(((limit_p - actual_exec_p) / limit_p) * 100.0, 3)
                         else:
                             pos["entry_price"] = limit_p
                             pos["current_price"] = limit_p
                             pos["price_improved"] = False
+                            pos["price_improvement_pct"] = 0.0
 
                         pos["opened_at"] = now_utc.isoformat()
                         pos["opened_at_utc"] = now_utc.isoformat()
-                        pos["awaiting_microstructure_inflow"] = False
                         pos["fill_obi"] = fill_telemetry.get("obi_5", 0.0)
                         pos["fill_cvd"] = fill_telemetry.get("cvd_surge", 0.0)
                         pos["fill_bid_depth_usd"] = fill_telemetry.get("bid_depth_usd", 0.0)
                         pos["fill_ask_depth_usd"] = fill_telemetry.get("ask_depth_usd", 0.0)
                         pos["fill_confirmation_type"] = fill_telemetry.get("fill_confirmation_type", "LIVE_OBI_CVD_CONFIRMED")
+                        if "price_delta_pct" in locals():
+                            pos["fill_velocity_delta_pct"] = round(price_delta_pct, 4)
+                        pos["microstructure_stalls_stabilized"] = bool(pos.get("microstructure_deferral_count", 0) > 0)
                         print(f"[PAPER BOT [FILL] RESTING LIMIT FILLED ({pos['fill_confirmation_type']})] {sym} ({direction} {norm_h}) limit filled at ${pos['entry_price']:,.4f}! Reason: {fill_reason}")
                         remaining_positions.append(pos)
                         continue
