@@ -818,6 +818,117 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         self.assertGreaterEqual(sl_dist_short, 0.0180, f"SL distance must be at least 1.80%, got {sl_dist_short:.4%}")
         self.assertGreaterEqual(res_short["risk_reward_ratio"], 2.0, "1:2 R:R must be preserved")
 
+    def test_15_adverse_penetration_smart_stabilization_and_continuous_oos_eval(self):
+        """
+        Comprehensive Verification for:
+        1. Smart Penetration Stabilization: No sacrificed fills when price thrusts past limit
+           and stabilizes via microstructure absorption (OBI/CVD) or candlestick exhaustion wicks.
+        2. PaperTradingBot Multi-Tick Velocity Stall: Fills orders at superior price improvement
+           when adverse velocity stalls before blowout.
+        3. Continuous Out-of-Sample Forward Edge Evaluator:
+           Verifies that V16ShadowValidationEngine.run_continuous_forward_edge_evaluation
+           produces authoritative forward validation reports across scan cycles.
+        """
+        # 1. Smart Penetration Stabilization on SHORT
+        limit_short = 100.0
+        price_overshoot_short = 100.60 # +0.60% above limit
+
+        # Case A: Overshoot with aggressive seller absorption (Ask wall depth + negative CVD)
+        depth_seller_absorb = {
+            "bids": [[100.59, 1.0]],
+            "asks": [[100.61, 5.0]], # Ask wall 5x larger than bid
+            "has_depth": True
+        }
+        cvd_seller_absorb = {"cvd_surge": -0.25} # Aggressive market selling into the bounce
+        conf_short_stab, rsn_short_stab, tel_short_stab = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="SHORT",
+            limit_price=limit_short,
+            current_price=price_overshoot_short,
+            depth_data=depth_seller_absorb,
+            cvd_metrics=cvd_seller_absorb
+        )
+        self.assertTrue(conf_short_stab, "Seller absorption must confirm fill at superior short price")
+        self.assertEqual(tel_short_stab.get("fill_state"), "STABILIZED_PENETRATION_CONFIRMED")
+        self.assertEqual(tel_short_stab.get("fill_confirmation_type"), "STABILIZED_ABSORPTION_FILL")
+        self.assertEqual(tel_short_stab.get("execution_price"), 100.60)
+
+        # Case B: Smart Penetration Stabilization on LONG
+        limit_long = 100.0
+        price_overshoot_long = 99.40 # -0.60% below limit
+        depth_buyer_absorb = {
+            "bids": [[99.39, 5.0]], # Bid support wall 5x larger than ask
+            "asks": [[99.41, 1.0]],
+            "has_depth": True
+        }
+        cvd_buyer_absorb = {"cvd_surge": +0.25} # Aggressive market buying into the dip
+        conf_long_stab, rsn_long_stab, tel_long_stab = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="LONG",
+            limit_price=limit_long,
+            current_price=price_overshoot_long,
+            depth_data=depth_buyer_absorb,
+            cvd_metrics=cvd_buyer_absorb
+        )
+        self.assertTrue(conf_long_stab, "Buyer absorption must confirm fill at superior long price")
+        self.assertEqual(tel_long_stab.get("fill_state"), "STABILIZED_PENETRATION_CONFIRMED")
+        self.assertEqual(tel_long_stab.get("fill_confirmation_type"), "STABILIZED_ABSORPTION_FILL")
+        self.assertEqual(tel_long_stab.get("execution_price"), 99.40)
+
+        # 2. PaperTradingBot Multi-Tick Velocity Stall Execution
+        import tempfile
+        import shutil
+        from datetime import datetime, timezone
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            ledger_path = os.path.join(tmp_dir, "test_ledger_stall.json")
+            bot = PaperTradingBot(ledger_file=ledger_path)
+            pos_stall = {
+                "trade_id": "TEST_STALL_FILL",
+                "symbol": "BTC/USDT",
+                "desk": "scalp",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "entry_price": 60000.0,
+                "optimal_entry_limit": 60000.0,
+                "sl_price": 61500.0, # 2.5% SL
+                "tp1_price": 57000.0, # 5.0% TP1 (R:R = 1:2.0)
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["open_positions"] = [pos_stall]
+
+            # Tick 1: Price surges +0.50% past limit without depth -> Defer
+            bot.on_tick(live_prices={"BTC/USDT": 60300.0})
+            self.assertEqual(pos_stall["status"], "RESTING_LIMIT")
+            self.assertTrue(pos_stall.get("awaiting_microstructure_inflow"))
+            self.assertEqual(pos_stall.get("microstructure_deferral_count"), 1)
+
+            # Tick 2: Price velocity stalls at 60310.0 (delta = 0.016% < 0.08%) -> Confirmed fill at superior price!
+            bot.on_tick(live_prices={"BTC/USDT": 60310.0})
+            self.assertEqual(pos_stall["status"], "OPEN", "Stalled momentum must confirm fill at superior price")
+            self.assertEqual(pos_stall["entry_price"], 60310.0)
+            self.assertTrue(pos_stall.get("price_improved"))
+            self.assertEqual(pos_stall.get("fill_confirmation_type"), "STABILIZED_VELOCITY_STALL_FILL")
+
+            # 3. Continuous Out-of-Sample Forward Edge Evaluator
+            from app.quant_v16.validation_engine import V16ShadowValidationEngine
+            oos_res = V16ShadowValidationEngine.run_continuous_forward_edge_evaluation(export_dir=tmp_dir)
+            self.assertIn("experiment_id", oos_res)
+            self.assertIn("brier_score", oos_res)
+            self.assertIn("expected_calibration_error", oos_res)
+            self.assertIn("promotion_gates", oos_res)
+
+            # Verify exported files exist and are valid JSON
+            val_path = os.path.join(tmp_dir, "v16_validation_report.json")
+            cal_path = os.path.join(tmp_dir, "v16_calibration_metrics.json")
+            edge_path = os.path.join(tmp_dir, "live_forward_edge_metrics.json")
+            self.assertTrue(os.path.exists(val_path), "v16_validation_report.json must be generated")
+            self.assertTrue(os.path.exists(cal_path), "v16_calibration_metrics.json must be generated")
+            self.assertTrue(os.path.exists(edge_path), "live_forward_edge_metrics.json must be generated")
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

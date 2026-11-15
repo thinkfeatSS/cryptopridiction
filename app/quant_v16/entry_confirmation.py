@@ -879,31 +879,12 @@ class EntryConfirmationEngine:
         dir_upper = str(direction).upper()
         is_long = dir_upper in ["LONG", "BULLISH", "BUY"]
 
-        # 1. Price touch verification (with dynamic micro-bracket touch tolerance and adverse momentum surge guard)
-        max_allowed_long_p = limit_price + touch_tolerance
-        min_allowed_short_p = limit_price - touch_tolerance
-        if is_long and current_price > max_allowed_long_p:
-            return False, f"Price (${current_price:,.4f}) above Long limit (${limit_price:,.4f})", {}
-        elif not is_long and current_price < min_allowed_short_p:
-            return False, f"Price (${current_price:,.4f}) below Short limit (${limit_price:,.4f})", {}
-
-        # Adverse Momentum / Penetration Guard:
-        # If price has blown far past the limit level in the adverse direction (e.g., rocket through short or dump through long),
-        # defer fill to prevent shorting into a vertical impulse rocket or buying a knife.
-        max_adverse_overshoot = max(touch_tolerance * 3.0, limit_price * 0.0040)
-        if is_long and current_price < (limit_price - max_adverse_overshoot):
-            overshoot_pct = ((limit_price - current_price) / max(1e-8, limit_price)) * 100.0
-            return False, f"Adverse price dump (${current_price:,.4f} is -{overshoot_pct:.2f}% below Long limit ${limit_price:,.4f}). Awaiting bounce stabilization.", {"fill_state": "ADVERSE_PENETRATION_DEFERRED"}
-        elif not is_long and current_price > (limit_price + max_adverse_overshoot):
-            overshoot_pct = ((current_price - limit_price) / max(1e-8, limit_price)) * 100.0
-            return False, f"Adverse price surge (${current_price:,.4f} is +{overshoot_pct:.2f}% above Short limit ${limit_price:,.4f}). Awaiting rejection stabilization.", {"fill_state": "ADVERSE_PENETRATION_DEFERRED"}
-
-        # 2. Extract Top-5 OBI metrics
+        # 1. Extract Top-5 OBI metrics first to inform both standard fills and penetration stabilization
         depth_info = EntryConfirmationEngine.calculate_top5_obi(depth_data)
         has_depth = depth_info.get("has_depth", False)
         obi_val = float(depth_info.get("obi_5", 0.0))
 
-        # 3. Extract CVD Surge / Inflow metrics
+        # 2. Extract CVD Surge / Inflow metrics
         # In local test environments without live WebSockets or Redis, falls back to conservative taker-buy volume estimates
         cvd_val = 0.0
         if cvd_metrics and isinstance(cvd_metrics, dict):
@@ -942,7 +923,70 @@ class EntryConfirmationEngine:
             "is_synthetic": is_synthetic
         }
 
-        # 4. Microstructure Inflow Decision Logic
+        # 3. Price touch verification (with dynamic micro-bracket touch tolerance)
+        max_allowed_long_p = limit_price + touch_tolerance
+        min_allowed_short_p = limit_price - touch_tolerance
+        if is_long and current_price > max_allowed_long_p:
+            return False, f"Price (${current_price:,.4f}) above Long limit (${limit_price:,.4f})", telemetry
+        elif not is_long and current_price < min_allowed_short_p:
+            return False, f"Price (${current_price:,.4f}) below Short limit (${limit_price:,.4f})", telemetry
+
+        # 4. Smart Penetration Stabilization & Momentum Overshoot Guard:
+        # Prevents filling short limits into vertical green rockets and long limits into free-falling knives.
+        # However, NEVER blindly sacrifice fills: if price overshoots past the limit level, evaluate whether
+        # order flow absorption, depth walls, or candlestick exhaustion confirm that the impulse has stabilized.
+        # If stabilized, executes at the superior market price (price improvement for the trader).
+        max_adverse_overshoot = max(touch_tolerance * 3.0, limit_price * 0.0040)
+        c_metrics = candle_metrics if (candle_metrics and isinstance(candle_metrics, dict)) else {}
+        u_wick = float(c_metrics.get("upper_wick_ratio") or 0.0)
+        l_wick = float(c_metrics.get("lower_wick_ratio") or 0.0)
+        tb_ratio = float(c_metrics.get("taker_buy_ratio") or 0.50)
+
+        if is_long and current_price < (limit_price - max_adverse_overshoot):
+            overshoot_pct = ((limit_price - current_price) / max(1e-8, limit_price)) * 100.0
+            # Check buyer absorption / bottoming stabilization:
+            # - Strong bid wall depth support (OBI >= +0.15 or bid depth >= 1.25x ask depth)
+            # - Aggressive buyer inflow / CVD inflection (CVD >= +0.10 or taker buy ratio >= 0.52)
+            # - Rejection lower wick forming (lower wick >= 18% of candle range)
+            is_buyer_absorption = (
+                (obi_val >= 0.15) or
+                (cvd_val >= 0.10) or
+                (l_wick >= 0.18) or
+                (tb_ratio >= 0.52 and cvd_val >= 0.0)
+            )
+            if is_buyer_absorption:
+                reason = f"Long stabilized penetration fill confirmed by buyer absorption at superior price ${current_price:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
+                telemetry["fill_confirmation_type"] = "STABILIZED_ABSORPTION_FILL"
+                telemetry["execution_price"] = current_price
+                return True, reason, telemetry
+            else:
+                telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
+                return False, f"Adverse price dump (${current_price:,.4f} is -{overshoot_pct:.2f}% below Long limit ${limit_price:,.4f}). Awaiting bounce stabilization.", telemetry
+
+        elif not is_long and current_price > (limit_price + max_adverse_overshoot):
+            overshoot_pct = ((current_price - limit_price) / max(1e-8, limit_price)) * 100.0
+            # Check seller absorption / topping rejection stabilization:
+            # - Strong ask wall depth resistance (OBI <= -0.15 or ask depth >= 1.25x bid depth)
+            # - Aggressive seller inflow / CVD inflection (CVD <= -0.10 or taker buy ratio <= 0.48)
+            # - Rejection upper wick forming (upper wick >= 18% of candle range)
+            is_seller_absorption = (
+                (obi_val <= -0.15) or
+                (cvd_val <= -0.10) or
+                (u_wick >= 0.18) or
+                (tb_ratio <= 0.48 and cvd_val <= 0.0)
+            )
+            if is_seller_absorption:
+                reason = f"Short stabilized penetration fill confirmed by seller absorption at superior price ${current_price:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
+                telemetry["fill_confirmation_type"] = "STABILIZED_ABSORPTION_FILL"
+                telemetry["execution_price"] = current_price
+                return True, reason, telemetry
+            else:
+                telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
+                return False, f"Adverse price surge (${current_price:,.4f} is +{overshoot_pct:.2f}% above Short limit ${limit_price:,.4f}). Awaiting rejection stabilization.", telemetry
+
+        # 5. Microstructure Inflow Decision Logic for Normal Touch Band
         if is_long:
             # Adverse Long Fill Interception:
             # A. Extreme ask wall depth imbalance (OBI < -0.60 indicates severe bid void / wall collapse)

@@ -834,3 +834,239 @@ class V16ShadowValidationEngine:
             raw_expected_calibration_error=raw_ece if resolved > 0 else None,
             raw_brier_score=raw_brier if resolved > 0 else None
         )
+
+    @classmethod
+    def run_continuous_forward_edge_evaluation(
+        cls,
+        export_dir: Optional[str] = None,
+        db: Optional[Any] = None
+    ) -> Dict[str, Any]:
+        """
+        Continuous Out-of-Sample Forward Edge & Calibration Evaluator (Section 4.3 & Rule 6/7).
+        Automatically executed across every scan cycle and trade exit:
+        1. Loads authoritative forward signals and outcomes.
+        2. Computes out-of-sample forward calibration (Brier, ECE, BSS, WR, PF, MaxDD).
+        3. Evaluates graduation promotion gates (Gates 1-5).
+        4. Atomically exports v16_validation_report.json, v16_calibration_metrics.json,
+           and live_forward_edge_metrics.json.
+        """
+        import os
+        import json
+        import csv
+        import time
+        import threading
+
+        # Resolve export directory dynamically
+        target_dir = export_dir
+        if not target_dir:
+            try:
+                from app.config import settings
+                target_dir = getattr(settings, "EXPORT_DIR", "./export_app_data")
+            except Exception:
+                target_dir = "./export_app_data"
+
+        candidate_dirs = [target_dir, "./export_app_data", "export_app_data", "/app/export_app_data", "/root/crypto/export_app_data", "."]
+        active_export_dir = target_dir
+        for cd in candidate_dirs:
+            if os.path.exists(cd) and os.path.isdir(cd):
+                active_export_dir = cd
+                break
+
+        def _load_json(fname: str) -> Dict[str, Any]:
+            for cd in candidate_dirs:
+                fpath = os.path.join(cd, fname)
+                if os.path.exists(fpath) and os.path.getsize(fpath) > 2:
+                    try:
+                        with open(fpath, "r", encoding="utf-8") as f:
+                            c = f.read().strip()
+                            if c:
+                                return json.loads(c)
+                    except Exception:
+                        pass
+            return {}
+
+        immut_data = _load_json("v16_immutable_signals.json")
+        dyn_data = _load_json("v16_dynamic_states.json")
+
+        # Load CSV signals if JSON store is incomplete
+        csv_records = []
+        for cd in candidate_dirs:
+            for cname in ["trader_signals_tracker.csv", "latest_signals_tracker.csv", "today_trader_signals_tracker.csv"]:
+                cp = os.path.join(cd, cname)
+                if os.path.exists(cp) and os.path.getsize(cp) > 500:
+                    try:
+                        with open(cp, "r", encoding="utf-8", errors="replace") as f:
+                            reader = csv.DictReader(f)
+                            for r in reader:
+                                if r.get("signal_id"):
+                                    csv_records.append(r)
+                        break
+                    except Exception:
+                        pass
+            if csv_records:
+                break
+
+        # Load Paper Trading Ledger for resolved and active trades
+        paper_ledger = _load_json("paper_trading_ledger.json")
+        paper_closed = paper_ledger.get("closed_trades", [])
+
+        # Build signals dictionary
+        signals_map = {}
+        for sig_id, immut in immut_data.items():
+            dyn = dict(dyn_data.get(sig_id, {}))
+            signals_map[sig_id] = {
+                "immutable": dict(immut),
+                "dynamic": dyn
+            }
+
+        # Bridge from CSV records
+        for r in csv_records:
+            sid = r.get("signal_id")
+            if not sid:
+                continue
+            if sid not in signals_map:
+                try:
+                    p_raw = float(r.get("meta_win_prob") or r.get("meta_win_prob_pct") or r.get("win_p") or r.get("win_prob") or 55.0)
+                    p_tp1 = p_raw / 100.0 if p_raw > 1.0 else p_raw
+                except Exception:
+                    p_tp1 = 0.55
+                try:
+                    ev_val = float(r.get("expected_return_pct") or r.get("expected_net_return") or 0.20)
+                except Exception:
+                    ev_val = 0.20
+
+                sig_date = r.get("date_utc") or r.get("date") or ""
+                sig_time = r.get("time_utc") or r.get("time") or ""
+                sig_ts_str = f"{sig_date} {sig_time}".strip()
+
+                ret_num = None
+                try:
+                    if r.get("realized_return_num") is not None and str(r.get("realized_return_num")).strip():
+                        ret_num = float(r.get("realized_return_num"))
+                    elif r.get("realized_return_pct"):
+                        clean_ret = str(r.get("realized_return_pct")).replace("%", "").strip()
+                        if clean_ret and clean_ret != "N/A":
+                            ret_num = float(clean_ret)
+                except Exception:
+                    ret_num = None
+
+                status_val = str(r.get("status") or "ACTIVE").upper()
+                out_lbl = str(r.get("outcome_label") or r.get("outcome") or "").upper()
+
+                signals_map[sid] = {
+                    "immutable": {
+                        "signal_id": sid,
+                        "symbol": r.get("symbol") or "UNKNOWN",
+                        "horizon": r.get("horizon") or "15M",
+                        "direction": r.get("direction") or "LONG",
+                        "p_tp1": p_tp1,
+                        "expected_net_return": ev_val,
+                        "grade": r.get("quality_grade") or r.get("grade") or "Grade A",
+                        "strategy_archetype": r.get("strategy") or "BREAKOUT",
+                        "signal_generated_at": sig_ts_str,
+                        "status": status_val
+                    },
+                    "dynamic": {
+                        "status": status_val,
+                        "outcome": r.get("outcome") or "PENDING",
+                        "outcome_label": out_lbl,
+                        "realized_return_num": ret_num,
+                        "exit_price": float(r.get("exit_price")) if (r.get("exit_price") and str(r.get("exit_price")).replace(".", "").isdigit()) else None
+                    }
+                }
+            else:
+                if r.get("outcome_label") or r.get("realized_return_num") is not None:
+                    dyn = signals_map[sid]["dynamic"]
+                    if r.get("outcome_label"):
+                        dyn["outcome_label"] = r.get("outcome_label")
+                    if r.get("realized_return_num") is not None:
+                        try:
+                            dyn["realized_return_num"] = float(r.get("realized_return_num"))
+                        except Exception:
+                            pass
+                    if r.get("status"):
+                        dyn["status"] = r.get("status")
+
+        # Merge paper closed trades
+        for pct in paper_closed:
+            tid = pct.get("trade_id")
+            if tid and tid in signals_map:
+                signals_map[tid]["dynamic"]["status"] = "CLOSED"
+                signals_map[tid]["dynamic"]["outcome_label"] = pct.get("outcome_label", "CLOSED")
+                signals_map[tid]["dynamic"]["realized_return_num"] = pct.get("return_pct")
+                signals_map[tid]["dynamic"]["exit_price"] = pct.get("exit_price")
+
+        signals_list = list(signals_map.values())
+
+        # Evaluate datasets
+        engine = cls()
+        report_current = engine.evaluate_shadow_dataset(signals_list, cohort="current")
+        report_all = engine.evaluate_shadow_dataset(signals_list, cohort="all")
+
+        rep_cur_dict = asdict(report_current)
+
+        # Compute Skill Score and Edge Index
+        brier = report_current.brier_score if report_current.brier_score is not None else (report_all.brier_score or 0.0)
+        bss = round(1.0 - (brier / 0.25), 4) if brier > 0 else 0.0
+        ece = report_current.expected_calibration_error if report_current.expected_calibration_error is not None else 0.0
+        wr = report_current.realized_win_rate if report_current.realized_win_rate is not None else 0.0
+        pf = report_current.realized_profit_factor if report_current.realized_profit_factor is not None else 0.0
+
+        calib_metrics = {
+            "experiment_id": EXPERIMENT_ID,
+            "cohort": "current",
+            "last_updated_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "total_signals": report_current.total_signals,
+            "resolved_signals": report_current.resolved_signals,
+            "active_signals": report_current.active_signals,
+            "brier_score": brier,
+            "brier_skill_score": bss,
+            "expected_calibration_error": ece,
+            "realized_win_rate_pct": wr,
+            "realized_profit_factor": pf,
+            "realized_avg_net_return": report_current.realized_avg_net_return,
+            "realized_max_drawdown_pct": report_current.realized_max_drawdown_pct,
+            "promotion_gates": report_current.promotion_gates,
+            "conclusion": report_current.conclusion,
+            "calibration_curve": report_current.calibration_curve,
+            "expectancy_curve": report_current.expectancy_curve,
+            "by_horizon": report_current.horizon_breakdown
+        }
+
+        # Atomic writes to target directory
+        try:
+            os.makedirs(active_export_dir, exist_ok=True)
+            val_p = os.path.join(active_export_dir, "v16_validation_report.json")
+            tmp_val = f"{val_p}.{threading.get_ident()}.{time.time_ns()}.tmp"
+            with open(tmp_val, "w", encoding="utf-8") as f:
+                json.dump({"status": "success", "cohort": "current", "report": rep_cur_dict}, f, indent=2)
+            os.replace(tmp_val, val_p)
+
+            cal_p = os.path.join(active_export_dir, "v16_calibration_metrics.json")
+            tmp_cal = f"{cal_p}.{threading.get_ident()}.{time.time_ns()}.tmp"
+            with open(tmp_cal, "w", encoding="utf-8") as f:
+                json.dump(calib_metrics, f, indent=2)
+            os.replace(tmp_cal, cal_p)
+
+            edge_p = os.path.join(active_export_dir, "live_forward_edge_metrics.json")
+            tmp_edge = f"{edge_p}.{threading.get_ident()}.{time.time_ns()}.tmp"
+            with open(tmp_edge, "w", encoding="utf-8") as f:
+                json.dump({
+                    "experiment_id": EXPERIMENT_ID,
+                    "cohort": "current",
+                    "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "sample_progress": f"{report_current.resolved_signals}/100",
+                    "milestone": report_current.promotion_gates.get("gate_2_sample_size", {}).get("milestone", "SHADOW_VALIDATION"),
+                    "brier_score": brier,
+                    "brier_skill_score": bss,
+                    "ece": ece,
+                    "realized_win_rate": wr,
+                    "profit_factor": pf,
+                    "gates_status": {k: v.get("status") for k, v in report_current.promotion_gates.items()},
+                    "conclusion": report_current.conclusion
+                }, f, indent=2)
+            os.replace(tmp_edge, edge_p)
+        except Exception:
+            pass
+
+        return calib_metrics

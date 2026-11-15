@@ -279,6 +279,22 @@ def run_daemon():
                     sync_files_to_db_live(force=True)
                     print(f"[SCANNER CYCLE #{scan_cycle}] Market scan & DB sync completed successfully! ✅")
 
+                # Continuous Live Forward Out-of-Sample Edge Evaluation:
+                # Rule 6, 7, 9: Evaluates probability calibration, Brier score, ECE, and promotion gates
+                # across upcoming scan cycles on live empirical forward signals.
+                try:
+                    from app.quant_v16.validation_engine import V16ShadowValidationEngine
+                    oos_eval = V16ShadowValidationEngine.run_continuous_forward_edge_evaluation()
+                    resolved_n = oos_eval.get('resolved_signals', 0)
+                    wr_val = oos_eval.get('realized_win_rate_pct', 0.0)
+                    pf_val = oos_eval.get('realized_profit_factor', 0.0)
+                    ece_val = oos_eval.get('expected_calibration_error', 0.0)
+                    brier_val = oos_eval.get('brier_score', 0.0)
+                    milestone_str = oos_eval.get('promotion_gates', {}).get('gate_2_sample_size', {}).get('milestone', 'SHADOW_VALIDATION')
+                    print(f"[SCANNER CYCLE #{scan_cycle} OOS FORWARD EDGE 📈] Forward Cohort: {oos_eval.get('experiment_id', 'V16.1.0-SHADOW-002')} | Resolved: {resolved_n}/100 ({milestone_str}) | Brier: {brier_val:.4f} | ECE: {ece_val:.4f} | WR: {wr_val:.1f}% | PF: {pf_val:.2f}")
+                except Exception as e_oos:
+                    print(f"[SCANNER CYCLE #{scan_cycle} OOS NOTICE ⚠️] Forward evaluation notice: {e_oos}")
+
                 # Automated Model Retraining Trigger: Checks if >= 3 newly resolved signals available
                 if HAS_MODEL_RETRAINER:
                     print(f"[SCANNER CYCLE #{scan_cycle}] Checking automated model retraining threshold...")

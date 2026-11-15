@@ -1559,14 +1559,62 @@ class PaperTradingBot:
                             pos["microstructure_deferral_count"] = int(pos.get("microstructure_deferral_count", 0)) + 1
                             pos["last_microstructure_reason"] = fill_reason
                             pos["microstructure_telemetry"] = fill_telemetry
+
+                            # Smart Penetration Stabilization / Multi-Tick Velocity Stall Check:
+                            # If order was deferred due to adverse penetration, but price velocity has now stalled
+                            # (not making further adverse progress) and is consolidating safely within blowout boundaries:
+                            last_def_p = float(pos.get("_last_deferred_price", curr_p))
+                            pos["_last_deferred_price"] = curr_p
+                            price_delta_pct = (abs(curr_p - last_def_p) / max(1e-8, curr_p)) * 100.0
+
+                            sl_p_val = float(pos.get("sl_price") or 0.0)
+                            tp1_p_val = float(pos.get("tp1_price") or 0.0)
+                            sl_not_breached = (curr_p > sl_p_val) if direction == "LONG" else (curr_p < sl_p_val)
+
+                            if (
+                                fill_telemetry.get("fill_state") == "ADVERSE_PENETRATION_DEFERRED"
+                                and pos["microstructure_deferral_count"] >= 2
+                                and price_delta_pct < 0.08
+                                and sl_not_breached
+                            ):
+                                eff_rr_stall, _, _ = self.calculate_effective_rr(
+                                    entry_p=curr_p,
+                                    tp1_p=tp1_p_val,
+                                    sl_p=sl_p_val,
+                                    spread_bps=live_spread_bps,
+                                    volume_24h_usd=float(pos.get("volume_24h_usd", 0.0)),
+                                    tick_latency_ms=tick_latency_ms,
+                                    is_limit=True
+                                )
+                                if eff_rr_stall >= 1.20:
+                                    # Stabilized velocity stall confirmed fill at superior price
+                                    is_confirmed = True
+                                    fill_telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
+                                    fill_telemetry["fill_confirmation_type"] = "STABILIZED_VELOCITY_STALL_FILL"
+                                    fill_telemetry["execution_price"] = curr_p
+                                    fill_reason = f"Adverse momentum stalled (delta {price_delta_pct:.3f}% < 0.08%) across {pos['microstructure_deferral_count']} ticks at superior price ${curr_p:,.4f} with R:R 1:{eff_rr_stall:.2f}"
+
+                        if not is_confirmed:
                             remaining_positions.append(pos)
                             continue
 
-                        # Confirmed fill: Buyer absorption on Long / Seller resistance on Short
+                        # Confirmed fill (standard touch, absorption stabilization, or stalled momentum)
                         pos["status"] = "OPEN"
                         pos["is_limit_resting"] = False
-                        pos["entry_price"] = limit_p
-                        pos["current_price"] = limit_p
+
+                        # Institutional Price Improvement:
+                        # If filled via penetration stabilization, execute at the superior current price
+                        if fill_telemetry.get("fill_state") == "STABILIZED_PENETRATION_CONFIRMED":
+                            actual_exec_p = curr_p
+                            pos["entry_price"] = actual_exec_p
+                            pos["current_price"] = actual_exec_p
+                            pos["price_improved"] = True
+                            pos["price_improvement_pct"] = round(((actual_exec_p - limit_p) / limit_p) * 100.0, 3) if direction == "SHORT" else round(((limit_p - actual_exec_p) / limit_p) * 100.0, 3)
+                        else:
+                            pos["entry_price"] = limit_p
+                            pos["current_price"] = limit_p
+                            pos["price_improved"] = False
+
                         pos["opened_at"] = now_utc.isoformat()
                         pos["opened_at_utc"] = now_utc.isoformat()
                         pos["awaiting_microstructure_inflow"] = False
@@ -1575,7 +1623,7 @@ class PaperTradingBot:
                         pos["fill_bid_depth_usd"] = fill_telemetry.get("bid_depth_usd", 0.0)
                         pos["fill_ask_depth_usd"] = fill_telemetry.get("ask_depth_usd", 0.0)
                         pos["fill_confirmation_type"] = fill_telemetry.get("fill_confirmation_type", "LIVE_OBI_CVD_CONFIRMED")
-                        print(f"[PAPER BOT [FILL] RESTING LIMIT FILLED ({pos['fill_confirmation_type']})] {sym} ({direction} {norm_h}) limit filled at ${limit_p:,.4f}! Reason: {fill_reason}")
+                        print(f"[PAPER BOT [FILL] RESTING LIMIT FILLED ({pos['fill_confirmation_type']})] {sym} ({direction} {norm_h}) limit filled at ${pos['entry_price']:,.4f}! Reason: {fill_reason}")
                         remaining_positions.append(pos)
                         continue
 
@@ -2417,6 +2465,14 @@ class PaperTradingBot:
                             )
                         except Exception:
                             pass
+
+                    # Continuous Live Forward Out-of-Sample Edge Evaluation:
+                    # Updates empirical calibration metrics, Brier scores, and promotion gates upon trade resolution
+                    try:
+                        from app.quant_v16.validation_engine import V16ShadowValidationEngine
+                        V16ShadowValidationEngine.run_continuous_forward_edge_evaluation()
+                    except Exception:
+                        pass
                 else:
                     self._update_position_trailing_evolution(pos, curr_p)
                     remaining_positions.append(pos)

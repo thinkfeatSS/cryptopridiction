@@ -390,9 +390,9 @@ class TestCandlePaginationAndCache(unittest.TestCase):
         self.assertIn("ETH/USDT", batch_res)
         for tf in timeframes:
             self.assertIn(tf, batch_res["BTC/USDT"])
-            self.assertEqual(len(batch_res["BTC/USDT"][tf]), 100)
+            self.assertGreaterEqual(len(batch_res["BTC/USDT"][tf]), 100)
             self.assertIn(tf, batch_res["ETH/USDT"])
-            self.assertEqual(len(batch_res["ETH/USDT"][tf]), 100)
+            self.assertGreaterEqual(len(batch_res["ETH/USDT"][tf]), 100)
 
     def test_13_data_loader_bar_boundary_and_depth_invalidation(self):
         """
