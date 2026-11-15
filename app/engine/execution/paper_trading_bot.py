@@ -718,6 +718,11 @@ class PaperTradingBot:
             sig_ev_val = float(sig_ev_raw) if (sig_ev_raw is not None and not (isinstance(sig_ev_raw, float) and math.isnan(sig_ev_raw))) else None
             effective_gate_ev = min(ev_net, sig_ev_val) if sig_ev_val is not None else ev_net
 
+            # Institutional Macro Structural Setups (Directional Breakout Expansion & Range Rotation) & Grade A
+            is_macro_structural_setup = any(k in str(quality_grade).upper() for k in ["DIRECTIONAL BREAKOUT EXPANSION", "RANGE ROTATION"])
+            if is_macro_structural_setup or "GRADE A" in quality_grade.upper() or "A+" in quality_grade.upper():
+                min_desk_ev = 0.00
+
             if effective_gate_ev < min_desk_ev:
                 print(f"[PAPER BOT [QUALITY GATE]] Rejected for {symbol}: Requires EVnet >= {min_desk_ev:.2f}% (got {effective_gate_ev:.2f}%)")
                 return False

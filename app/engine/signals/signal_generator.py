@@ -204,7 +204,8 @@ class SignalGenerationSystem:
         current_price: float,
         btc_shield_state: Optional[Dict[str, Any]],
         candle_metrics: Optional[Dict[str, Any]] = None,
-        order_block_setup: Optional[Dict[str, Any]] = None
+        order_block_setup: Optional[Dict[str, Any]] = None,
+        archetype_info: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, str]:
         """
         Identifies whether an individual altcoin exhibits an independent, decoupled trend
@@ -240,6 +241,23 @@ class SignalGenerationSystem:
 
         if not is_btc_consolidation:
             return False, "BTC is in trending/directional macro regime"
+
+        # Check for confirmed macro structural archetype (Macro Range Breakout Expansion or Range Boundary Rotation)
+        if archetype_info:
+            arch_strat_str = str(archetype_info.get("strategy") or "").upper()
+            arch_type_str = str(archetype_info.get("archetype") or "").upper()
+            is_macro_expansion = bool(
+                "DIRECTIONAL_BREAKOUT_EXPANSION" in arch_strat_str or
+                archetype_info.get("is_breakout_expansion") or
+                "ARCHETYPE_B_COILING_BREAKOUT" in arch_type_str or
+                archetype_info.get("is_coiling_breakout") or
+                "ARCHETYPE_C_RANGE_ROTATION" in arch_type_str or
+                "RANGE_ROTATION" in arch_strat_str or
+                archetype_info.get("is_range_rotation_valid")
+            )
+            if is_macro_expansion:
+                lbl = archetype_info.get("strategy") or archetype_info.get("archetype") or "MACRO_EXPANSION"
+                return True, f"Decoupled idiosyncratic structural setup on {symbol} ({lbl}) during BTC consolidation"
 
         if df_active is None or len(df_active) < 14:
             return False, "Insufficient candle history on active timeframe"
@@ -436,25 +454,27 @@ class SignalGenerationSystem:
             p_1m = round(current_price * (1.0 + (chg_1m / 100.0)), 6)
 
         # Unanimous 5-Model Satisfaction across all 3 horizons:
-        is_1m_conv = bool(v_1m >= 5 and len(outliers_1m) == 0)
-        is_5m_conv = bool(v_5m >= 5 and len(outliers_5m) == 0)
-        is_15m_conv = bool(v_15m >= 5 and len(outliers_15m) == 0)
-        unanimous_5_models = bool(is_1m_conv and is_5m_conv and is_15m_conv)
+        is_1m_conv = bool(v_1m >= 4 and len(outliers_1m) <= 1)
+        is_5m_conv = bool(v_5m >= 4 and len(outliers_5m) <= 1)
+        is_15m_conv = bool(v_15m >= 4 and len(outliers_15m) <= 1)
+        unanimous_5_models = bool(v_1m >= 5 and v_5m >= 5 and v_15m >= 5 and len(outliers_1m) == 0 and len(outliers_5m) == 0 and len(outliers_15m) == 0)
+        majority_converged = bool(is_1m_conv and is_5m_conv and is_15m_conv)
 
-        # Directional Sign Concordance:
+        # Directional Sign Concordance & Microstructure Adverse Rebound:
+        # Realistic noise tolerance (0.25% margin) across high-frequency 1M/5M/15M prices
         if exp_dir == "LONG":
-            dir_concordance = bool(chg_1m > -0.01 and chg_5m > -0.01 and chg_15m > -0.01)
-            has_adverse_rebound = bool(chg_1m < -0.05 or chg_5m < -0.05)
-            # Temporal excursion progression: P_live <= P_1m <= P_5m <= P_15m (with 0.05% margin)
-            progression_valid = bool((p_1m >= current_price * 0.9995) and (p_5m >= p_1m * 0.9995) and (p_15m >= p_5m * 0.9995))
+            dir_concordance = bool(chg_1m > -0.05 and chg_5m > -0.05 and chg_15m > -0.05)
+            has_adverse_rebound = bool(chg_1m < -0.15 or chg_5m < -0.15)
+            # Temporal excursion progression: P_live <= P_1m <= P_5m <= P_15m (with 0.25% margin)
+            progression_valid = bool((p_1m >= current_price * 0.9975) and (p_5m >= p_1m * 0.9975) and (p_15m >= p_5m * 0.9975))
         else:
-            dir_concordance = bool(chg_1m < 0.01 and chg_5m < 0.01 and chg_15m < 0.01)
-            has_adverse_rebound = bool(chg_1m > 0.05 or chg_5m > 0.05)
-            # Temporal excursion progression: P_live >= P_1m >= P_5m >= P_15m (with 0.05% margin)
-            progression_valid = bool((p_1m <= current_price * 1.0005) and (p_5m <= p_1m * 1.0005) and (p_15m <= p_5m * 1.0005))
+            dir_concordance = bool(chg_1m < 0.05 and chg_5m < 0.05 and chg_15m < 0.05)
+            has_adverse_rebound = bool(chg_1m > 0.15 or chg_5m > 0.15)
+            # Temporal excursion progression: P_live >= P_1m >= P_5m >= P_15m (with 0.25% margin)
+            progression_valid = bool((p_1m <= current_price * 1.0025) and (p_5m <= p_1m * 1.0025) and (p_15m <= p_5m * 1.0025))
 
         unaligned_reasons = []
-        if not unanimous_5_models:
+        if not majority_converged:
             unaligned_reasons.append(f"Regressors unconverged (1M: {v_1m}/5, 5M: {v_5m}/5, 15M: {v_15m}/5)")
         if not dir_concordance:
             unaligned_reasons.append(f"Directional sign discordance (1M: {chg_1m:+.2f}%, 5M: {chg_5m:+.2f}%, 15M: {chg_15m:+.2f}%)")
@@ -595,7 +615,8 @@ class SignalGenerationSystem:
             current_price=current_price,
             btc_shield_state=btc_shield_state,
             candle_metrics=candle_metrics,
-            order_block_setup=order_block_setup
+            order_block_setup=order_block_setup,
+            archetype_info=archetype_info
         )
 
         # Extract OB rank for strategy resolution (Fix RC-1: only rank 1-2 OBs win label unconditionally)
@@ -1855,6 +1876,15 @@ class SignalGenerationSystem:
                 is_sub_threshold_illiquid = True
                 illiquidity_reason = f"Tail pair spread {spread_bps:.1f} bps > 20.0 bps limit on ${volume_24h_usd/1e6:.2f}M volume"
 
+        is_macro_structural_archetype = bool(
+            arch_strategy == "DIRECTIONAL_BREAKOUT_EXPANSION" or
+            arch_type in [
+                InstitutionalArchetype.ARCHETYPE_B_COILING_BREAKOUT.value,
+                InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value
+            ] or
+            (archetype_info and (archetype_info.get("is_breakout_expansion") or archetype_info.get("is_range_rotation_valid")))
+        )
+
         is_radar_eligible = False
         tri_horizon_res = self.evaluate_tri_horizon_regression_alignment(
             symbol=symbol,
@@ -2008,7 +2038,7 @@ class SignalGenerationSystem:
             tp3_price = cand_tp3
             sl_price = cand_sl
             rr_ratio = cand_rr
-        elif not ev_result.passes_ev_hurdle or ev_result.expected_net_return_pct <= 0.0:
+        elif not (ev_result.passes_ev_hurdle or ((is_macro_structural_archetype or (p_tp1 >= 0.58 and ev_result.expected_net_return_pct > 0.0)) and ev_result.expected_net_return_pct > 0.0 and actual_rr >= 1.50)) or ev_result.expected_net_return_pct <= 0.0:
             status = "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY" if ev_result.expected_net_return_pct <= 0.0 else "HOLD_UNFAVORABLE_RISK_REWARD"
             trade_active = False
             grade = f"Grade C ({ev_result.decision_reason})"
@@ -2029,7 +2059,7 @@ class SignalGenerationSystem:
             tp3_price = cand_tp3
             sl_price = cand_sl
             rr_ratio = cand_rr
-        elif not tri_horizon_res.get("is_aligned", True):
+        elif not (tri_horizon_res.get("is_aligned", True) or (is_macro_structural_archetype and tri_horizon_res.get("directional_sign_concordance", True) and not tri_horizon_res.get("has_adverse_rebound", False))):
             status = "HOLD_AWAITING_1M_5M_REGRESSION_CONFLUENCE"
             trade_active = False
             grade = f"Grade C (TRI-HORIZON REGRESSION UNALIGNED: {tri_horizon_res.get('unaligned_reason', 'Awaiting 1M/5M/15M convergence')})"
@@ -2040,10 +2070,10 @@ class SignalGenerationSystem:
             sl_price = cand_sl
             rr_ratio = cand_rr
             is_radar_eligible = True
-        elif effective_rr < 1.20 or actual_rr < 2.00:
-            status = "HOLD_INSUFFICIENT_RISK_REWARD" if actual_rr < 2.00 else "HOLD_SPREAD_DEGRADED_RR"
+        elif effective_rr < 1.20 or actual_rr < 1.50:
+            status = "HOLD_INSUFFICIENT_RISK_REWARD" if actual_rr < 1.50 else "HOLD_SPREAD_DEGRADED_RR"
             trade_active = False
-            grade = f"Grade C (INSUFFICIENT RISK-REWARD: Effective 1:{effective_rr:.2f} / Actual 1:{actual_rr:.2f} < 1:2.00 required)"
+            grade = f"Grade C (INSUFFICIENT RISK-REWARD: Effective 1:{effective_rr:.2f} / Actual 1:{actual_rr:.2f} < 1:1.50 required)"
             conviction = float(meta_eval.get("win_probability_pct", 65.0))
             tp1_price = cand_tp1
             tp2_price = cand_tp2
@@ -2059,9 +2089,9 @@ class SignalGenerationSystem:
             ev_net_val = ev_result.expected_net_return_pct
             if ev_net_val >= 1.00 and p_tp1 >= 0.65:
                 grade_prefix = "💎 Grade A+"
-            elif ev_net_val >= 0.50 and p_tp1 >= 0.55:
+            elif (ev_net_val >= 0.50 and p_tp1 >= 0.55) or (p_tp1 >= 0.58 and ev_net_val > 0.0):
                 grade_prefix = "⚡ Grade A"
-            elif ev_net_val >= 0.25 and p_tp1 >= 0.50:
+            elif (ev_net_val >= 0.25 and p_tp1 >= 0.50) or (is_macro_structural_archetype and ev_net_val > 0.0 and p_tp1 >= 0.50):
                 grade_prefix = "⚖️ Grade B"
             else:
                 grade_prefix = "Grade C"

@@ -580,6 +580,8 @@ class StrategyRegistry:
         # 2. Section 32: Regime-Specific Kill Switch
         regime_st = perf.regime_status.get(norm_regime) or perf.regime_status.get(raw_regime)
         if regime_st in [StrategyStatus.PAUSED, StrategyStatus.DISABLED]:
+            if is_decoupled_trend and norm_regime in ["RANGE", "CONSOLIDATION", "CHOP"]:
+                return True, f"Eligible: Decoupled independent {strategy_id} active during macro consolidation"
             return False, f"Strategy {strategy_id} is {regime_st.value} specifically in {norm_regime} regime"
 
         return True, "Eligible"
