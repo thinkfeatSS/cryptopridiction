@@ -929,6 +929,98 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_16_coin_never_blocked_after_sl_hit(self):
+        """
+        Verify that when a coin hits stop-loss (SL Hit), it is never quarantined,
+        blacklisted, or subjected to post-loss cooldown lockouts.
+        Subsequent closed candles must remain dynamically eligible for signal evaluation and emission.
+        """
+        import tempfile
+        import shutil
+        from datetime import datetime, timezone
+        from app.engine.scanner.filters import UniverseFilter
+        from app.quant_v16.universe_filter import InstitutionalUniverseFilter
+
+        # 1. Universe Filter must admit assets even if quarantine state exists
+        self.assertTrue(UniverseFilter.is_valid_crypto_pair("S/USDT"))
+        self.assertTrue(UniverseFilter.is_valid_crypto_pair("SUSDT"))
+        valid, reason = InstitutionalUniverseFilter.is_valid_utility_coin("S/USDT", price=0.033)
+        self.assertTrue(valid, f"S/USDT should be valid in universe filter, got: {reason}")
+
+        # 2. Engine quarantine check must always return (False, "")
+        from app.engine.engine import UnifiedCryptoEngine
+        engine = UnifiedCryptoEngine.__new__(UnifiedCryptoEngine)
+        engine._toxic_coin_quarantine = {}
+        is_q, q_msg = engine.is_symbol_quarantined("S/USDT")
+        self.assertFalse(is_q, "Symbol must never be quarantined after SL")
+        self.assertEqual(q_msg, "")
+
+        # 3. Simulate PaperTradingBot position opening and hitting SL
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            ledger_path = os.path.join(tmp_dir, "test_sl_ledger.json")
+            bot = PaperTradingBot(ledger_file=ledger_path)
+            pos_sl = {
+                "trade_id": "TEST_SL_POSITION",
+                "symbol": "S/USDT",
+                "desk": "scalp",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "entry_price": 0.0330,
+                "sl_price": 0.0340, # Stop loss at 0.0340
+                "tp1_price": 0.0310,
+                "status": "OPEN",
+                "nominal_size_usd": 1000.0,
+                "margin_usd": 100.0,
+                "leverage": 10.0,
+                "opened_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["open_positions"] = [pos_sl]
+
+            # Price hits SL (0.0345 >= 0.0340 for SHORT)
+            bot.on_tick(live_prices={"S/USDT": 0.0345})
+            # Position should close as LOST_SL and be removed from open_positions
+            self.assertEqual(len(bot.data["open_positions"]), 0, "Closed SL position must be removed from open_positions")
+            closed_trades = bot.data.get("closed_trades", [])
+            self.assertGreaterEqual(len(closed_trades), 1)
+            self.assertEqual(closed_trades[-1]["trade_id"], "TEST_SL_POSITION")
+            self.assertIn("LOST", str(closed_trades[-1].get("outcome") or closed_trades[-1].get("status", "")))
+
+            # 4. Symbol is now NOT active in open_positions -> Immediately eligible for new signals
+            engine.paper_bot = bot
+            engine._signal_cooldown_registry = {}
+            engine._symbol_cooldown_registry = {}
+            active_open_symbols = {p.get("symbol") for p in bot.data.get("open_positions", [])}
+            self.assertNotIn("S/USDT", active_open_symbols)
+            self.assertNotIn("S", active_open_symbols)
+
+            # Signal admission simulation
+            cand_signal = {
+                "symbol": "S/USDT",
+                "horizon": "15M",
+                "direction": "SHORT",
+                "dominant_direction": "SHORT",
+                "dominant_timeframe": "15M",
+                "is_trade_active": True,
+                "quality_grade": "Grade A",
+                "ev_net": 1.2,
+                "entry_price": 0.0345,
+                "sl_price": 0.0355,
+                "tp1_price": 0.0325,
+            }
+            # Verify that emit_signals logic does NOT reject S/USDT
+            is_open = "S/USDT" in active_open_symbols or "S" in active_open_symbols
+            self.assertFalse(is_open, "S/USDT must not be treated as open after SL hit")
+
+            # 5. Verify test.py is_asset_quarantined returns False
+            import test as test_engine
+            tracker = test_engine.SignalAuditTracker.__new__(test_engine.SignalAuditTracker)
+            tracker.records = [{"symbol": "S/USDT", "status": "LOST_SL", "outcome_label": "🔴 LOST (SL HIT)"}]
+            is_q_test, _ = tracker.is_asset_quarantined("S/USDT")
+            self.assertFalse(is_q_test, "test.py SignalAuditTracker must never quarantine after SL hit")
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

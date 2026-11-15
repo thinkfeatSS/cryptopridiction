@@ -124,20 +124,7 @@ class UnifiedCryptoEngine:
                 if is_meme_coin(sym):
                     return None
 
-                # Phase 3: Dynamic Toxic Asset Quarantine check
-                is_quar, quar_reason = self.is_symbol_quarantined(sym)
-                if is_quar:
-                    return {
-                        "symbol": sym,
-                        "horizon": "15M",
-                        "direction": "HOLD_VETOED",
-                        "dominant_direction": "HOLD_VETOED",
-                        "decision": "🛑 HOLD (QUARANTINED)",
-                        "is_trade_active": False,
-                        "is_quarantined": True,
-                        "wait_reason": quar_reason,
-                        "signal_status": "HOLD_VETOED_BY_QUARANTINE"
-                    }
+                # Zero Post-SL Blocking: Assets that hit SL remain eligible for dynamic evaluation
 
                 p = float(coin_meta.get("price", 0.0) or 0.0)
                 v = float(coin_meta.get("volume_24h", 0.0) or 0.0)
@@ -186,9 +173,6 @@ class UnifiedCryptoEngine:
         if not is_partition_stale and hasattr(self, "rectangle_orchestrator") and self.rectangle_orchestrator:
             for sym, coin_meta in assets_data.items():
                 try:
-                    is_quar, _ = self.is_symbol_quarantined(sym)
-                    if is_quar:
-                        continue
                     df_15m = coin_meta.get("dfs_9", {}).get("15m")
                     if df_15m is None or len(df_15m) < 35:
                         continue
@@ -537,22 +521,31 @@ class UnifiedCryptoEngine:
         admitted_count = 0
         if not (is_macro_dump or is_partition_stale):
             now_ts = time.time()
+            # Dynamic Active Position Guard: only avoid duplicate signals if asset currently has an open position
+            active_open_symbols = set()
+            if hasattr(self, "paper_bot") and hasattr(self.paper_bot, "data"):
+                for p in self.paper_bot.data.get("open_positions", []):
+                    s_sym = p.get("symbol", "")
+                    if s_sym:
+                        active_open_symbols.add(s_sym)
+                        active_open_symbols.add(s_sym.replace("/", "").replace("-", ""))
+
             for s in active_trade_signals[:15]:
                 sym_key = s.get("symbol", "")
+                sym_clean_key = sym_key.replace("/", "").replace("-", "")
                 hz_key = str(s.get("horizon", s.get("dominant_timeframe", "1H"))).upper()
                 norm_hz_key = "15M" if any(x in hz_key for x in ["15", "5M", "SCALP"]) else ("24H" if any(x in hz_key for x in ["24", "1D", "SWING", "MACRO", "DAILY", "7D", "15D", "30D"]) else "1H")
                 direction_key = str(s.get("dominant_direction", s.get("direction", "LONG"))).upper()
 
-                # Inter-trade cooldown: require reasonable spacing between repeated signals on the same coin
-                sym_last_emitted = self._symbol_cooldown_registry.get(sym_key, 0.0)
-                cooldown_spacing = 600 if norm_hz_key == "15M" else (1800 if norm_hz_key == "1H" else 3600)
-                if (now_ts - sym_last_emitted) < cooldown_spacing:
+                # Zero Post-SL Blocking: If trade has closed / hit SL, active_open_symbols does not contain it.
+                # Only suppress duplicates while an active open position is currently executing.
+                if sym_key in active_open_symbols or sym_clean_key in active_open_symbols:
                     continue
 
+                # Intra-scan cycle de-duplication (30s) prevents double firing in the same scan loop
                 cooldown_key = f"{sym_key}_{norm_hz_key}_{direction_key}"
-                cooldown_secs = 900 if norm_hz_key == "15M" else self._signal_cooldown_secs.get(norm_hz_key, 3600)
                 last_emitted = self._signal_cooldown_registry.get(cooldown_key, 0.0)
-                if (now_ts - last_emitted) < cooldown_secs:
+                if (now_ts - last_emitted) < 30.0:
                     continue
 
                 # BTC Shield Beta Directional Gate Pre-Screening:
@@ -1738,18 +1731,15 @@ class UnifiedCryptoEngine:
             if sig_id in existing_ids:
                 continue
 
-            # Phase 3: Check dynamic toxic asset quarantine & rational inter-signal cooldown
-            if self.is_symbol_quarantined(sym)[0]:
-                continue
-            sym_last_emitted = self._symbol_cooldown_registry.get(sym, 0.0)
-            # Rational intra-candle cooldown (10m for 15M, 30m for 1H, 1h for 24H): allows next candle close to generate fresh setup
-            cooldown_thresh = 600 if norm_hz == "15M" else (1800 if norm_hz == "1H" else 3600)
-            if (time.time() - sym_last_emitted) < cooldown_thresh:
-                continue
-
             # Prevent duplicate signal flood only if coin currently has an unexpired active trade in this horizon
             sym_clean_check = sym.replace("/", "").replace(":USDT", "").replace("-", "")
             if (sym, norm_hz) in active_pairs or (sym_clean_check, norm_hz) in active_pairs:
+                continue
+
+            # Zero Post-SL Blocking: Coins that hit SL or closed are immediately re-admitted when new setups form
+            # Intra-tick deduplication (30s) prevents double appending on the exact same scan cycle
+            sym_last_emitted = self._symbol_cooldown_registry.get(sym, 0.0)
+            if (time.time() - sym_last_emitted) < 30.0:
                 continue
 
             ob_setup = s.get("order_block_setup")
@@ -1953,84 +1943,34 @@ class UnifiedCryptoEngine:
             "scan_interval_seconds": primary["seconds_to_next_scan"],
             "candle_synchronization": "5m",
             "fresh_models_schedule": sync_sched["horizons"],
-            "quarantined_coins": {k: float(v) for k, v in self._toxic_coin_quarantine.items() if float(v) > now_dt.timestamp()}
+            "quarantined_coins": {}
         })
 
     def _load_quarantine_state(self):
-        state_path = os.path.join(self.export_dir, "scanner_daemon_state.json")
-        if os.path.exists(state_path):
-            try:
-                with open(state_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    now_ts = time.time()
-                    q = data.get("quarantined_coins", {})
-                    self._toxic_coin_quarantine = {k: float(v) for k, v in q.items() if float(v) > now_ts}
-            except Exception:
-                pass
+        self._toxic_coin_quarantine = {}
 
     def is_symbol_quarantined(self, symbol: str) -> Tuple[bool, str]:
-        now_ts = time.time()
-        until_ts = self._toxic_coin_quarantine.get(symbol, 0.0)
-        if now_ts < until_ts:
-            rem_h = round((until_ts - now_ts) / 3600.0, 1)
-            return True, f"Symbol {symbol} in 24h quarantine after consecutive stop-outs ({rem_h}h remaining)"
+        # Zero Post-SL Blocking: Coins are never blocked or quarantined after stop losses
         return False, ""
 
     def update_toxic_asset_quarantine(self):
         """
-        Phase 3: Analyzes recent resolved trades in trader_signals_tracker.csv.
-        If any symbol incurs >= 2 stop-outs within 24 hours,
-        it is dynamically quarantined for 24 hours to prevent cluster bleeding.
+        Zero Post-SL Blocking Policy:
+        Ensures quarantined_coins remains empty in scanner state.
+        Coins that incur stop losses are dynamically re-evaluated on subsequent candles.
         """
-        csv_path = os.path.join(self.export_dir, "trader_signals_tracker.csv")
-        if not os.path.exists(csv_path):
-            return
+        self._toxic_coin_quarantine.clear()
+        state_path = os.path.join(self.export_dir, "scanner_daemon_state.json")
         try:
-            import pandas as pd
-            df = pd.read_csv(csv_path)
-            if df.empty or "status" not in df.columns or "symbol" not in df.columns:
-                return
-            now_ts = time.time()
-
-            def is_loss(st, out):
-                s = str(st).upper()
-                o = str(out).upper()
-                return "LOST" in s or "SL_HIT" in s or "STOP_LOSS" in s or "LOST" in o
-
-            recent_df = df.tail(300)
-            BENCHMARK_IMMUNE = {"BTC", "ETH", "SOL", "BTC/USDT", "ETH/USDT", "SOL/USDT"}
-            for sym, g in recent_df.groupby("symbol"):
-                sym_clean = str(sym).strip().upper()
-                if sym_clean in BENCHMARK_IMMUNE or sym_clean.replace("/USDT", "") in BENCHMARK_IMMUNE:
-                    continue
-                loss_count = 0
-                has_win = False
-                for _, row in g.iterrows():
-                    st = row.get("status", "")
-                    out = row.get("outcome_label", "")
-                    if is_loss(st, out):
-                        loss_count += 1
-                    elif "WON" in str(st).upper() or "WON" in str(out).upper():
-                        has_win = True
-
-                if loss_count >= 2 and (not has_win or loss_count > 1):
-                    if sym_clean not in self._toxic_coin_quarantine or self._toxic_coin_quarantine[sym_clean] <= now_ts:
-                        self._toxic_coin_quarantine[sym_clean] = now_ts + 86400.0
-                        self._toxic_coin_quarantine[sym_clean.replace("/", "")] = now_ts + 86400.0
-                        print(f"[QUARANTINE 🛡️] Symbol {sym_clean} placed on 24h quarantine after {loss_count} recent losses.", flush=True)
-
-            state_path = os.path.join(self.export_dir, "scanner_daemon_state.json")
-            try:
-                state_data = {}
-                if os.path.exists(state_path):
-                    with open(state_path, "r", encoding="utf-8") as sf:
-                        state_data = json.load(sf)
-                state_data["quarantined_coins"] = {k: float(v) for k, v in self._toxic_coin_quarantine.items() if float(v) > now_ts}
+            state_data = {}
+            if os.path.exists(state_path):
+                with open(state_path, "r", encoding="utf-8") as sf:
+                    state_data = json.load(sf)
+            if state_data.get("quarantined_coins"):
+                state_data["quarantined_coins"] = {}
                 tmp_state = f"{state_path}.tmp.{time.time_ns()}"
                 with open(tmp_state, "w", encoding="utf-8") as sf:
                     json.dump(state_data, sf, indent=2)
                 os.replace(tmp_state, state_path)
-            except Exception as e:
-                logger.warning(f"[ENGINE ⚠️] Failed persisting quarantine state to {state_path}: {e}")
-        except Exception as q_err:
-            logger.warning(f"[ENGINE ⚠️] Error evaluating toxic coin quarantine: {q_err}")
+        except Exception as e:
+            logger.warning(f"[ENGINE ⚠️] Failed clearing quarantine state in {state_path}: {e}")

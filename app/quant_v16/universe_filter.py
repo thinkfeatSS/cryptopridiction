@@ -170,19 +170,8 @@ class InstitutionalUniverseFilter:
             if base not in INSTITUTIONAL_BENCHMARKS:
                 return False, f"INSUFFICIENT_LISTING_AGE_{listing_age_days:.1f}D_MIN_{MIN_LISTING_AGE_DAYS}D"
 
-        # 9. Toxic Quarantined Symbols (>= 2 recent stop-outs)
-        if not allow_quarantined and base not in INSTITUTIONAL_BENCHMARKS:
-            try:
-                state_path = os.path.join(EXPORT_DIR, "scanner_daemon_state.json")
-                if os.path.exists(state_path):
-                    with open(state_path, "r", encoding="utf-8") as sf:
-                        q_data = json.load(sf).get("quarantined_coins", {})
-                    now_t = time.time()
-                    for q_k in [clean_sym, base, f"{base}USDT", f"{base}/USDT"]:
-                        if q_k in q_data and float(q_data[q_k]) > now_t:
-                            return False, f"TOXIC_QUARANTINE_ACTIVE_{base}"
-            except Exception:
-                pass
+        # 9. Zero Post-SL Blocking: Coins that hit SL remain dynamically eligible for signal evaluation
+        # No artificial blacklists or quarantines after stop-outs.
 
         # 10. Dead Coin / Sub-cent Void Check (< $0.0001)
         if price is not None and price <= 0.0001:

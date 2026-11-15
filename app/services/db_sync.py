@@ -251,9 +251,10 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                     if (fs_sym, norm_hz) in existing_active_pairs:
                                         continue
 
-                                    # 45-Minute Cooldown Gate: Do not emit/insert duplicate signals within 45 mins (2700s) of last signal
+                                    # Zero Post-SL Blocking: Closed or stopped-out trades re-qualify immediately
+                                    # 30-Second Intra-Tick Guard: Prevents duplicate signal writes on the same scan cycle
                                     last_pair_ts = latest_pair_timestamps.get((fs_sym, norm_hz), 0.0)
-                                    if (now_utc.timestamp() - last_pair_ts) < 2700.0:
+                                    if (now_utc.timestamp() - last_pair_ts) < 30.0:
                                         continue
 
                                     sym_clean = fs_sym.replace("/", "").replace("-", "")

@@ -57,20 +57,8 @@ class UniverseFilter:
         if is_meme_coin(clean_sym) or is_meme_coin(base) or base in MEME_AND_SHITCOIN_BASES:
             return False
 
-        # 2b. Reject Toxic Quarantined Symbols (>= 2 recent stop-outs)
-        # Institutional benchmark assets (BTC, ETH, SOL) are immune from toxic altcoin quarantine
-        if not allow_quarantined and base not in {"BTC", "ETH", "SOL"}:
-            try:
-                state_path = os.path.join(EXPORT_DIR, "scanner_daemon_state.json")
-                if os.path.exists(state_path):
-                    with open(state_path, "r", encoding="utf-8") as sf:
-                        q_data = json.load(sf).get("quarantined_coins", {})
-                    now_t = time.time()
-                    for q_k in [clean_sym, base, f"{base}USDT", f"{base}/USDT"]:
-                        if q_k in q_data and float(q_data[q_k]) > now_t:
-                            return False
-            except Exception:
-                pass
+        # 2b. Zero Post-SL Coin Blocking Policy: Coins that hit SL are never quarantined or excluded
+        # Continuous institutional re-evaluation allows valid setups to form dynamically on subsequent closed bars
 
         # 3. Reject Synthetic Test Tokens & Non-Alphanumeric Tokens
         if base.startswith("COIN") and base[4:].isdigit():

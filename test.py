@@ -3651,16 +3651,11 @@ class PaperTradingLedger:
         if any(p.get("symbol") == sym for p in self.data["open_positions"]):
             return False
 
-        # Quarantine / Consecutive Loss Blacklist Guard (blocks chronic bleeders like ARB/ALT)
+        # Zero Post-SL Blocking: Assets that hit SL remain eligible for dynamic order execution
         if now_utc is None:
             now_utc = datetime.now(timezone.utc)
         elif now_utc.tzinfo is None:
             now_utc = now_utc.replace(tzinfo=timezone.utc)
-        if sym in self.quarantined_symbols:
-            if now_utc < self.quarantined_symbols[sym]:
-                return False
-            else:
-                del self.quarantined_symbols[sym]
 
         if sym in ["ARB/USDT", "ALT/USDT"]:
             return False  # Empirical 0% Win Rate / -23.4% PnL bleeders strictly blacklisted
@@ -3742,10 +3737,7 @@ class PaperTradingLedger:
         if meta_prob < float(self.config.get("min_meta_probability", 0.35)):
             return False
 
-        # Cooldown guard: 15 min lockout after stop-out / breakeven
-        last_closed = self.cooldown_tracker.get(sym)
-        if last_closed and (now_utc - last_closed).total_seconds() < 900:
-            return False
+        # Zero Post-SL Blocking: Closed or stopped-out trades re-qualify dynamically without artificial lockout
 
         # Volatility Risk Parity Sizing
         sizing = self.calculate_risk_parity_size(cand, desk_key)
@@ -4155,14 +4147,11 @@ class PaperTradingLedger:
                 if outcome in ["LOST", "BREAKEVEN"]:
                     self.cooldown_tracker[sym] = now_dt
 
-                # Track consecutive loss streak & apply 48-hour quarantine if >= 2 consecutive stop-outs
+                # Track consecutive loss streak
                 if outcome == "WON":
                     self.symbol_loss_streak[sym] = 0
                 elif outcome == "LOST":
                     self.symbol_loss_streak[sym] = self.symbol_loss_streak.get(sym, 0) + 1
-                    if self.symbol_loss_streak[sym] >= 2:
-                        self.quarantined_symbols[sym] = now_dt + timedelta(hours=48)
-                        print(f"\n[ASSET QUARANTINE 🛑] {sym} triggered {self.symbol_loss_streak[sym]} consecutive stop-outs! Quarantined for 48 hours to protect capital.\n", flush=True)
 
                 pos["exit_price"] = exit_p
                 pos["exit_reason"] = exit_reason
@@ -4517,42 +4506,10 @@ class SignalAuditTracker:
 
     def is_asset_quarantined(self, symbol: str, lookback_hours: float = 24.0, cooldown_hours: float = 12.0) -> tuple:
         """
-        2-Strike Asset Blacklist Quarantine Engine:
-        If an asset recorded >= 2 stop losses within past 24 hours,
-        quarantines it for 12 hours after the latest stop loss to eliminate whipsaw chop bleeding.
+        Zero Post-SL Blocking Policy:
+        Assets that hit stop loss are never quarantined or blocked from generating new signals.
+        Subsequent closed candles are continuously evaluated dynamically for fresh setups.
         """
-        now_utc = datetime.now(timezone.utc)
-        recent_losses = []
-        for r in self.records:
-            if r.get('symbol') != symbol:
-                continue
-            status = str(r.get('status', '')).upper()
-            outcome = str(r.get('outcome_label', '')).upper()
-            if status == "LOST_SL" or "LOST (SL" in outcome or "STOPPED" in outcome:
-                eval_str = str(r.get('evaluated_at_utc', '')).replace(' UTC', '').strip()
-                loss_dt = None
-                try:
-                    if eval_str:
-                        loss_dt = datetime.strptime(eval_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
-                    else:
-                        date_u = str(r.get('date_utc', ''))
-                        time_u = str(r.get('time_utc', '')).replace(' UTC', '').strip()
-                        if date_u and time_u:
-                            loss_dt = datetime.strptime(f"{date_u} {time_u}", '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
-                except Exception:
-                    pass
-                if loss_dt:
-                    age_hours = (now_utc - loss_dt).total_seconds() / 3600.0
-                    if age_hours <= lookback_hours:
-                        recent_losses.append(loss_dt)
-
-        if len(recent_losses) >= 2:
-            latest_loss = max(recent_losses)
-            hours_since_last = (now_utc - latest_loss).total_seconds() / 3600.0
-            if hours_since_last < cooldown_hours:
-                rem_hours = round(cooldown_hours - hours_since_last, 1)
-                return True, f"QUARANTINED (2 SLs in 24h - cooldown active for {rem_hours}h)"
-
         return False, ""
 
     def build_kpi_summary(self) -> dict:

@@ -229,8 +229,8 @@ export default function V16PerformancePanel({ signals }: Props) {
           <span className="px-1.5 py-0.5 rounded bg-indigo-900/40 border border-indigo-500/30">
             ⏱️ 2H Symbol Dedup
           </span>
-          <span className="px-1.5 py-0.5 rounded bg-amber-900/40 border border-amber-500/30">
-            ☣️ 24H Toxic Quarantine
+          <span className="px-1.5 py-0.5 rounded bg-emerald-900/40 border border-emerald-500/30">
+            ⚡ Continuous SL Re-qualification
           </span>
           <span className="px-1.5 py-0.5 rounded bg-rose-900/40 border border-rose-500/30">
             🛑 Section 32 Regime Veto
