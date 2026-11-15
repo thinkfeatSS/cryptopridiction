@@ -739,7 +739,10 @@ class PaperTradingBot:
                 if not is_recycled:
                     return False
 
-            # Cross-Desk Archetype Concentration Guard (Fix 5.1): Max 2 concurrent positions per archetype family
+            # Cross-Desk Archetype Concentration Guard (Fix 5.1):
+            # Scale max concurrent positions per archetype family dynamically based on desk capacity (e.g. 35% of max_slots, min 2).
+            # For 50 scalp slots, allows up to 17 positions per family, enabling smooth execution across incoming Grade A / A+ opportunities.
+            # Evaluated per desk to prevent cross-desk starvation.
             strat_key = str(signal.get("canonical_strategy") or signal.get("strategy") or "").upper()
             archetype_family = "OTHER"
             for fam in ["BREAKOUT", "BREAKDOWN", "MOMENTUM", "ORDER_BLOCK", "BREAKER", "RANGE_BOUNCE", "DIP_BUY", "RALLY_FADE", "LIQUIDITY"]:
@@ -748,11 +751,13 @@ class PaperTradingBot:
                     break
 
             if archetype_family != "OTHER":
+                max_fam_cap = max(2, int(max_slots * 0.35))
                 same_fam_count = sum(
                     1 for p in self.data.get("open_positions", [])
-                    if archetype_family in str(p.get("strategy", "") or p.get("canonical_strategy", "")).upper()
+                    if p.get("desk") == desk_key and archetype_family in str(p.get("strategy", "") or p.get("canonical_strategy", "")).upper()
                 )
-                if same_fam_count >= 2:
+                if same_fam_count >= max_fam_cap:
+                    print(f"[PAPER BOT [CONCENTRATION GUARD]] Blocked {symbol} ({strat_key}): Reached max {max_fam_cap} concurrent positions for {archetype_family} family on {desk_key} desk.")
                     return False
 
             # 5. Price Invariants Validation

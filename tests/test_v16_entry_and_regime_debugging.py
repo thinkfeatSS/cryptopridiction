@@ -1275,6 +1275,113 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_19_microstructure_absorption_and_50_scalp_slots_execution(self):
+        """
+        Verify that:
+        1. 15M limit orders continue executing via resting limits and adverse penetration guards.
+        2. With up to 50 scalp slots now active, execution smoothly scales across multiple incoming
+           Grade A / A+ opportunities (e.g. 5+ distinct coins in the same archetype family) without being
+           throttled by the old 2-position family cap.
+        3. Adverse penetration with buyer absorption confirms fill immediately with price improvement,
+           while unconfirmed adverse penetration defers safely.
+        """
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            ledger_path = os.path.join(tmp_dir, "test_microstructure_ledger.json")
+            bot = PaperTradingBot(ledger_file=ledger_path)
+            desks = bot.data.get("desks", {})
+            self.assertEqual(desks["scalp"]["max_slots"], 50, "Scalp desk has 50 slots")
+
+            btc_shield = {
+                "regime": "BEAR_TREND",
+                "v16_regime": "BEAR_TREND",
+                "is_ntz_active": False,
+                "altcoin_shorts_allowed": True,
+                "altcoin_longs_allowed": False,
+                "sizing_multiplier": 1.00
+            }
+
+            # 1. Admit 5 distinct Grade A+ 15M SHORT signals all sharing ORDER_BLOCK archetype family
+            symbols = ["ETH/USDT", "SOL/USDT", "AVAX/USDT", "LINK/USDT", "NEAR/USDT"]
+            admitted_count = 0
+            for idx, sym in enumerate(symbols):
+                sig = {
+                    "signal_id": f"TEST_SIG_SCALP_{idx}",
+                    "symbol": sym,
+                    "direction": "SHORT",
+                    "horizon": "15M",
+                    "dominant_timeframe": "15M",
+                    "is_trade_active": True,
+                    "signal_status": "ACTIVE_SIGNAL",
+                    "meta_passed": True,
+                    "ev_net": 1.5,
+                    "conviction": 85.0,
+                    "strategy": "ORDER_BLOCK_SHORT",
+                    "canonical_strategy": "ORDER_BLOCK_SHORT",
+                    "quality_grade": "Grade A+",
+                    "meta_model_type": "MATURE_ENSEMBLE",
+                    "meta_sample_size": 100,
+                    "entry_price": 100.0 * (idx + 1),
+                    "sl_price": 105.0 * (idx + 1),
+                    "tp1_price": 90.0 * (idx + 1),
+                    "tp2_price": 85.0 * (idx + 1),
+                    "tp3_price": 80.0 * (idx + 1),
+                    "sizing_multiplier": 1.00,
+                    "allocation_pct": 100.0,
+                    "is_limit_pending": True,
+                    "optimal_entry_limit": 100.0 * (idx + 1),
+                    "entry_zone_min": 99.5 * (idx + 1),
+                    "entry_zone_max": 100.5 * (idx + 1),
+                    "is_order_block_signal": True,
+                    "candle_trigger_confirmed": True,
+                }
+                res = bot.admit_signal(sig, btc_shield_state=btc_shield)
+                if res:
+                    admitted_count += 1
+
+            # All 5 must be admitted smoothly into the 50 scalp slots (previously blocked after 2)
+            self.assertEqual(admitted_count, 5, f"All 5 Grade A+ setups must be admitted, got {admitted_count}")
+            scalp_positions = [p for p in bot.data["open_positions"] if p.get("desk") == "scalp"]
+            self.assertEqual(len(scalp_positions), 5)
+
+            # All 5 start as RESTING_LIMIT
+            for pos in scalp_positions:
+                self.assertEqual(pos["status"], "RESTING_LIMIT")
+                self.assertTrue(pos["is_limit_resting"])
+
+            # 2. Test Microstructure Absorption on adverse penetration for ETH/USDT:
+            # Short limit at 100.0. Price rallies to 101.0 (adverse overshoot past limit + tolerance).
+            # With seller absorption (OBI = -0.30, CVD = -0.20, upper wick = 0.25), fill confirms at 101.0 (price improvement)
+            is_ok, reason, telem = EntryConfirmationEngine.validate_resting_limit_fill(
+                direction="SHORT",
+                limit_price=100.0,
+                current_price=101.0,
+                depth_data={"asks": [[101.0, 50000.0], [101.1, 80000.0]], "bids": [[100.9, 10000.0], [100.8, 15000.0]]},
+                cvd_metrics={"cvd_surge": -0.25},
+                candle_metrics={"upper_wick_ratio": 0.25, "taker_buy_ratio": 0.40},
+                touch_tolerance=0.08
+            )
+            self.assertTrue(is_ok, "Seller absorption must confirm fill during adverse penetration")
+            self.assertEqual(telem["fill_state"], "STABILIZED_PENETRATION_CONFIRMED")
+            self.assertEqual(telem["execution_price"], 101.0)
+
+            # 3. Test unconfirmed adverse penetration (rocket surge without absorption):
+            # Short limit at 100.0, price at 101.0, but heavy bid wall (OBI = +0.40, CVD = +0.30)
+            is_ok_unconf, reason_unconf, telem_unconf = EntryConfirmationEngine.validate_resting_limit_fill(
+                direction="SHORT",
+                limit_price=100.0,
+                current_price=101.0,
+                depth_data={"bids": [[101.0, 80000.0], [100.9, 50000.0]], "asks": [[101.1, 10000.0], [101.2, 10000.0]]},
+                cvd_metrics={"cvd_surge": +0.35},
+                candle_metrics={"upper_wick_ratio": 0.05, "taker_buy_ratio": 0.70},
+                touch_tolerance=0.08
+            )
+            self.assertFalse(is_ok_unconf, "Unconfirmed adverse penetration must be deferred")
+            self.assertEqual(telem_unconf["fill_state"], "ADVERSE_PENETRATION_DEFERRED")
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":
