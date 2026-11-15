@@ -1604,6 +1604,120 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         if prof.recent_lh is not None:
             self.assertGreater(prof.recent_lh.price, 3.14, "Active recent_lh must be strictly above current market price")
 
+    def test_22_severe_latency_spikes_during_extreme_macro_events_tighten_blowout(self):
+        """
+        Comprehensive Verification for Severe Latency Spikes during Extreme Macro Events:
+        - If exchange tick latency exceeds 800ms during extreme macro events (BTC Shield HIGH_VOLATILITY,
+          FLASH_DUMP, BEAR_CASCADE_BLACKOUT, or Macro News Events), the blowout threshold automatically
+          tightens to eliminate slippage on resting orders.
+        - Resting limits that would survive normal market queueing lag are pre-emptively cancelled
+          before adverse momentum thrusts cause execution slippage.
+        - Multi-tick velocity stall fills are suppressed during severe macro latency spikes to prevent
+          queueing lag from being misinterpreted as true order book stabilization.
+        """
+        import tempfile
+        import shutil
+        from datetime import datetime, timezone
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            bot = PaperTradingBot(ledger_file=os.path.join(tmp_dir, "test_macro_latency_ledger.json"))
+            bot.data["desks"]["scalp"]["max_slots"] = 5
+
+            # Position template: LONG limit at $100.0, SL at $97.77 (SL distance = 2.23% -> base blowout = 1.00%)
+            pos_normal = {
+                "trade_id": "TEST_LAT_NORMAL",
+                "symbol": "BTC/USDT",
+                "desk": "scalp",
+                "direction": "LONG",
+                "horizon": "15M",
+                "entry_price": 100.0,
+                "optimal_entry_limit": 100.0,
+                "sl_price": 97.77,
+                "tp1_price": 104.46,
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat(),
+                "market_regime": "RANGE"
+            }
+
+            # Scenario 1: High latency (1200ms > 800ms) but NORMAL market regime (is_extreme_macro = False)
+            # base_blowout_pct = 1.00%. lag_penalty = ((1200 - 800)/2000)*0.40 = 0.08%.
+            # effective_blowout_pct = 1.00 - 0.08 = 0.92%.
+            # Price drops to $99.15 (-0.85% adverse drop).
+            # 0.85% <= 0.92% gate -> Resting order must NOT be cancelled (still resting, awaiting touch/fill).
+            bot.data["open_positions"] = [dict(pos_normal)]
+            bot.on_tick({"BTC/USDT": 99.15}, tick_latency_ms=1200.0, btc_shield_state={"regime": "RANGE", "status_code": "RANGE"})
+            self.assertEqual(len(bot.data["open_positions"]), 1, "0.85% drop under normal regime with 1200ms latency must not trigger blowout")
+            self.assertEqual(bot.data["open_positions"][0]["status"], "RESTING_LIMIT")
+
+            # Scenario 2: Severe Latency Spike (1200ms > 800ms) DURING EXTREME MACRO EVENT (HIGH_VOLATILITY)
+            # Gate automatically tightens by macro_tighten_penalty:
+            # macro_tighten_penalty = min(0.50, 0.20 + ((1200 - 800)/1200)*0.30) = 0.30%.
+            # effective_blowout_pct = 0.92% - 0.30% = 0.62%!
+            # With the exact same price drop to $99.15 (-0.85% adverse drop):
+            # 0.85% > 0.62% tightened gate!
+            # Resting limit order MUST be cancelled immediately to eliminate slippage!
+            pos_macro = dict(pos_normal)
+            pos_macro["trade_id"] = "TEST_LAT_MACRO"
+            bot.data["open_positions"] = [pos_macro]
+            btc_shield_high_vol = {
+                "regime": "HIGH_VOLATILITY",
+                "status_code": "HIGH_VOLATILITY",
+                "adx": 42.5,
+                "vol_ratio": 1.45,
+                "reason": "Extreme macro impulse expansion"
+            }
+            bot.on_tick({"BTC/USDT": 99.15}, tick_latency_ms=1200.0, btc_shield_state=btc_shield_high_vol)
+            self.assertEqual(len(bot.data["open_positions"]), 0, "Resting limit must be cancelled under tightened macro gate")
+            self.assertEqual(len(bot.data["cancelled_orders"]), 1)
+            canc = bot.data["cancelled_orders"][-1]
+            self.assertEqual(canc["cancellation_reason"], "CANCELLED_EXTREME_MACRO_BLOWOUT")
+            self.assertIn("Gate: 0.62%", canc["cancellation_detail"])
+            self.assertIn("Latency: 1200ms", canc["cancellation_detail"])
+            self.assertIn("Macro: BTC Shield Extreme Regime", canc["cancellation_detail"])
+
+            # Scenario 3: Symmetric check on SHORT order during FLASH_DUMP cascade
+            # SHORT limit at 100.0, SL at 102.23 (base blowout = 1.00%).
+            # Price surges +0.85% to 100.85. Under macro latency spike (1200ms), 0.85% > 0.62% tightened gate.
+            pos_short_macro = {
+                "trade_id": "TEST_SHORT_MACRO",
+                "symbol": "ETH/USDT",
+                "desk": "scalp",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "entry_price": 100.0,
+                "optimal_entry_limit": 100.0,
+                "sl_price": 102.23,
+                "tp1_price": 95.54,
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat(),
+                "market_regime": "FLASH_DUMP"
+            }
+            bot.data["open_positions"] = [pos_short_macro]
+            bot.on_tick({"ETH/USDT": 100.85}, tick_latency_ms=1200.0)
+            self.assertEqual(len(bot.data["open_positions"]), 0, "SHORT limit must be cancelled on tightened macro blowout")
+            canc_short = bot.data["cancelled_orders"][-1]
+            self.assertEqual(canc_short["cancellation_reason"], "CANCELLED_EXTREME_MACRO_BLOWOUT")
+            self.assertIn("Price rallied +0.85%", canc_short["cancellation_detail"])
+            self.assertIn("Gate: 0.62%", canc_short["cancellation_detail"])
+
+            # Scenario 4: Sub-800ms WebSocket latency (150ms) during macro event does NOT falsely cancel
+            # Clean touch at limit executes fill normally
+            pos_clean = dict(pos_normal)
+            pos_clean["trade_id"] = "TEST_CLEAN_WS"
+            bot.data["open_positions"] = [pos_clean]
+            bot.on_tick({"BTC/USDT": 100.0}, tick_latency_ms=150.0, btc_shield_state=btc_shield_high_vol)
+            self.assertEqual(len(bot.data["open_positions"]), 1, "Clean touch with healthy latency must execute fill")
+            self.assertEqual(bot.data["open_positions"][0]["status"], "OPEN")
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

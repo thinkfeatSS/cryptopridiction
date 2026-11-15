@@ -1265,8 +1265,75 @@ class PaperTradingBot:
         print(f"[PAPER BOT [CANCEL] CANCELLED] {rec['symbol']} Resting Limit Cancelled: {rec['cancellation_reason']} ({rec['cancellation_detail']})")
         self.sync_cancelled_order_to_tracker(rec)
 
+    def _is_extreme_macro_event(
+        self,
+        pos: Dict[str, Any],
+        btc_shield_state: Optional[Dict[str, Any]] = None,
+        is_market_partition_active: bool = False
+    ) -> Tuple[bool, str]:
+        """
+        Dynamically evaluates whether an extreme macro event, hyper-volatile shock,
+        or systemic volatility window is active.
+        """
+        # 1. Position-level flags
+        if pos.get("is_macro_blackout") or pos.get("has_news_shock") or pos.get("is_extreme_macro_event"):
+            return True, "Position Macro Blackout / News Shock"
+
+        pos_reg = str(pos.get("market_regime") or pos.get("regime") or "").upper()
+        extreme_regimes = {
+            "FLASH_DUMP", "BEAR_CASCADE_BLACKOUT", "HIGH_VOLATILITY",
+            "EXTREME_VOLATILITY", "MACRO_SHOCK", "VOLATILITY_EXPANSION"
+        }
+        if pos_reg in extreme_regimes:
+            return True, f"Position Regime: {pos_reg}"
+
+        # 2. Institutional macro economic calendar
+        fund_matrix = pos.get("fundamental_matrix") or {}
+        macro_ev = fund_matrix.get("macro_economic_event") or {}
+        if macro_ev.get("is_volatility_pause_active") or macro_ev.get("is_high_impact"):
+            ev_name = macro_ev.get("event_name") or "High-Impact Macro Event"
+            return True, f"Macro Calendar: {ev_name}"
+
+        try:
+            from app.services.institutional_intelligence_service import institutional_intelligence_service
+            inst_cal = institutional_intelligence_service.get_macro_economic_calendar()
+            if inst_cal.get("is_volatility_pause_active") or inst_cal.get("is_high_impact_active"):
+                ev_name = inst_cal.get("event_name") or inst_cal.get("pause_reason", "US Macro Event")
+                return True, f"Macro Intelligence: {ev_name}"
+        except Exception:
+            pass
+
+        # 3. Market partition
+        if is_market_partition_active:
+            return True, "Market Partition Active"
+
+        # 4. BTC Shield State
+        if btc_shield_state and isinstance(btc_shield_state, dict):
+            reg = str(btc_shield_state.get("regime") or btc_shield_state.get("v16_regime") or "").upper()
+            st_code = str(btc_shield_state.get("status_code") or "").upper()
+            if reg in extreme_regimes or st_code in extreme_regimes:
+                return True, f"BTC Shield Extreme Regime: {reg or st_code}"
+
+            adx_val = float(btc_shield_state.get("adx") or 0.0)
+            vol_ratio = float(btc_shield_state.get("vol_ratio") or 1.0)
+            if adx_val >= 40.0 and vol_ratio >= 1.35:
+                return True, f"Macro Momentum Expansion (ADX {adx_val:.1f}, Vol Ratio {vol_ratio:.2f}x)"
+
+            if btc_shield_state.get("is_ntz_active") or st_code == "NO_TRADE_ZONE":
+                return True, f"BTC Shield NTZ Active ({btc_shield_state.get('reason', 'Macro Risk')})"
+
+        return False, ""
+
     def on_tick(self, live_prices: Dict[str, float], is_market_partition_active: bool = False, btc_shield_state: Optional[Dict[str, Any]] = None, tick_latency_ms: float = 0.0, order_book_voids: Optional[Dict[str, Any]] = None, order_book_depths: Optional[Dict[str, Any]] = None, cvd_metrics: Optional[Dict[str, Any]] = None):
         """Evaluates live prices against open positions and resting limits with sub-second latency and impulse shields."""
+        if btc_shield_state is None:
+            btc_shield_state = getattr(self, "current_btc_shield_state", None)
+            if not btc_shield_state:
+                try:
+                    from app.engine.scanner.btc_shield import btc_shield
+                    btc_shield_state = getattr(btc_shield, "state", None)
+                except Exception:
+                    btc_shield_state = None
         with self._lock:
             if not self.data["open_positions"]:
                 return
@@ -1480,29 +1547,41 @@ class PaperTradingBot:
                     sl_p_val = float(pos.get("sl_price") or 0.0)
                     sl_dist_pct = (abs(sl_p_val - limit_p) / max(1e-8, limit_p)) * 100.0 if sl_p_val > 0 else 2.0
                     base_blowout_pct = min(1.20, max(0.50, sl_dist_pct * 0.45))
+
+                    is_extreme_macro, macro_reason = self._is_extreme_macro_event(pos, btc_shield_state, is_market_partition_active)
+
                     if tick_latency_ms > 800.0:
                         lag_penalty = min(0.40, ((tick_latency_ms - 800.0) / 2000.0) * 0.40)
                         effective_blowout_pct = max(0.40, base_blowout_pct - lag_penalty)
+
+                        # Severe Latency Spikes during Extreme Macro Events:
+                        # If exchange tick latency exceeds 800ms during extreme macro events, the blowout threshold
+                        # automatically tightens to eliminate slippage on resting orders.
+                        if is_extreme_macro:
+                            macro_tighten_penalty = min(0.50, 0.20 + ((tick_latency_ms - 800.0) / 1200.0) * 0.30)
+                            effective_blowout_pct = max(0.20, effective_blowout_pct - macro_tighten_penalty)
                     else:
                         effective_blowout_pct = base_blowout_pct
 
                     if direction == "LONG":
                         adverse_p_pct = ((limit_p - curr_p) / limit_p) * 100.0
                         if adverse_p_pct > effective_blowout_pct:
+                            macro_note = f", Macro: {macro_reason}" if is_extreme_macro else ""
                             canc_rec = self._create_cancellation_record(
                                 pos,
                                 "CANCELLED_EXTREME_MACRO_BLOWOUT",
-                                f"Price dumped {adverse_p_pct:.2f}% through limit (Gate: {effective_blowout_pct:.2f}%, Latency: {tick_latency_ms:.0f}ms)"
+                                f"Price dumped {adverse_p_pct:.2f}% through limit (Gate: {effective_blowout_pct:.2f}%, Latency: {tick_latency_ms:.0f}ms{macro_note})"
                             )
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
                     else: # SHORT
                         adverse_p_pct = ((curr_p - limit_p) / limit_p) * 100.0
                         if adverse_p_pct > effective_blowout_pct:
+                            macro_note = f", Macro: {macro_reason}" if is_extreme_macro else ""
                             canc_rec = self._create_cancellation_record(
                                 pos,
                                 "CANCELLED_EXTREME_MACRO_BLOWOUT",
-                                f"Price rallied +{adverse_p_pct:.2f}% through limit (Gate: {effective_blowout_pct:.2f}%, Latency: {tick_latency_ms:.0f}ms)"
+                                f"Price rallied +{adverse_p_pct:.2f}% through limit (Gate: {effective_blowout_pct:.2f}%, Latency: {tick_latency_ms:.0f}ms{macro_note})"
                             )
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
                             continue
@@ -1695,7 +1774,9 @@ class PaperTradingBot:
                             candle_metrics=pos.get("metrics") or pos.get("microstructure_features") or {},
                             obi_threshold=0.25,
                             cvd_threshold=0.20,
-                            touch_tolerance=touch_tol
+                            touch_tolerance=touch_tol,
+                            tick_latency_ms=tick_latency_ms,
+                            is_extreme_macro=is_extreme_macro
                         )
 
                         if not is_confirmed:
@@ -1708,6 +1789,8 @@ class PaperTradingBot:
                             # Smart Penetration Stabilization / Multi-Tick Velocity Stall Check:
                             # If order was deferred due to adverse penetration, but price velocity has now stalled
                             # (not making further adverse progress) and is consolidating safely within blowout boundaries:
+                            # Note: Severe latency spikes (>800ms) during extreme macro events strictly suppress velocity-stall fills
+                            # to eliminate adverse slippage on resting orders.
                             last_def_p = float(pos.get("_last_deferred_price", curr_p))
                             pos["_last_deferred_price"] = curr_p
                             price_delta_pct = (abs(curr_p - last_def_p) / max(1e-8, curr_p)) * 100.0
@@ -1721,6 +1804,7 @@ class PaperTradingBot:
                                 and pos["microstructure_deferral_count"] >= 2
                                 and price_delta_pct < 0.08
                                 and sl_not_breached
+                                and not (tick_latency_ms > 800.0 and is_extreme_macro)
                             ):
                                 eff_rr_stall, _, _ = self.calculate_effective_rr(
                                     entry_p=curr_p,
@@ -3463,7 +3547,7 @@ class PaperTradingBot:
                     d_val["active_slots"] = sum(1 for p in valid_positions if p.get("desk") == d_key)
                 self.save_ledger()
 
-    def start_tick_daemon(self, ticker_fetch_fn, interval_seconds: float = 0.5, partition_check_fn = None, latency_fetch_fn = None, order_book_voids_fn = None, depth_fetch_fn = None, cvd_fetch_fn = None):
+    def start_tick_daemon(self, ticker_fetch_fn, interval_seconds: float = 0.5, partition_check_fn = None, latency_fetch_fn = None, order_book_voids_fn = None, depth_fetch_fn = None, cvd_fetch_fn = None, btc_shield_fn = None):
         """Starts the decoupled 24/7 high-speed sub-second position monitoring thread with latency, depth, and outage awareness."""
         if self._running:
             return
@@ -3481,6 +3565,7 @@ class PaperTradingBot:
                         is_partition = partition_check_fn() if partition_check_fn else False
                         latency_ms = latency_fetch_fn() if latency_fetch_fn else 0.0
                         voids = order_book_voids_fn() if order_book_voids_fn else None
+                        shield_st = btc_shield_fn() if btc_shield_fn else getattr(self, "current_btc_shield_state", None)
 
                         if is_partition:
                             consecutive_partitions += 1
@@ -3488,7 +3573,7 @@ class PaperTradingBot:
                             jitter = random.uniform(-0.1, 0.1)
                             current_interval = min(4.0, max(1.5, 1.5 + (consecutive_partitions * 0.5))) + jitter
                             # Pass empty dict to avoid redundant ticker_fetch_fn calls during active partition
-                            self.on_tick({}, is_market_partition_active=True, tick_latency_ms=latency_ms, order_book_voids=voids)
+                            self.on_tick({}, is_market_partition_active=True, btc_shield_state=shield_st, tick_latency_ms=latency_ms, order_book_voids=voids)
                         else:
                             consecutive_partitions = 0
                             current_interval = interval_seconds
@@ -3535,6 +3620,7 @@ class PaperTradingBot:
                                 self.on_tick(
                                     prices,
                                     is_market_partition_active=False,
+                                    btc_shield_state=shield_st,
                                     tick_latency_ms=latency_ms,
                                     order_book_voids=voids,
                                     order_book_depths=depths if depths else None,

@@ -916,7 +916,9 @@ class EntryConfirmationEngine:
         candle_metrics: Optional[Dict[str, Any]] = None,
         obi_threshold: float = 0.25,
         cvd_threshold: float = 0.20,
-        touch_tolerance: float = 0.0
+        touch_tolerance: float = 0.0,
+        tick_latency_ms: float = 0.0,
+        is_extreme_macro: bool = False
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Authoritative Live OBI / CVD Inflow Confirmation for Resting Limit Fills.
@@ -971,7 +973,9 @@ class EntryConfirmationEngine:
             "ask_depth_usd": depth_info.get("ask_depth_usd", 0.0),
             "spread_bps": depth_info.get("spread_bps", 0.0),
             "has_depth": has_depth,
-            "is_synthetic": is_synthetic
+            "is_synthetic": is_synthetic,
+            "tick_latency_ms": tick_latency_ms,
+            "is_extreme_macro": is_extreme_macro
         }
 
         # 3. Price touch verification (with dynamic micro-bracket touch tolerance)
@@ -987,7 +991,12 @@ class EntryConfirmationEngine:
         # However, NEVER blindly sacrifice fills: if price overshoots past the limit level, evaluate whether
         # order flow absorption, depth walls, or candlestick exhaustion confirm that the impulse has stabilized.
         # If stabilized, executes at the superior market price (price improvement for the trader).
-        max_adverse_overshoot = max(touch_tolerance * 3.0, limit_price * 0.0040)
+        # Hyper-Volatile Latency-Adaptive Gate: If tick latency exceeds 800ms during extreme macro events,
+        # automatically tighten the allowable adverse overshoot to eliminate resting order slippage.
+        if tick_latency_ms > 800.0 and is_extreme_macro:
+            max_adverse_overshoot = max(touch_tolerance * 1.5, limit_price * 0.0020)
+        else:
+            max_adverse_overshoot = max(touch_tolerance * 3.0, limit_price * 0.0040)
         c_metrics = candle_metrics if (candle_metrics and isinstance(candle_metrics, dict)) else {}
         u_wick = float(c_metrics.get("upper_wick_ratio") or 0.0)
         l_wick = float(c_metrics.get("lower_wick_ratio") or 0.0)

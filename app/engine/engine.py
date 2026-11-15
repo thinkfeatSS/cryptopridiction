@@ -80,7 +80,8 @@ class UnifiedCryptoEngine:
             partition_check_fn=self.scanner.loader.is_partition_stale_active,
             latency_fetch_fn=self.scanner.loader.get_feed_latency_ms,
             depth_fetch_fn=self.scanner.loader.fetch_top5_depth,
-            cvd_fetch_fn=self.scanner.loader.fetch_cvd_metrics
+            cvd_fetch_fn=self.scanner.loader.fetch_cvd_metrics,
+            btc_shield_fn=lambda: getattr(self.scanner.btc_shield, "state", None)
         )
 
     def run_scan_and_prediction_cycle(self) -> Dict[str, Any]:
