@@ -26,6 +26,11 @@ def get_live_forecast(response: Response, db: Session = Depends(get_db)):
         try:
             with open(forecast_path, "r", encoding="utf-8") as f:
                 f_data = json.load(f)
+            # Overlay instantaneous real-time spot prices dynamically
+            try:
+                f_data = signal_service.overlay_live_prices(f_data)
+            except Exception:
+                pass
             from app.engine.config import is_meme_coin
             if "top_round_signals" in f_data and isinstance(f_data["top_round_signals"], list):
                 f_data["top_round_signals"] = [s for s in f_data["top_round_signals"] if not is_meme_coin(s.get("symbol", ""))]

@@ -876,17 +876,17 @@ class SignalGenerationSystem:
                     from app.quant_v16.market_structure import MarketStructureEngine
                     sh_list, sl_list = MarketStructureEngine.find_confirmed_fractals(df_active, timeframe="15m")
                     if direction == "LONG":
-                        hl_candidates = [s for s in sl_list if s.structure_type == "HL" and not s.is_broken]
+                        hl_candidates = [s for s in sl_list if s.structure_type == "HL" and not s.is_broken and s.price < current_price * 0.999]
                         if not hl_candidates:
-                            hl_candidates = [s for s in sl_list if s.structure_type == "HL"]
+                            hl_candidates = [s for s in sl_list if s.structure_type == "HL" and s.price < current_price * 0.999]
                         if hl_candidates:
                             hl_pivot_px = hl_candidates[-1].price
-                        elif len(sl_list) >= 2 and sl_list[-1].price > min(s.price for s in sl_list[:-1]):
+                        elif len(sl_list) >= 2 and sl_list[-1].price < current_price * 0.999:
                             hl_pivot_px = sl_list[-1].price
                         else:
                             recent_lows = df_active["low"].iloc[-15:].astype(float).values
                             min_l = float(np.min(recent_lows))
-                            emergent_hl = [float(p) for p in recent_lows if float(p) > min_l]
+                            emergent_hl = [float(p) for p in recent_lows if float(p) < current_price * 0.999]
                             hl_pivot_px = float(emergent_hl[-1]) if emergent_hl else min_l
                         opp_sh_px = sh_list[-1].price if sh_list else recent_high
                         ob_l = float(order_block_setup["order_block_zone"][0]) if (order_block_setup and order_block_setup.get("order_block_zone") and len(order_block_setup["order_block_zone"]) >= 2) else None
@@ -914,17 +914,17 @@ class SignalGenerationSystem:
                         entry_analysis["entry_mode"] = anchored["execution_mode"]
                         structural_anchor_info = anchored
                     elif direction == "SHORT":
-                        lh_candidates = [s for s in sh_list if s.structure_type == "LH" and not s.is_broken]
+                        lh_candidates = [s for s in sh_list if s.structure_type == "LH" and not s.is_broken and s.price > current_price * 1.001]
                         if not lh_candidates:
-                            lh_candidates = [s for s in sh_list if s.structure_type == "LH"]
+                            lh_candidates = [s for s in sh_list if s.structure_type == "LH" and s.price > current_price * 1.001]
                         if lh_candidates:
                             lh_pivot_px = lh_candidates[-1].price
-                        elif len(sh_list) >= 2 and sh_list[-1].price < max(s.price for s in sh_list[:-1]):
+                        elif len(sh_list) >= 2 and sh_list[-1].price > current_price * 1.001:
                             lh_pivot_px = sh_list[-1].price
                         else:
                             recent_highs = df_active["high"].iloc[-15:].astype(float).values
                             max_h = float(np.max(recent_highs))
-                            emergent_lh = [float(p) for p in recent_highs if float(p) < max_h]
+                            emergent_lh = [float(p) for p in recent_highs if float(p) > current_price * 1.001]
                             lh_pivot_px = float(emergent_lh[-1]) if emergent_lh else max_h
                         opp_sl_px = sl_list[-1].price if sl_list else recent_low
                         ob_l = float(order_block_setup["order_block_zone"][0]) if (order_block_setup and order_block_setup.get("order_block_zone") and len(order_block_setup["order_block_zone"]) >= 2) else None
@@ -1409,6 +1409,29 @@ class SignalGenerationSystem:
 
         # 7. Dynamic Funding Drag (basis points per 8h):
         funding_drag_bps = float(np.clip(float(current_funding_rate) * 10000.0 if abs(float(current_funding_rate)) < 0.1 else float(current_funding_rate), -50.0, 50.0))
+
+        # Strict Invariant Price Geometry Safety Gate (Zero-Tolerance Inversion Veto)
+        is_passive_limit = bool(entry_analysis.get("is_limit_pending", False) or entry_analysis.get("entry_mode") == "RESTING_LIMIT")
+        if direction == "SHORT":
+            if cand_sl <= exec_entry_price or cand_tp1 >= exec_entry_price:
+                logger.warning(f"[SIGNAL GENERATOR 🛑 VETO] {symbol} {horizon_label} SHORT rejected: Inverted target/SL geometry (SL: {cand_sl}, Entry: {exec_entry_price}, TP1: {cand_tp1})")
+                return None
+            if cand_sl <= current_price:
+                logger.warning(f"[SIGNAL GENERATOR 🛑 VETO] {symbol} {horizon_label} SHORT rejected: SL ({cand_sl}) <= current_price ({current_price})")
+                return None
+            if is_passive_limit and exec_entry_price < current_price * 0.998:
+                logger.warning(f"[SIGNAL GENERATOR 🛑 VETO] {symbol} {horizon_label} SHORT rejected: Limit sell entry ({exec_entry_price}) is below current market price ({current_price})")
+                return None
+        elif direction == "LONG":
+            if cand_sl >= exec_entry_price or cand_tp1 <= exec_entry_price:
+                logger.warning(f"[SIGNAL GENERATOR 🛑 VETO] {symbol} {horizon_label} LONG rejected: Inverted target/SL geometry (SL: {cand_sl}, Entry: {exec_entry_price}, TP1: {cand_tp1})")
+                return None
+            if cand_sl >= current_price:
+                logger.warning(f"[SIGNAL GENERATOR 🛑 VETO] {symbol} {horizon_label} LONG rejected: SL ({cand_sl}) >= current_price ({current_price})")
+                return None
+            if is_passive_limit and exec_entry_price > current_price * 1.002:
+                logger.warning(f"[SIGNAL GENERATOR 🛑 VETO] {symbol} {horizon_label} LONG rejected: Limit buy entry ({exec_entry_price}) is above current market price ({current_price})")
+                return None
 
         # Evaluate setup against this coin's dedicated Meta-Labeler
         cand_meta_payload = {

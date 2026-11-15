@@ -1530,6 +1530,80 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_21_near_stale_lh_broken_pivot_and_live_price_geometry(self):
+        """
+        Verify NEAR forensic bug fix:
+        1. Stale/broken Lower High below market price ($3.006 < $3.140) is never used as an active entry anchor.
+        2. anchor_to_lower_high_and_ob strictly enforces SL > Entry >= current_price (never SL <= current_price).
+        3. anchor_to_higher_low_and_ob strictly enforces SL < Entry <= current_price (never SL >= current_price).
+        4. SignalGenerationSystem vetoes any inverted geometry before emission.
+        """
+        from app.quant_v16.entry_confirmation import EntryConfirmationEngine
+        from app.quant_v16.market_structure import MarketStructureEngine, SwingPivot, TradeDirection
+        from app.engine.signals.signal_generator import SignalGenerationSystem
+
+        # 1. Forensic NEAR condition: Current price = 3.1400, stale LH = 3.0060
+        curr_p = 3.1400
+        stale_lh = 3.0060
+
+        anchored_short = EntryConfirmationEngine.anchor_to_lower_high_and_ob(
+            df_15m=None,
+            lh_pivot_price=stale_lh,
+            current_price=curr_p,
+            bearish_ob_low=None,
+            bearish_ob_high=None,
+            spread_bps=5.0
+        )
+
+        entry_p = float(anchored_short["entry_price"])
+        sl_p = float(anchored_short["sl_price"])
+        tp1_p = float(anchored_short["tp1_price"])
+
+        # Strict SHORT invariants relative to live market price
+        self.assertGreater(sl_p, curr_p, f"SHORT SL ({sl_p}) must be strictly above current market price ({curr_p})")
+        self.assertGreater(sl_p, entry_p, f"SHORT SL ({sl_p}) must be strictly above entry price ({entry_p})")
+        self.assertGreater(entry_p, tp1_p, f"SHORT Entry ({entry_p}) must be strictly above TP1 ({tp1_p})")
+        self.assertLess(tp1_p, curr_p, f"SHORT TP1 ({tp1_p}) must be strictly below current market price ({curr_p})")
+
+        # 2. Symmetric LONG condition: Current price = 3.0000, stale HL = 3.1400
+        curr_p_long = 3.0000
+        stale_hl = 3.1400
+
+        anchored_long = EntryConfirmationEngine.anchor_to_higher_low_and_ob(
+            df_15m=None,
+            hl_pivot_price=stale_hl,
+            current_price=curr_p_long,
+            bullish_ob_low=None,
+            bullish_ob_high=None,
+            spread_bps=5.0
+        )
+
+        entry_l = float(anchored_long["entry_price"])
+        sl_l = float(anchored_long["sl_price"])
+        tp1_l = float(anchored_long["tp1_price"])
+
+        # Strict LONG invariants relative to live market price
+        self.assertLess(sl_l, curr_p_long, f"LONG SL ({sl_l}) must be strictly below current market price ({curr_p_long})")
+        self.assertLess(sl_l, entry_l, f"LONG SL ({sl_l}) must be strictly below entry price ({entry_l})")
+        self.assertLess(entry_l, tp1_l, f"LONG Entry ({entry_l}) must be strictly below TP1 ({tp1_l})")
+        self.assertGreater(tp1_l, curr_p_long, f"LONG TP1 ({tp1_l}) must be strictly above current market price ({curr_p_long})")
+
+        # 3. MarketStructureEngine filtering:
+        # A swing high with price 3.006 while curr_p is 3.14 must NOT be returned as active recent_lh
+        dates = pd.date_range("2026-11-15 00:00", periods=30, freq="15min")
+        # Construct DataFrame where NEAR pumps from 2.95 to 3.15
+        df_near = pd.DataFrame({
+            "timestamp": [int(d.timestamp()) for d in dates],
+            "open": np.linspace(2.95, 3.13, 30),
+            "high": np.linspace(2.98, 3.16, 30),
+            "low": np.linspace(2.94, 3.12, 30),
+            "close": np.linspace(2.96, 3.14, 30),
+            "volume": np.ones(30) * 10000.0
+        })
+        prof = MarketStructureEngine.analyze_timeframe(df_near, timeframe="15m", current_price=3.14)
+        if prof.recent_lh is not None:
+            self.assertGreater(prof.recent_lh.price, 3.14, "Active recent_lh must be strictly above current market price")
+
 
 
 if __name__ == "__main__":

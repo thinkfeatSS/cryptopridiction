@@ -566,9 +566,13 @@ class MarketStructureEngine:
         recent_sl = [s for s in swing_lows if (eval_idx - s.index) <= lookback_bars]
 
         recent_hh = next((s for s in reversed(recent_sh) if s.structure_type == "HH"), None)
-        recent_lh = next((s for s in reversed(recent_sh) if s.structure_type == "LH"), None)
-        recent_hl = next((s for s in reversed(recent_sl) if s.structure_type == "HL"), None)
+        raw_recent_lh = next((s for s in reversed(recent_sh) if s.structure_type == "LH"), None)
+        raw_recent_hl = next((s for s in reversed(recent_sl) if s.structure_type == "HL"), None)
         recent_ll = next((s for s in reversed(recent_sl) if s.structure_type == "LL"), None)
+
+        # Unbroken active structural pivots valid for execution anchoring relative to live price
+        recent_lh = next((s for s in reversed(recent_sh) if s.structure_type == "LH" and not s.is_broken and s.price > curr_p), None)
+        recent_hl = next((s for s in reversed(recent_sl) if s.structure_type == "HL" and not s.is_broken and s.price < curr_p), None)
 
         hh_count = sum(1 for s in recent_sh if s.structure_type == "HH")
         hl_count = sum(1 for s in recent_sl if s.structure_type == "HL")
@@ -601,16 +605,16 @@ class MarketStructureEngine:
 
         # 2. Change of Character (CHoCH)
         # Bearish CHoCH: Candle closes decisively below confirmed Higher Low (HL) floor
-        if recent_hl and curr_p < (recent_hl.price * 0.999):
+        if raw_recent_hl and curr_p < (raw_recent_hl.price * 0.999):
             has_choch = True
             choch_type = "BEARISH_CHOCH"
-            choch_price = recent_hl.price
+            choch_price = raw_recent_hl.price
 
         # Bullish CHoCH: Candle closes decisively above confirmed Lower High (LH) ceiling
-        if recent_lh and curr_p > (recent_lh.price * 1.001):
+        if raw_recent_lh and curr_p > (raw_recent_lh.price * 1.001):
             has_choch = True
             choch_type = "BULLISH_CHOCH"
-            choch_price = recent_lh.price
+            choch_price = raw_recent_lh.price
 
         # Trend Decision
         trend = TrendDirection.CHOP
@@ -1000,10 +1004,12 @@ class MarketStructureEngine:
 
         if trade_dir == TradeDirection.LONG:
             entry_anchor = prof_15m.recent_hl
-            if entry_anchor is None and prof_15m.recent_swing_lows:
-                # Strictly select a confirmed Higher Low (HL), never an invalid Lower Low (LL)
-                hl_candidates = [s for s in prof_15m.recent_swing_lows if s.structure_type == "HL"]
+            if (entry_anchor is None or entry_anchor.is_broken or entry_anchor.price >= curr_p * 0.999) and prof_15m.recent_swing_lows:
+                # Strictly select an unbroken confirmed Higher Low (HL) strictly BELOW current price
+                hl_candidates = [s for s in prof_15m.recent_swing_lows if s.structure_type == "HL" and not s.is_broken and s.price < curr_p * 0.999]
                 entry_anchor = hl_candidates[-1] if hl_candidates else None
+            if entry_anchor and (entry_anchor.is_broken or entry_anchor.price >= curr_p * 0.999):
+                entry_anchor = None
             # Dynamic Technical Support Fallback when rapid momentum leaves no 3-bar fractal HL
             if entry_anchor is None and df_15m is not None and len(df_15m) >= 5:
                 c_vals = df_15m['close'].values.astype(float)
@@ -1043,10 +1049,12 @@ class MarketStructureEngine:
 
         elif trade_dir == TradeDirection.SHORT:
             entry_anchor = prof_15m.recent_lh
-            if entry_anchor is None and prof_15m.recent_swing_highs:
-                # Strictly select a confirmed Lower High (LH), never an invalid Higher High (HH)
-                lh_candidates = [s for s in prof_15m.recent_swing_highs if s.structure_type == "LH"]
+            if (entry_anchor is None or entry_anchor.is_broken or entry_anchor.price <= curr_p * 1.001) and prof_15m.recent_swing_highs:
+                # Strictly select an unbroken confirmed Lower High (LH) strictly ABOVE current price
+                lh_candidates = [s for s in prof_15m.recent_swing_highs if s.structure_type == "LH" and not s.is_broken and s.price > curr_p * 1.001]
                 entry_anchor = lh_candidates[-1] if lh_candidates else None
+            if entry_anchor and (entry_anchor.is_broken or entry_anchor.price <= curr_p * 1.001):
+                entry_anchor = None
             # Dynamic Technical Resistance Fallback when rapid momentum leaves no 3-bar fractal LH
             if entry_anchor is None and df_15m is not None and len(df_15m) >= 5:
                 c_vals = df_15m['close'].values.astype(float)

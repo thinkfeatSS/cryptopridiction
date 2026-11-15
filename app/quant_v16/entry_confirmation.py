@@ -1126,7 +1126,17 @@ class EntryConfirmationEngine:
 
         # Dynamic Entry Zone Anchored to Higher Low (with stale/distant pivot recency guard for 15M scalps)
         hl_price = float(hl_pivot_price if hl_pivot_price and hl_pivot_price > 0 else current_price)
-        if df_15m is not None and len(df_15m) >= 8 and current_price > 0 and "low" in df_15m.columns and "close" in df_15m.columns:
+        if hl_price >= current_price * 0.999:
+            # Stale/broken HL penetrated by current price dumping below it: adapt support floor strictly below current price
+            recent_lows = df_15m["low"].iloc[-12:].astype(float).values if (df_15m is not None and "low" in df_15m.columns and len(df_15m) >= 5) else []
+            valid_lower_lows = [float(l) for l in recent_lows if float(l) < current_price - 0.15 * atr_15m]
+            if valid_lower_lows:
+                hl_price = max(valid_lower_lows)
+            elif bullish_ob_low is not None and float(bullish_ob_low) < current_price:
+                hl_price = float(bullish_ob_low)
+            else:
+                hl_price = current_price - max(0.50 * atr_15m, current_price * 0.008)
+        elif df_15m is not None and len(df_15m) >= 8 and current_price > 0 and "low" in df_15m.columns and "close" in df_15m.columns:
             max_hl_dist = min(1.80 * atr_15m, current_price * 0.016)
             if (current_price - hl_price) > max_hl_dist:
                 recent_lows = df_15m["low"].iloc[-12:].astype(float).values
@@ -1175,12 +1185,17 @@ class EntryConfirmationEngine:
         is_extended = current_price > zone_ceiling
         if is_extended:
             execution_mode = "RESTING_LIMIT"
-            entry_price = format_dynamic_precision(hl_price)
+            entry_price = format_dynamic_precision(min(hl_price, current_price * 0.998))
             decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO HL @ ${entry_price})"
-        elif current_price < zone_floor or not candle_has_bounce:
-            # Price is retesting deep below the HL or candle is still dumping red: Place resting limit at HL
+        elif current_price < zone_floor:
+            # Price broke below the zone floor: place resting limit at support strictly <= current_price
             execution_mode = "RESTING_LIMIT"
-            entry_price = format_dynamic_precision(hl_price)
+            entry_price = format_dynamic_precision(min(current_price * 0.998, hl_price))
+            decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO SUPPORT @ ${entry_price})"
+        elif not candle_has_bounce:
+            # Candle is still dumping red: Place resting limit at HL
+            execution_mode = "RESTING_LIMIT"
+            entry_price = format_dynamic_precision(min(hl_price, current_price))
             decision_label = f"🟢 BUY 15M LIMIT (AWAIT PULLBACK TO HL @ ${entry_price})"
         else:
             # Price is strictly AT THE HIGHER LOW (zone_floor <= current_price <= zone_ceiling) with confirmed bounce
@@ -1190,15 +1205,15 @@ class EntryConfirmationEngine:
 
         # Stop Loss: Anchored strictly below the structural floor with dynamic volatility & spread noise floor
         ob_is_local = (bullish_ob_low is not None and 0 < float(bullish_ob_low) and (hl_price - float(bullish_ob_low)) <= (1.50 * atr_15m))
-        structural_floor = min(hl_price, float(bullish_ob_low)) if ob_is_local else hl_price
+        structural_floor = min(hl_price, float(bullish_ob_low), current_price) if ob_is_local else min(hl_price, current_price)
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
         vol_cushion = max(0.85 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0080)
         min_sl_dist = max(1.40 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0180)
-        sl_price = format_dynamic_precision(min(structural_floor - vol_cushion, entry_price - min_sl_dist))
+        sl_price = format_dynamic_precision(min(structural_floor - vol_cushion, entry_price - min_sl_dist, current_price - min_sl_dist))
 
-        # Invariant assertion: SL must be strictly below Entry by at least the noise floor
-        if sl_price >= entry_price or (entry_price - sl_price) < (min_sl_dist * 0.90):
-            sl_price = format_dynamic_precision(entry_price - max(1.20 * atr_15m, min_sl_dist))
+        # Absolute Invariant assertion: SL must be strictly below Entry and strictly below current_price
+        if sl_price >= entry_price or sl_price >= current_price or (entry_price - sl_price) < (min_sl_dist * 0.90):
+            sl_price = format_dynamic_precision(min(entry_price, current_price) - max(1.20 * atr_15m, min_sl_dist))
 
         risk_amount = max(1e-8, entry_price - sl_price)
 
@@ -1280,7 +1295,17 @@ class EntryConfirmationEngine:
 
         # Dynamic Entry Zone Anchored to Lower High (with stale/distant pivot recency guard for 15M scalps)
         lh_price = float(lh_pivot_price if lh_pivot_price and lh_pivot_price > 0 else current_price)
-        if df_15m is not None and len(df_15m) >= 8 and current_price > 0 and "high" in df_15m.columns and "close" in df_15m.columns:
+        if lh_price <= current_price * 1.001:
+            # Stale/broken LH penetrated by current price pumping above it: adapt resistance ceiling strictly above current price
+            recent_highs = df_15m["high"].iloc[-12:].astype(float).values if (df_15m is not None and "high" in df_15m.columns and len(df_15m) >= 5) else []
+            valid_higher_highs = [float(h) for h in recent_highs if float(h) > current_price + 0.15 * atr_15m]
+            if valid_higher_highs:
+                lh_price = min(valid_higher_highs)
+            elif bearish_ob_high is not None and float(bearish_ob_high) > current_price:
+                lh_price = float(bearish_ob_high)
+            else:
+                lh_price = current_price + max(0.50 * atr_15m, current_price * 0.008)
+        elif df_15m is not None and len(df_15m) >= 8 and current_price > 0 and "high" in df_15m.columns and "close" in df_15m.columns:
             max_lh_dist = min(1.80 * atr_15m, current_price * 0.016)
             if (lh_price - current_price) > max_lh_dist:
                 recent_highs = df_15m["high"].iloc[-12:].astype(float).values
@@ -1329,12 +1354,18 @@ class EntryConfirmationEngine:
         is_extended = current_price < zone_floor
         if is_extended:
             execution_mode = "RESTING_LIMIT"
-            entry_price = format_dynamic_precision(lh_price)
+            entry_price = format_dynamic_precision(max(lh_price, current_price * 1.002))
             decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO LH @ ${entry_price})"
-        elif current_price > zone_ceiling or not candle_has_rejection:
-            # Price is retesting deep above the LH or candle is still driving green: Place resting limit at LH
+        elif current_price > zone_ceiling:
+            # Price broke above the zone ceiling: LH structure breached.
+            # Place resting limit at resistance strictly >= current_price
             execution_mode = "RESTING_LIMIT"
-            entry_price = format_dynamic_precision(lh_price)
+            entry_price = format_dynamic_precision(max(current_price * 1.002, lh_price))
+            decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO RESISTANCE @ ${entry_price})"
+        elif not candle_has_rejection:
+            # Candle is still driving green: Place resting limit at LH
+            execution_mode = "RESTING_LIMIT"
+            entry_price = format_dynamic_precision(max(lh_price, current_price))
             decision_label = f"🔴 SELL 15M LIMIT (AWAIT BOUNCE TO LH @ ${entry_price})"
         else:
             # Price is strictly AT THE LOWER HIGH (zone_floor <= current_price <= zone_ceiling) with confirmed rejection
@@ -1344,29 +1375,34 @@ class EntryConfirmationEngine:
 
         # Stop Loss: Anchored strictly above the structural ceiling with dynamic volatility & spread noise floor
         ob_is_local = (bearish_ob_high is not None and float(bearish_ob_high) > 0 and (float(bearish_ob_high) - lh_price) <= (1.50 * atr_15m))
-        structural_ceiling = max(lh_price, float(bearish_ob_high)) if ob_is_local else lh_price
+        structural_ceiling = max(lh_price, float(bearish_ob_high), current_price) if ob_is_local else max(lh_price, current_price)
         spread_drag_usd = (spread_bps * 0.0001) * entry_price
         vol_cushion = max(0.85 * atr_15m, 4.0 * spread_drag_usd, entry_price * 0.0080)
         min_sl_dist = max(1.40 * atr_15m, 5.0 * spread_drag_usd, entry_price * 0.0180)
-        sl_price = format_dynamic_precision(max(structural_ceiling + vol_cushion, entry_price + min_sl_dist))
+        sl_price = format_dynamic_precision(max(structural_ceiling + vol_cushion, entry_price + min_sl_dist, current_price + min_sl_dist))
 
-        # Invariant assertion: SL must be strictly above Entry by at least the noise floor
-        if sl_price <= entry_price or (sl_price - entry_price) < (min_sl_dist * 0.90):
-            sl_price = format_dynamic_precision(entry_price + max(1.20 * atr_15m, min_sl_dist))
+        # Absolute Invariant assertion: SL must be strictly above Entry and strictly above current_price
+        if sl_price <= entry_price or sl_price <= current_price or (sl_price - entry_price) < (min_sl_dist * 0.90):
+            sl_price = format_dynamic_precision(max(entry_price, current_price) + max(1.20 * atr_15m, min_sl_dist))
 
         risk_amount = max(1e-8, sl_price - entry_price)
 
         # Take Profit Targets: Anchored to opposing swing low liquidity and Fibonacci extensions
+        effective_top = min(entry_price, current_price)
+        min_tp1_dist = max(1.0 * min_sl_dist, 1.80 * atr_15m, effective_top * 0.020)
+
         target_ref = opposing_sl_price
-        if opposing_demand_high is not None and opposing_demand_high < entry_price:
+        if opposing_demand_high is not None and opposing_demand_high < effective_top:
             target_ref = max(target_ref, opposing_demand_high) if target_ref else opposing_demand_high
 
-        if target_ref is None or target_ref >= entry_price:
-            target_ref = entry_price - (2.0 * risk_amount)
+        if target_ref is None or target_ref >= effective_top:
+            target_ref = effective_top - (2.0 * risk_amount)
 
         # Take Profit Targets: Strictly enforce 1:2 Risk to Reward Ratio (Risk = 1.0, Reward = 2.0)
         # TP1: Strictly 2.0 * Risk (1:2 R:R)
         tp1_candidate = entry_price - (2.0 * risk_amount)
+        if tp1_candidate >= current_price:
+            tp1_candidate = current_price - min_tp1_dist
         tp1_price = format_dynamic_precision(tp1_candidate)
 
         # TP2: Runner tranche target (3.0 * Risk or opposing swing low beyond TP1)
