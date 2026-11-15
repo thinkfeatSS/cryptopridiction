@@ -604,7 +604,7 @@ class PaperTradingBot:
 
             if btc_shield_state:
                 regime = str(btc_shield_state.get("regime", "")).upper()
-                if regime in ["RANGE", "CHOPPY", "COMPRESSION", "HIGH_VOLATILITY_CHOP", "RANGE_SQUEEZE"]:
+                if regime in ["RANGE", "CHOPPY", "COMPRESSION", "HIGH_VOLATILITY_CHOP", "RANGE_SQUEEZE", "TURBULENT", "HIGH_VOLATILITY"]:
                     if desk_key == "scalp":
                         is_smc_or_coiling = bool(
                             is_boundary_harvest or
@@ -795,6 +795,15 @@ class PaperTradingBot:
             meta_samples = int(signal.get("meta_sample_size", 100) or 100)
             if "COLD_START" in meta_mtype or meta_samples < 10:
                 sizing_mult = min(sizing_mult, 0.50)
+
+            # Scalp Desk 50-Slot Margin Protection:
+            # Across 50 scalp slots, $500 total allocation is already partitioned into $10 base margin per slot (2% portfolio risk).
+            # For confirmed Grade A / A+ institutional setups, ensure alloc_mult and sizing_mult are at least 1.00 to avoid double-damping ($5.00 margin),
+            # while lower-tier or cold-start setups still respect the risk damping.
+            is_grade_a = any(g in quality_grade for g in ["A+", "GRADE A", "A"]) and "GRADE B" not in quality_grade and "GRADE C" not in quality_grade
+            if desk_key == "scalp" and is_grade_a and "COLD_START" not in meta_mtype and meta_samples >= 10:
+                sizing_mult = max(sizing_mult, 1.00)
+                alloc_mult = max(alloc_mult, 1.00)
 
             alloc_mult = max(0.20, min(1.30, alloc_mult * sizing_mult))
             alloc_usd = float(desk.get("allocated_usd", 350.0))

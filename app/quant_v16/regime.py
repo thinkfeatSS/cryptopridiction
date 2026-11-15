@@ -39,6 +39,18 @@ class RegimeEvaluation:
     strategy_eligibility: List[str] = field(default_factory=list)
     is_squeeze_transition: bool = False
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "regime": self.regime.value if isinstance(self.regime, MarketRegime) else str(self.regime),
+            "probabilities": self.probabilities,
+            "confidence": self.confidence,
+            "volatility_state": self.volatility_state,
+            "trend_strength": self.trend_strength,
+            "sizing_multiplier": self.sizing_multiplier,
+            "strategy_eligibility": self.strategy_eligibility,
+            "is_squeeze_transition": self.is_squeeze_transition,
+        }
+
 class MarketRegimeClassifier:
     """
     Classifies macro & micro market states to modulate signal eligibility and position sizing.
@@ -154,17 +166,8 @@ class MarketRegimeClassifier:
                 "BREAKDOWN_SHORT", "SQUEEZE_BREAKOUT_LONG", "SQUEEZE_BREAKOUT_SHORT"
             ]
 
-        # High Volatility
-        elif vol_state == "HIGH" and adx > 35.0:
-            regime = MarketRegime.HIGH_VOLATILITY
-            confidence = 0.78
-            eligible = [
-                "BLOW_OFF_TOP_SHORT", "LIQUIDITY_SWEEP_LONG", "LIQUIDITY_SWEEP_SHORT",
-                "LIQUIDITY_RECLAIM_LONG", "LIQUIDITY_RECLAIM_SHORT",
-                "RALLY_FADE_SHORT", "TOP_REVERSAL_SHORT", "BOTTOM_REVERSAL_LONG", "BREAKDOWN_SHORT"
-            ]
-
         # Strong Bull Trend (with 24.0/25.0 hysteresis & smooth probability transition)
+        # Evaluated before non-directional HIGH_VOLATILITY so strong trending regimes (ADX >= 25) are not misclassified as turbulence
         elif ema_fast > ema_slow and adx >= bull_adx_hurdle and rsi > 52.0:
             regime = MarketRegime.BULL_TREND
             if adx < 26.0:
@@ -205,6 +208,16 @@ class MarketRegimeClassifier:
                 "DIRECTIONAL_TREND_SHORT", "BREAKDOWN_SHORT",
                 "RALLY_FADE_SHORT", "LIQUIDITY_SWEEP_SHORT", "LIQUIDITY_RECLAIM_SHORT",
                 "BLOW_OFF_TOP_SHORT", "SQUEEZE_EXPANSION_SHORT"
+            ]
+
+        # High Volatility (Non-directional turbulence / wide range whipsaws without clean trend alignment)
+        elif vol_state == "HIGH" and (adx > 35.0 or atr_percentile >= 80.0 or bb_width_percentile >= 85.0):
+            regime = MarketRegime.HIGH_VOLATILITY
+            confidence = 0.78
+            eligible = [
+                "BLOW_OFF_TOP_SHORT", "LIQUIDITY_SWEEP_LONG", "LIQUIDITY_SWEEP_SHORT",
+                "LIQUIDITY_RECLAIM_LONG", "LIQUIDITY_RECLAIM_SHORT",
+                "RALLY_FADE_SHORT", "TOP_REVERSAL_SHORT", "BOTTOM_REVERSAL_LONG", "BREAKDOWN_SHORT"
             ]
 
         # Range / Mean Reversion (Default for crypto 70% of time)
@@ -526,13 +539,15 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
         shield["active"] = False
         shield["breakout_prediction"] = "🚀 BULLISH BREAKOUT"
     elif v16_reg == "BREAKOUT":
-        shield["regime_label"] = "🚀 MOMENTUM BREAKOUT ACTIVE"
-        shield["altcoin_longs_allowed"] = True
-        shield["altcoin_posture"] = "BREAKOUT_ALPHA"
+        is_bull = metrics.get("ema_fast", 1.0) >= metrics.get("ema_slow", 1.0)
+        shield["regime_label"] = "🚀 MOMENTUM BREAKOUT ACTIVE" if is_bull else "🔻 BREAKDOWN EXPANSION ACTIVE"
+        shield["altcoin_longs_allowed"] = is_bull
+        shield["altcoin_shorts_allowed"] = not is_bull
+        shield["altcoin_posture"] = "BREAKOUT_ALPHA" if is_bull else "BREAKDOWN_SHORT_BIAS"
         shield["reason"] = f"BTC high-momentum breakout expansion (ADX: {adx_val:.1f}). Section 29 {shield['sizing_multiplier']:.2f}x sizing active."
         shield["is_ntz_active"] = False
         shield["active"] = False
-        shield["breakout_prediction"] = "🚀 BREAKOUT EXPANSION"
+        shield["breakout_prediction"] = "🚀 BREAKOUT EXPANSION" if is_bull else "🔻 BREAKDOWN EXPANSION"
     elif v16_reg == "SQUEEZE":
         bbw_pctile = float(metrics.get("bb_width_percentile", 15.0))
         is_dead_flatline = (adx_val < 12.0) or (bbw_pctile <= 3.0)
@@ -543,6 +558,7 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
             shield["status_code"] = "NO_TRADE_ZONE"
             shield["regime_label"] = "🛑 SEVERE FLATLINE STAGNATION (NO TRADE ZONE ACTIVE)"
             shield["altcoin_longs_allowed"] = False
+            shield["altcoin_shorts_allowed"] = False
             shield["altcoin_posture"] = "NO_TRADE_ZONE_CAPITAL_PRESERVATION"
             shield["reason"] = f"NO TRADE ZONE ACTIVE: Severe flatline stagnation (ADX: {adx_val:.1f}, BBW %ile: {bbw_pctile:.0f}%). Capital preservation mode active."
             shield["is_ntz_active"] = True
@@ -551,6 +567,7 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
             shield["status_code"] = "SQUEEZE_COILING"
             shield["regime_label"] = "💤 VOLATILITY COMPRESSION (SELECTIVE ALPHA ACTIVE)"
             shield["altcoin_longs_allowed"] = True
+            shield["altcoin_shorts_allowed"] = True
             shield["altcoin_posture"] = "SQUEEZE_SELECTIVE_ALPHA"
             shield["sizing_multiplier"] = 0.60
             shield["reason"] = f"BTC in volatility squeeze coiling (ADX: {adx_val:.1f}, BBW %ile: {bbw_pctile:.0f}%). Section 29 0.60x sizing throttle active."
@@ -559,6 +576,7 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
     elif v16_reg == "HIGH_VOLATILITY":
         shield["regime_label"] = "⚠️ HIGH VOLATILITY TURBULENCE"
         shield["altcoin_longs_allowed"] = True
+        shield["altcoin_shorts_allowed"] = True
         shield["altcoin_posture"] = "REDUCED_LEVERAGE"
         shield["reason"] = f"BTC high volatility expansion (ADX: {adx_val:.1f}). Section 29 {shield['sizing_multiplier']:.2f}x risk throttle active."
         shield["is_ntz_active"] = False
@@ -570,6 +588,7 @@ def reconcile_btc_shield(shield: Dict[str, Any], v16_regime: Optional[Dict[str, 
         shield["predicted_trend"] = "CONSOLIDATION"
         shield["regime_label"] = "⚖️ RANGE BOUND / MEAN REVERSION"
         shield["altcoin_longs_allowed"] = True
+        shield["altcoin_shorts_allowed"] = True
         shield["altcoin_posture"] = "RANGE_BOUND_MEAN_REVERSION"
         shield["reason"] = f"BTC range-bound within statistical corridor (ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}). Section 29 {shield['sizing_multiplier']:.2f}x sizing throttle active."
         shield["is_ntz_active"] = False

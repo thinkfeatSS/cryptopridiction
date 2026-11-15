@@ -1,5 +1,7 @@
 import os
 import time
+import tempfile
+import shutil
 import unittest
 import pandas as pd
 import numpy as np
@@ -1126,6 +1128,150 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
                 btc_shield_state=btc_chop
             )
             self.assertTrue(is_ok_won, "Prior winning trade must not trigger whipsaw stop-out guard")
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_18_adx_57_trend_precedence_over_high_volatility(self):
+        """
+        Verify that strong trend regimes (ADX >= 25, e.g. ADX = 57.3) take precedence over HIGH_VOLATILITY,
+        ensuring 1.00x sizing multiplier and directional alpha gating, while true non-directional turbulence
+        authorizes both longs and shorts and protects 50-slot scalp margin for Grade A institutional setups.
+        """
+        from app.quant_v16.regime import MarketRegimeClassifier, MarketRegime, reconcile_btc_shield
+
+        clf = MarketRegimeClassifier()
+
+        # 1. Bear trend with high ADX (ADX=57.3, RSI=42.8, EMA fast < EMA slow)
+        eval_bear = clf.evaluate_regime(
+            adx=57.3,
+            rsi=42.8,
+            ema_fast=65351.98,
+            ema_slow=67321.22,
+            bb_width_percentile=95.0,
+            atr_percentile=90.0
+        )
+        self.assertEqual(eval_bear.regime, MarketRegime.BEAR_TREND, "ADX=57.3 with fast < slow and RSI < 48 must be BEAR_TREND")
+        self.assertEqual(eval_bear.sizing_multiplier, 1.00, "Confirmed BEAR_TREND must have 1.00x sizing multiplier")
+
+        shield_bear = reconcile_btc_shield({}, eval_bear.to_dict())
+        self.assertEqual(shield_bear["status_code"], "BEAR_TREND")
+        self.assertFalse(shield_bear["altcoin_longs_allowed"])
+        self.assertTrue(shield_bear["altcoin_shorts_allowed"])
+        self.assertEqual(shield_bear["sizing_multiplier"], 1.00)
+
+        # 2. Bull trend with high ADX (ADX=57.3, RSI=60.0, EMA fast > EMA slow)
+        eval_bull = clf.evaluate_regime(
+            adx=57.3,
+            rsi=60.0,
+            ema_fast=68000.0,
+            ema_slow=65000.0,
+            bb_width_percentile=92.0,
+            atr_percentile=88.0
+        )
+        self.assertEqual(eval_bull.regime, MarketRegime.BULL_TREND, "ADX=57.3 with fast > slow and RSI > 52 must be BULL_TREND")
+        self.assertEqual(eval_bull.sizing_multiplier, 1.00, "Confirmed BULL_TREND must have 1.00x sizing multiplier")
+
+        shield_bull = reconcile_btc_shield({}, eval_bull.to_dict())
+        self.assertEqual(shield_bull["status_code"], "BULL_TREND")
+        self.assertTrue(shield_bull["altcoin_longs_allowed"])
+        self.assertFalse(shield_bull["altcoin_shorts_allowed"])
+        self.assertEqual(shield_bull["sizing_multiplier"], 1.00)
+
+        # 3. High Volatility without trend alignment (EMA fast == EMA slow, RSI=50.0, high ATR/BBW)
+        eval_high_vol = clf.evaluate_regime(
+            adx=40.0,
+            rsi=50.0,
+            ema_fast=65000.0,
+            ema_slow=65000.0,
+            bb_width_percentile=90.0,
+            atr_percentile=85.0
+        )
+        self.assertEqual(eval_high_vol.regime, MarketRegime.HIGH_VOLATILITY, "High volatility without trend alignment must be HIGH_VOLATILITY")
+        self.assertEqual(eval_high_vol.sizing_multiplier, 0.50, "HIGH_VOLATILITY must throttle to 0.50x")
+
+        shield_high_vol = reconcile_btc_shield({}, eval_high_vol.to_dict())
+        self.assertTrue(shield_high_vol["altcoin_longs_allowed"], "HIGH_VOLATILITY allows longs")
+        self.assertTrue(shield_high_vol["altcoin_shorts_allowed"], "HIGH_VOLATILITY allows shorts")
+        self.assertEqual(shield_high_vol["sizing_multiplier"], 0.50)
+
+        # 4. Scalp desk 50-slot margin protection in PaperTradingBot
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            ledger_path = os.path.join(tmp_dir, "test_regime_ledger.json")
+            bot = PaperTradingBot(ledger_file=ledger_path)
+            bot.data["desks"]["scalp"] = {
+                "name": "Scalp Desk",
+                "allocated_usd": 500.0,
+                "max_slots": 50,
+                "leverage": 2
+            }
+            # Scalp Grade A institutional setup under HIGH_VOLATILITY
+            sig_grade_a = {
+                "signal_id": "TEST_SCALP_GRADE_A",
+                "symbol": "ETH/USDT",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "dominant_timeframe": "15M",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "meta_passed": True,
+                "ev_net": 1.5,
+                "conviction": 85.0,
+                "strategy": "ORDER_BLOCK_SHORT",
+                "canonical_strategy": "ORDER_BLOCK_SHORT",
+                "quality_grade": "Grade A+",
+                "meta_model_type": "MATURE_ENSEMBLE",
+                "meta_sample_size": 120,
+                "entry_price": 3100.0,
+                "sl_price": 3150.0,
+                "tp1_price": 3000.0,
+                "tp2_price": 2950.0,
+                "tp3_price": 2900.0,
+                "sizing_multiplier": 0.50,
+                "allocation_pct": 50.0,
+                "is_order_block_signal": True,
+                "candle_trigger_confirmed": True,
+            }
+            res_a = bot.admit_signal(sig_grade_a, btc_shield_state=shield_high_vol)
+            self.assertTrue(res_a, "Grade A institutional setup must be admitted in HIGH_VOLATILITY")
+
+            pos_a = next(p for p in bot.data["open_positions"] if p["symbol"] == "ETH/USDT")
+            # Base slot margin is $500 / 50 = $10.00. Grade A should preserve 1.0x margin ($10.00)
+            self.assertGreaterEqual(pos_a["allocated_margin_usd"], 10.00, "Grade A setup in 50-slot scalp desk must preserve >= $10.00 margin")
+
+            # Scalp Cold-Start setup under HIGH_VOLATILITY
+            sig_cold = {
+                "signal_id": "TEST_SCALP_COLD",
+                "symbol": "SOL/USDT",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "dominant_timeframe": "15M",
+                "is_trade_active": True,
+                "signal_status": "ACTIVE_SIGNAL",
+                "meta_passed": True,
+                "ev_net": 1.5,
+                "conviction": 85.0,
+                "strategy": "ORDER_BLOCK_SHORT",
+                "canonical_strategy": "ORDER_BLOCK_SHORT",
+                "quality_grade": "Grade B",
+                "meta_model_type": "COLD_START_LAPLACE",
+                "meta_sample_size": 3,
+                "entry_price": 140.0,
+                "sl_price": 145.0,
+                "tp1_price": 130.0,
+                "tp2_price": 125.0,
+                "tp3_price": 120.0,
+                "sizing_multiplier": 0.50,
+                "allocation_pct": 50.0,
+                "is_order_block_signal": True,
+                "candle_trigger_confirmed": True,
+            }
+            res_cold = bot.admit_signal(sig_cold, btc_shield_state=shield_high_vol)
+            self.assertTrue(res_cold, "Cold start setup admitted")
+
+            pos_cold = next(p for p in bot.data["open_positions"] if p["symbol"] == "SOL/USDT")
+            # Cold start setup remains damped by 0.50x ($5.00 margin)
+            self.assertLessEqual(pos_cold["allocated_margin_usd"], 5.00, "Cold start setup must remain throttled to <= $5.00")
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 

@@ -304,6 +304,7 @@ class BtcPredictiveMarketShield:
             regime_label = "⚠️ HIGH VOLATILITY TURBULENCE"
             reason = f"BTC high volatility expansion (ADX: {adx_val:.1f}). Section 29 0.50x risk throttle active."
             alt_longs = True
+            alt_shorts = True
             alt_posture = "REDUCED_LEVERAGE"
             shield_active = True
             is_ntz_active = False
@@ -316,6 +317,7 @@ class BtcPredictiveMarketShield:
             regime_label = "⚖️ RANGE BOUND / MEAN REVERSION"
             reason = f"BTC range-bound within statistical corridor (ADX: {adx_val:.1f}, RSI: {rsi_val:.1f}). Section 29 0.70x sizing throttle active."
             alt_longs = True
+            alt_shorts = True
             alt_posture = "RANGE_BOUND_MEAN_REVERSION"
             shield_active = False
             is_ntz_active = False
