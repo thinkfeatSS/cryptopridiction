@@ -1350,7 +1350,7 @@ class PaperTradingBot:
 
         return False, ""
 
-    def on_tick(self, live_prices: Dict[str, float], is_market_partition_active: bool = False, btc_shield_state: Optional[Dict[str, Any]] = None, tick_latency_ms: float = 0.0, order_book_voids: Optional[Dict[str, Any]] = None, order_book_depths: Optional[Dict[str, Any]] = None, cvd_metrics: Optional[Dict[str, Any]] = None):
+    def on_tick(self, live_prices: Dict[str, float], is_market_partition_active: bool = False, btc_shield_state: Optional[Dict[str, Any]] = None, tick_latency_ms: float = 0.0, order_book_voids: Optional[Dict[str, Any]] = None, order_book_depths: Optional[Dict[str, Any]] = None, cvd_metrics: Optional[Dict[str, Any]] = None, candle_metrics: Optional[Dict[str, Any]] = None):
         """Evaluates live prices against open positions and resting limits with sub-second latency and impulse shields."""
         if btc_shield_state is None:
             btc_shield_state = getattr(self, "current_btc_shield_state", None)
@@ -1791,13 +1791,18 @@ class PaperTradingBot:
                         if cvd_metrics and isinstance(cvd_metrics, dict):
                             sym_cvd = cvd_metrics.get(sym) or cvd_metrics.get(sym.replace("/", "").replace(":USDT", ""))
 
+                        sym_cand = None
+                        if candle_metrics and isinstance(candle_metrics, dict):
+                            sym_cand = candle_metrics.get(sym) or candle_metrics.get(sym.replace("/", "").replace(":USDT", ""))
+                        active_cand_metrics = sym_cand or pos.get("metrics") or pos.get("microstructure_features") or {}
+
                         is_confirmed, fill_reason, fill_telemetry = EntryConfirmationEngine.validate_resting_limit_fill(
                             direction=direction,
                             limit_price=limit_p,
                             current_price=curr_p,
                             depth_data=sym_depth,
                             cvd_metrics=sym_cvd,
-                            candle_metrics=pos.get("metrics") or pos.get("microstructure_features") or {},
+                            candle_metrics=active_cand_metrics,
                             obi_threshold=0.25,
                             cvd_threshold=0.20,
                             touch_tolerance=touch_tol,
@@ -1816,6 +1821,12 @@ class PaperTradingBot:
                             if fill_telemetry.get("fill_state") == "ADVERSE_PENETRATION_DEFERRED":
                                 pos["was_adverse_penetrated"] = True
 
+                            # Track adverse extreme price (trough for long, peak for short)
+                            if direction == "LONG":
+                                pos["adverse_trough_price"] = min(float(pos.get("adverse_trough_price", curr_p)), curr_p)
+                            else:
+                                pos["adverse_peak_price"] = max(float(pos.get("adverse_peak_price", curr_p)), curr_p)
+
                             # Smart Penetration Stabilization / Multi-Tick Velocity Stall Check:
                             # If order was deferred due to adverse penetration, but price velocity has now stalled
                             # (not making further adverse progress) and is consolidating safely within blowout boundaries:
@@ -1829,15 +1840,42 @@ class PaperTradingBot:
                             tp1_p_val = float(pos.get("tp1_price") or 0.0)
                             sl_not_breached = (curr_p > sl_p_val) if direction == "LONG" else (curr_p < sl_p_val)
 
+                            # Microstructure Deferral Resolution:
+                            # When a resting limit order is deferred due to a piercing candle, it remains resting and will execute
+                            # at the limit level (or with price improvement) as soon as adverse momentum stalls and rejection wicks develop.
+                            cand_l_wick = float(active_cand_metrics.get("lower_wick_ratio") or 0.0)
+                            cand_u_wick = float(active_cand_metrics.get("upper_wick_ratio") or 0.0)
+
+                            if direction == "LONG":
+                                adverse_delta_pct = max(0.0, (last_def_p - curr_p) / max(1e-8, curr_p) * 100.0)
+                                adverse_momentum_stalled = (price_delta_pct < 0.08) or (curr_p >= last_def_p and adverse_delta_pct < 0.08 and price_delta_pct < 0.20) or bool(active_cand_metrics.get("adverse_momentum_stalled"))
+                                rejection_wick_developed = (
+                                    (cand_l_wick >= 0.18) or
+                                    bool(active_cand_metrics.get("rejection_wick_developed")) or
+                                    bool(active_cand_metrics.get("is_rejection_wick"))
+                                )
+                                exec_p = min(limit_p, curr_p)
+                            else: # SHORT
+                                adverse_delta_pct = max(0.0, (curr_p - last_def_p) / max(1e-8, curr_p) * 100.0)
+                                adverse_momentum_stalled = (price_delta_pct < 0.08) or (curr_p <= last_def_p and adverse_delta_pct < 0.08 and price_delta_pct < 0.20) or bool(active_cand_metrics.get("adverse_momentum_stalled"))
+                                rejection_wick_developed = (
+                                    (cand_u_wick >= 0.18) or
+                                    bool(active_cand_metrics.get("rejection_wick_developed")) or
+                                    bool(active_cand_metrics.get("is_rejection_wick"))
+                                )
+                                exec_p = max(limit_p, curr_p)
+
+                            is_velocity_stall = (pos["microstructure_deferral_count"] >= 2 and price_delta_pct < 0.08)
+                            is_deferral_resolved = (adverse_momentum_stalled and rejection_wick_developed)
+
                             if (
                                 (fill_telemetry.get("fill_state") == "ADVERSE_PENETRATION_DEFERRED" or pos.get("was_adverse_penetrated"))
-                                and pos["microstructure_deferral_count"] >= 2
-                                and price_delta_pct < 0.08
+                                and (is_velocity_stall or is_deferral_resolved)
                                 and sl_not_breached
                                 and not (tick_latency_ms > 800.0 and is_extreme_macro)
                             ):
                                 eff_rr_stall, _, _ = self.calculate_effective_rr(
-                                    entry_p=curr_p,
+                                    entry_p=exec_p,
                                     tp1_p=tp1_p_val,
                                     sl_p=sl_p_val,
                                     spread_bps=live_spread_bps,
@@ -1846,12 +1884,16 @@ class PaperTradingBot:
                                     is_limit=True
                                 )
                                 if eff_rr_stall >= 1.20:
-                                    # Stabilized velocity stall confirmed fill at superior price
                                     is_confirmed = True
                                     fill_telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
-                                    fill_telemetry["fill_confirmation_type"] = "STABILIZED_VELOCITY_STALL_FILL"
-                                    fill_telemetry["execution_price"] = curr_p
-                                    fill_reason = f"Adverse momentum stalled (delta {price_delta_pct:.3f}% < 0.08%) across {pos['microstructure_deferral_count']} ticks at superior price ${curr_p:,.4f} with R:R 1:{eff_rr_stall:.2f}"
+                                    if is_deferral_resolved:
+                                        fill_telemetry["fill_confirmation_type"] = "STABILIZED_ABSORPTION_FILL"
+                                        exec_desc = "limit level" if exec_p == limit_p else "superior price"
+                                        fill_reason = f"Microstructure deferral resolved: adverse momentum stalled and rejection wick developed at {exec_desc} ${exec_p:,.4f} with R:R 1:{eff_rr_stall:.2f}"
+                                    else:
+                                        fill_telemetry["fill_confirmation_type"] = "STABILIZED_VELOCITY_STALL_FILL"
+                                        fill_reason = f"Adverse momentum stalled (delta {price_delta_pct:.3f}% < 0.08%) across {pos['microstructure_deferral_count']} ticks at superior price ${exec_p:,.4f} with R:R 1:{eff_rr_stall:.2f}"
+                                    fill_telemetry["execution_price"] = exec_p
 
                         if not is_confirmed:
                             remaining_positions.append(pos)
@@ -1867,6 +1909,10 @@ class PaperTradingBot:
                         # If filled via penetration stabilization, execute at the superior current price
                         if fill_telemetry.get("fill_state") == "STABILIZED_PENETRATION_CONFIRMED" or fill_telemetry.get("fill_confirmation_type") in ["STABILIZED_ABSORPTION_FILL", "STABILIZED_VELOCITY_STALL_FILL"]:
                             actual_exec_p = fill_telemetry.get("execution_price", curr_p)
+                            if direction == "LONG":
+                                actual_exec_p = min(limit_p, actual_exec_p)
+                            else:
+                                actual_exec_p = max(limit_p, actual_exec_p)
                             pos["entry_price"] = actual_exec_p
                             pos["current_price"] = actual_exec_p
                             pos["price_improved"] = (actual_exec_p != limit_p)

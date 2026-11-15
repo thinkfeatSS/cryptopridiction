@@ -2078,6 +2078,226 @@ class TestV16EntryAndRegimeDebugging(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_25_microstructure_deferral_resolution_on_piercing_candles(self):
+        """
+        Verify Microstructure Deferral Resolution Rule:
+        When a resting limit order is deferred due to a piercing candle, it remains resting
+        and will execute at the limit level (or with price improvement) as soon as adverse momentum
+        stalls and rejection wicks develop.
+        """
+        import tempfile
+        import shutil
+        from datetime import datetime, timezone
+
+        # -------------------------------------------------------------
+        # 1. Unit Tests on EntryConfirmationEngine.validate_resting_limit_fill
+        # -------------------------------------------------------------
+        # Long Limit at 100.0: Piercing red waterfall knife must be deferred
+        conf_knife, rsn_knife, tel_knife = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="LONG",
+            limit_price=100.0,
+            current_price=100.0,
+            candle_metrics={"is_red": True, "lower_wick_ratio": 0.05, "close_pos_in_range": 0.15, "body_ratio": 0.70}
+        )
+        self.assertFalse(conf_knife, "Piercing waterfall knife into Long limit must be deferred")
+        self.assertEqual(tel_knife["fill_state"], "ADVERSE_PENETRATION_DEFERRED")
+        self.assertIn("Red waterfall knife piercing", rsn_knife)
+
+        # Long Limit at 100.0 post-penetration:
+        # Case 1A: Price improvement at 99.5 once rejection wick develops (lower_wick >= 18%)
+        conf_long_imp, rsn_long_imp, tel_long_imp = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="LONG",
+            limit_price=100.0,
+            current_price=99.5,
+            candle_metrics={"lower_wick_ratio": 0.25},
+            was_adverse_penetrated=True
+        )
+        self.assertTrue(conf_long_imp, "Post-penetration Long limit with rejection wick must confirm fill")
+        self.assertEqual(tel_long_imp["fill_confirmation_type"], "STABILIZED_ABSORPTION_FILL")
+        self.assertEqual(tel_long_imp["execution_price"], 99.5, "Must execute with price improvement at 99.5")
+
+        # Case 1B: Execution at limit level 100.0 once rejection wick develops
+        conf_long_lim, rsn_long_lim, tel_long_lim = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="LONG",
+            limit_price=100.0,
+            current_price=100.0,
+            candle_metrics={"lower_wick_ratio": 0.25},
+            was_adverse_penetrated=True
+        )
+        self.assertTrue(conf_long_lim, "Post-penetration Long limit at limit price must confirm fill")
+        self.assertEqual(tel_long_lim["fill_confirmation_type"], "STABILIZED_ABSORPTION_FILL")
+        self.assertEqual(tel_long_lim["execution_price"], 100.0, "Must execute at limit level 100.0")
+
+        # Short Limit at 100.0: Piercing green momentum rocket must be deferred
+        conf_rocket, rsn_rocket, tel_rocket = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="SHORT",
+            limit_price=100.0,
+            current_price=100.0,
+            candle_metrics={"is_green": True, "upper_wick_ratio": 0.05, "close_pos_in_range": 0.85, "body_ratio": 0.70}
+        )
+        self.assertFalse(conf_rocket, "Piercing green rocket into Short limit must be deferred")
+        self.assertEqual(tel_rocket["fill_state"], "ADVERSE_PENETRATION_DEFERRED")
+        self.assertIn("Green momentum rocket piercing", rsn_rocket)
+
+        # Short Limit at 100.0 post-penetration:
+        # Case 1C: Price improvement at 100.6 once rejection wick develops (upper_wick >= 18%)
+        conf_short_imp, rsn_short_imp, tel_short_imp = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="SHORT",
+            limit_price=100.0,
+            current_price=100.6,
+            candle_metrics={"upper_wick_ratio": 0.25},
+            was_adverse_penetrated=True
+        )
+        self.assertTrue(conf_short_imp, "Post-penetration Short limit with rejection wick must confirm fill")
+        self.assertEqual(tel_short_imp["fill_confirmation_type"], "STABILIZED_ABSORPTION_FILL")
+        self.assertEqual(tel_short_imp["execution_price"], 100.6, "Must execute with price improvement at 100.6")
+
+        # Case 1D: Execution at limit level 100.0 once rejection wick develops
+        conf_short_lim, rsn_short_lim, tel_short_lim = EntryConfirmationEngine.validate_resting_limit_fill(
+            direction="SHORT",
+            limit_price=100.0,
+            current_price=100.0,
+            candle_metrics={"upper_wick_ratio": 0.25},
+            was_adverse_penetrated=True
+        )
+        self.assertTrue(conf_short_lim, "Post-penetration Short limit at limit price must confirm fill")
+        self.assertEqual(tel_short_lim["fill_confirmation_type"], "STABILIZED_ABSORPTION_FILL")
+        self.assertEqual(tel_short_lim["execution_price"], 100.0, "Must execute at limit level 100.0")
+
+        # -------------------------------------------------------------
+        # 2. Integration Tests with PaperTradingBot
+        # -------------------------------------------------------------
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            bot = PaperTradingBot(ledger_file=os.path.join(tmp_dir, "test_microstructure_deferral_ledger.json"))
+
+            # Scenario B1: Long resting limit with Price Improvement
+            pos_long_imp = {
+                "trade_id": "TEST_LONG_PIERCE_IMP",
+                "symbol": "BTC/USDT",
+                "desk": "scalp",
+                "direction": "LONG",
+                "horizon": "15M",
+                "entry_price": 60000.0,
+                "optimal_entry_limit": 60000.0,
+                "sl_price": 58500.0,
+                "tp1_price": 63000.0,
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["open_positions"] = [pos_long_imp]
+
+            # Tick 1: Piercing red waterfall candle dumps price to 59,700.0 (-0.50%)
+            knife_cand = {"BTC/USDT": {"is_red": True, "lower_wick_ratio": 0.05, "close_pos_in_range": 0.15, "body_ratio": 0.70}}
+            bot.on_tick({"BTC/USDT": 59700.0}, candle_metrics=knife_cand)
+            self.assertEqual(len(bot.data["open_positions"]), 1)
+            self.assertEqual(pos_long_imp["status"], "RESTING_LIMIT", "Pierced order must remain resting")
+            self.assertTrue(pos_long_imp.get("was_adverse_penetrated"))
+            self.assertEqual(pos_long_imp.get("microstructure_deferral_count"), 1)
+
+            # Tick 2: Price stabilizes at 59,720.0, adverse momentum stalls and rejection lower wick develops
+            rebound_cand = {"BTC/USDT": {"lower_wick_ratio": 0.22}}
+            bot.on_tick({"BTC/USDT": 59720.0}, candle_metrics=rebound_cand)
+            self.assertEqual(pos_long_imp["status"], "OPEN", "Order must execute once adverse momentum stalls & rejection wick forms")
+            self.assertEqual(pos_long_imp["entry_price"], 59720.0, "Must execute with price improvement at 59,720.0")
+            self.assertTrue(pos_long_imp.get("price_improved"))
+            self.assertFalse(pos_long_imp.get("is_limit_resting"))
+
+            # Scenario B2: Long resting limit executing at the limit level (60,000.0)
+            pos_long_lim = {
+                "trade_id": "TEST_LONG_PIERCE_LIM",
+                "symbol": "BTC/USDT",
+                "desk": "scalp",
+                "direction": "LONG",
+                "horizon": "15M",
+                "entry_price": 60000.0,
+                "optimal_entry_limit": 60000.0,
+                "sl_price": 58500.0,
+                "tp1_price": 63000.0,
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["open_positions"] = [pos_long_lim]
+
+            # Tick 1: Piercing candle to 59,700.0 -> Deferral, remains resting
+            bot.on_tick({"BTC/USDT": 59700.0}, candle_metrics=knife_cand)
+            self.assertEqual(pos_long_lim["status"], "RESTING_LIMIT")
+            self.assertTrue(pos_long_lim.get("was_adverse_penetrated"))
+
+            # Tick 2: Price bounces all the way back to 60,000.0 (the limit level) with rejection lower wick formed
+            wick_reclaim_cand = {"BTC/USDT": {"lower_wick_ratio": 0.26}}
+            bot.on_tick({"BTC/USDT": 60000.0}, candle_metrics=wick_reclaim_cand)
+            self.assertEqual(pos_long_lim["status"], "OPEN")
+            self.assertEqual(pos_long_lim["entry_price"], 60000.0, "Must execute at the limit level (60,000.0)")
+            self.assertFalse(pos_long_lim.get("price_improved"))
+
+            # Scenario B3: Short resting limit with Price Improvement
+            pos_short_imp = {
+                "trade_id": "TEST_SHORT_PIERCE_IMP",
+                "symbol": "ETH/USDT",
+                "desk": "scalp",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "entry_price": 3000.0,
+                "optimal_entry_limit": 3000.0,
+                "sl_price": 3075.0,
+                "tp1_price": 2850.0,
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["open_positions"] = [pos_short_imp]
+
+            # Tick 1: Piercing green rocket pumps price to 3,015.0 (+0.50%)
+            rocket_cand = {"ETH/USDT": {"is_green": True, "upper_wick_ratio": 0.05, "close_pos_in_range": 0.85, "body_ratio": 0.70}}
+            bot.on_tick({"ETH/USDT": 3015.0}, candle_metrics=rocket_cand)
+            self.assertEqual(pos_short_imp["status"], "RESTING_LIMIT", "Pierced order must remain resting")
+            self.assertTrue(pos_short_imp.get("was_adverse_penetrated"))
+
+            # Tick 2: Price pulls back to 3,010.0, adverse momentum stalls and upper rejection wick develops
+            short_rebound_cand = {"ETH/USDT": {"upper_wick_ratio": 0.22}}
+            bot.on_tick({"ETH/USDT": 3010.0}, candle_metrics=short_rebound_cand)
+            self.assertEqual(pos_short_imp["status"], "OPEN")
+            self.assertEqual(pos_short_imp["entry_price"], 3010.0, "Must execute with price improvement at 3,010.0")
+            self.assertTrue(pos_short_imp.get("price_improved"))
+
+            # Scenario B4: Short resting limit executing at the limit level (3,000.0)
+            pos_short_lim = {
+                "trade_id": "TEST_SHORT_PIERCE_LIM",
+                "symbol": "ETH/USDT",
+                "desk": "scalp",
+                "direction": "SHORT",
+                "horizon": "15M",
+                "entry_price": 3000.0,
+                "optimal_entry_limit": 3000.0,
+                "sl_price": 3075.0,
+                "tp1_price": 2850.0,
+                "status": "RESTING_LIMIT",
+                "is_limit_resting": True,
+                "placed_at_utc": datetime.now(timezone.utc).isoformat(),
+                "opened_at_utc": datetime.now(timezone.utc).isoformat()
+            }
+            bot.data["open_positions"] = [pos_short_lim]
+
+            # Tick 1: Piercing green rocket to 3,015.0 -> Deferral, remains resting
+            bot.on_tick({"ETH/USDT": 3015.0}, candle_metrics=rocket_cand)
+            self.assertEqual(pos_short_lim["status"], "RESTING_LIMIT")
+
+            # Tick 2: Price pulls back all the way to 3,000.0 (the limit level) with upper rejection wick formed
+            short_wick_reclaim = {"ETH/USDT": {"upper_wick_ratio": 0.25}}
+            bot.on_tick({"ETH/USDT": 3000.0}, candle_metrics=short_wick_reclaim)
+            self.assertEqual(pos_short_lim["status"], "OPEN")
+            self.assertEqual(pos_short_lim["entry_price"], 3000.0, "Must execute at the limit level (3,000.0)")
+            self.assertFalse(pos_short_lim.get("price_improved"))
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 
 
 if __name__ == "__main__":

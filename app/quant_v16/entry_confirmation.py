@@ -1035,13 +1035,16 @@ class EntryConfirmationEngine:
                 (obi_val >= 0.15) or
                 (cvd_val >= 0.10) or
                 (l_wick >= 0.18) or
-                (tb_ratio >= 0.52 and cvd_val >= 0.0)
+                (tb_ratio >= 0.52 and cvd_val >= 0.0) or
+                bool(c_metrics.get("rejection_wick_developed")) or
+                bool(c_metrics.get("adverse_momentum_stalled"))
             )
             if is_buyer_absorption:
-                reason = f"Long stabilized penetration fill confirmed by buyer absorption at superior price ${current_price:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                exec_p = min(limit_price, current_price)
+                reason = f"Long stabilized penetration fill confirmed by buyer absorption at superior price ${exec_p:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
                 telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
                 telemetry["fill_confirmation_type"] = "STABILIZED_ABSORPTION_FILL"
-                telemetry["execution_price"] = current_price
+                telemetry["execution_price"] = exec_p
                 return True, reason, telemetry
             else:
                 telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
@@ -1057,13 +1060,16 @@ class EntryConfirmationEngine:
                 (obi_val <= -0.15) or
                 (cvd_val <= -0.10) or
                 (u_wick >= 0.18) or
-                (tb_ratio <= 0.48 and cvd_val <= 0.0)
+                (tb_ratio <= 0.48 and cvd_val <= 0.0) or
+                bool(c_metrics.get("rejection_wick_developed")) or
+                bool(c_metrics.get("adverse_momentum_stalled"))
             )
             if is_seller_absorption:
-                reason = f"Short stabilized penetration fill confirmed by seller absorption at superior price ${current_price:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                exec_p = max(limit_price, current_price)
+                reason = f"Short stabilized penetration fill confirmed by seller absorption at superior price ${exec_p:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
                 telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
                 telemetry["fill_confirmation_type"] = "STABILIZED_ABSORPTION_FILL"
-                telemetry["execution_price"] = current_price
+                telemetry["execution_price"] = exec_p
                 return True, reason, telemetry
             else:
                 telemetry["fill_state"] = "ADVERSE_PENETRATION_DEFERRED"
@@ -1103,13 +1109,17 @@ class EntryConfirmationEngine:
                     (obi_val >= 0.15) or
                     (cvd_val >= 0.10) or
                     (l_wick >= 0.18) or
-                    (tb_ratio >= 0.52 and cvd_val >= 0.0)
+                    (tb_ratio >= 0.52 and cvd_val >= 0.0) or
+                    bool(c_metrics.get("rejection_wick_developed")) or
+                    bool(c_metrics.get("adverse_momentum_stalled"))
                 )
                 if is_buyer_absorption:
-                    reason = f"Long post-penetration fill confirmed by buyer absorption at ${current_price:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                    exec_p = min(limit_price, current_price)
+                    exec_desc = "limit level" if exec_p == limit_price else "superior price"
+                    reason = f"Long post-penetration fill confirmed by buyer absorption at {exec_desc} ${exec_p:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
                     telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
                     telemetry["fill_confirmation_type"] = "STABILIZED_ABSORPTION_FILL"
-                    telemetry["execution_price"] = current_price
+                    telemetry["execution_price"] = exec_p
                     return True, reason, telemetry
                 else:
                     reason = f"Post-penetration Long limit deferred. Awaiting price velocity stabilization (delta < 0.08%) or order flow absorption (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
@@ -1155,13 +1165,17 @@ class EntryConfirmationEngine:
                     (obi_val <= -0.15) or
                     (cvd_val <= -0.10) or
                     (u_wick >= 0.18) or
-                    (tb_ratio <= 0.48 and cvd_val <= 0.0)
+                    (tb_ratio <= 0.48 and cvd_val <= 0.0) or
+                    bool(c_metrics.get("rejection_wick_developed")) or
+                    bool(c_metrics.get("adverse_momentum_stalled"))
                 )
                 if is_seller_absorption:
-                    reason = f"Short post-penetration fill confirmed by seller absorption at ${current_price:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
+                    exec_p = max(limit_price, current_price)
+                    exec_desc = "limit level" if exec_p == limit_price else "superior price"
+                    reason = f"Short post-penetration fill confirmed by seller absorption at {exec_desc} ${exec_p:,.4f} (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
                     telemetry["fill_state"] = "STABILIZED_PENETRATION_CONFIRMED"
                     telemetry["fill_confirmation_type"] = "STABILIZED_ABSORPTION_FILL"
-                    telemetry["execution_price"] = current_price
+                    telemetry["execution_price"] = exec_p
                     return True, reason, telemetry
                 else:
                     reason = f"Post-penetration Short limit deferred. Awaiting price velocity stabilization (delta < 0.08%) or order flow absorption (OBI: {obi_val:+.2f}, CVD: {cvd_val:+.2f})"
