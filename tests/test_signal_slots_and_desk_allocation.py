@@ -120,7 +120,19 @@ class TestSignalSlotsAndDeskAllocation(unittest.TestCase):
             }
             self.assertTrue(self.bot.admit_signal(sig, btc_shield_state=normal_btc), f"Slot {idx} should be admitted")
 
-        # Slot cap: 6th scalp trade -> REJECTED (max 5 slots reached)
+        # Dynamically verify slot cap when max scalp slots reached
+        max_scalp_slots = int(self.bot.data["desks"]["scalp"].get("max_slots", 50))
+        current_scalp_count = len([p for p in self.bot.data.get("open_positions", []) if p.get("desk") == "scalp"])
+        for i in range(current_scalp_count, max_scalp_slots):
+            self.bot.data.setdefault("open_positions", []).append({
+                "trade_id": f"DUMMY_SCALP_{i}",
+                "symbol": f"COIN{i}/USDT",
+                "desk": "scalp",
+                "status": "OPEN",
+                "unrealized_pnl_pct": 0.0
+            })
+
+        # Slot cap: scalp trade beyond max_slots -> REJECTED (max slots reached)
         sig_overflow = {
             "signal_id": "TEST_SCALP_OVERFLOW",
             "symbol": "NEAR/USDT",

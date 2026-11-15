@@ -56,7 +56,7 @@ export default function PortfolioView() {
   };
 
   const rawDesks = (portfolio as any)?.desks || {};
-  const scalpDesk = rawDesks.scalp || { name: "⚡ Scalp Desk", allocated_usd: 500.0, open_positions: 0, active_slots: 0, max_slots: 5, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
+  const scalpDesk = rawDesks.scalp || { name: "⚡ Scalp Desk", allocated_usd: 500.0, open_positions: 0, active_slots: 0, max_slots: 50, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
   const dayDesk = rawDesks.day || rawDesks.intraday || { name: "⏳ Day Trading Desk", allocated_usd: 200.0, open_positions: 0, active_slots: 0, max_slots: 2, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
   const swingDesk = rawDesks.swing || rawDesks.macro || { name: "🌊 Swing Desk", allocated_usd: 300.0, open_positions: 0, active_slots: 0, max_slots: 3, win_rate_pct: 0.0, realized_pnl_usd: 0.0, unrealized_pnl_usd: 0.0, total_pnl_usd: 0.0 };
 
@@ -84,7 +84,7 @@ export default function PortfolioView() {
               ⚡ Scalp Desk (50%)
             </span>
             <span className={`text-[11px] font-mono px-2 py-0.5 rounded-full border ${scalpSlots > 0 ? "bg-cyan-500/30 text-cyan-200 border-cyan-400/50 font-bold" : "bg-cyan-500/20 text-cyan-300 border-cyan-500/30"}`}>
-              {scalpSlots} / {scalpDesk.max_slots ?? 5} Slots
+              {scalpSlots} / {scalpDesk.max_slots ?? 50} Slots
             </span>
           </div>
           <div className="mt-2.5 flex items-baseline justify-between">

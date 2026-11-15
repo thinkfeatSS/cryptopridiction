@@ -2997,9 +2997,16 @@ class SignalService:
                 "tier0_be": tier0_be
             }
 
-        scalp_desk = _build_desk_obj("⚡ Scalp Desk", 150.0, 1, 2, scalp_open, scalp_closed, "+0.80%")
-        day_desk = _build_desk_obj("⏳ Day Trading Desk", 350.0, 2, 3, day_open, day_closed, "+1.25%")
-        swing_desk = _build_desk_obj("🌊 Swing Desk", 500.0, 3, 2, swing_open, swing_closed, "+1.75%")
+        scalp_max_s = int(os.getenv("SCALP_DESK_MAX_SLOTS", "50"))
+        scalp_alloc = float(os.getenv("SCALP_DESK_ALLOCATED_USD", "500.0"))
+        day_max_s = int(os.getenv("DAY_DESK_MAX_SLOTS", "2"))
+        day_alloc = float(os.getenv("DAY_DESK_ALLOCATED_USD", "200.0"))
+        swing_max_s = int(os.getenv("SWING_DESK_MAX_SLOTS", "3"))
+        swing_alloc = float(os.getenv("SWING_DESK_ALLOCATED_USD", "300.0"))
+
+        scalp_desk = _build_desk_obj("⚡ Scalp Desk", scalp_alloc, scalp_max_s, 2, scalp_open, scalp_closed, "+0.80%")
+        day_desk = _build_desk_obj("⏳ Day Trading Desk", day_alloc, day_max_s, 3, day_open, day_closed, "+1.25%")
+        swing_desk = _build_desk_obj("🌊 Swing Desk", swing_alloc, swing_max_s, 2, swing_open, swing_closed, "+1.75%")
 
         enriched_desks = {
             "scalp": scalp_desk,
@@ -3077,9 +3084,9 @@ class SignalService:
             "closed_trades_history": [],
             "queued_trades": [],
             "desks": {
-                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": target_start_balance * 0.15, "max_slots": 1, "active_slots": 0, "leverage": 2, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0},
-                "day": {"name": "⏳ Day Trading Desk", "allocated_usd": target_start_balance * 0.35, "max_slots": 2, "active_slots": 0, "leverage": 3, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0},
-                "swing": {"name": "🌊 Swing Desk", "allocated_usd": target_start_balance * 0.50, "max_slots": 3, "active_slots": 0, "leverage": 2, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0}
+                "scalp": {"name": "⚡ Scalp Desk", "allocated_usd": float(os.getenv("SCALP_DESK_ALLOCATED_USD", str(target_start_balance * 0.50))), "max_slots": int(os.getenv("SCALP_DESK_MAX_SLOTS", "50")), "active_slots": 0, "leverage": 2, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0},
+                "day": {"name": "⏳ Day Trading Desk", "allocated_usd": float(os.getenv("DAY_DESK_ALLOCATED_USD", str(target_start_balance * 0.20))), "max_slots": int(os.getenv("DAY_DESK_MAX_SLOTS", "2")), "active_slots": 0, "leverage": 3, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0},
+                "swing": {"name": "🌊 Swing Desk", "allocated_usd": float(os.getenv("SWING_DESK_ALLOCATED_USD", str(target_start_balance * 0.30))), "max_slots": int(os.getenv("SWING_DESK_MAX_SLOTS", "3")), "active_slots": 0, "leverage": 2, "realized_pnl_usd": 0.0, "open_positions": 0, "total_trades": 0, "winning_trades": 0, "win_rate_pct": 0.0}
             }
         }
 
