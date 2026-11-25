@@ -1081,13 +1081,13 @@ class SignalGenerationSystem:
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_low = min(structural_low, float(candle_metrics["swept_price"]))
 
-            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.50% and >= 1.00x ATR)
+            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.80% and >= 1.10x ATR)
             if has_structural_anchor:
-                base_min_sl = max(exec_entry_price * 0.0150, active_atr * 1.00) if horizon_label == "15M" else max(exec_entry_price * 0.0180, active_atr * 1.20)
-                vol_cushion = max(active_atr * 0.60, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0180, active_atr * 1.10) if horizon_label == "15M" else max(exec_entry_price * 0.0200, active_atr * 1.30)
+                vol_cushion = max(active_atr * 0.65, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
             else:
-                base_min_sl = max(exec_entry_price * 0.0180, active_atr * 1.20) if horizon_label == "15M" else (active_atr * 1.50)
-                vol_cushion = max(active_atr * 0.85, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0220, active_atr * 1.40) if horizon_label == "15M" else (active_atr * 1.60)
+                vol_cushion = max(active_atr * 0.85, 5.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
 
             min_sl_dist = base_min_sl * tail_noise_mult
             structural_sl = structural_low - vol_cushion
@@ -1146,13 +1146,13 @@ class SignalGenerationSystem:
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_high = max(structural_high, float(candle_metrics["swept_price"]))
 
-            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.50% and >= 1.00x ATR)
+            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.80% and >= 1.10x ATR)
             if has_structural_anchor:
-                base_min_sl = max(exec_entry_price * 0.0150, active_atr * 1.00) if horizon_label == "15M" else max(exec_entry_price * 0.0180, active_atr * 1.20)
-                vol_cushion = max(active_atr * 0.60, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0180, active_atr * 1.10) if horizon_label == "15M" else max(exec_entry_price * 0.0200, active_atr * 1.30)
+                vol_cushion = max(active_atr * 0.65, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
             else:
-                base_min_sl = max(exec_entry_price * 0.0180, active_atr * 1.20) if horizon_label == "15M" else (active_atr * 1.50)
-                vol_cushion = max(active_atr * 0.85, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
+                base_min_sl = max(exec_entry_price * 0.0220, active_atr * 1.40) if horizon_label == "15M" else (active_atr * 1.60)
+                vol_cushion = max(active_atr * 0.85, 5.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
 
             min_sl_dist = base_min_sl * tail_noise_mult
             structural_sl = structural_high + vol_cushion
@@ -1312,7 +1312,16 @@ class SignalGenerationSystem:
                     cand_tp1 = format_dynamic_precision(recent_low * (1.0 + front_run_offset))
 
             # Preserve True R:R invariant
-            min_heatmap_rr = 1.35 if is_range_regime else 2.0
+            is_institutional_archetype = bool(
+                is_ob_setup or
+                (candle_metrics and any(candle_metrics.get(k) for k in ["is_sweep_reclaim", "is_vwap_bounce", "is_fvg_retest"])) or
+                any(k in str(canonical_strategy).upper() for k in [
+                    "ORDER_BLOCK", "BREAKER", "RANGE_ROTATION", "LIQUIDITY_RECLAIM",
+                    "VWAP_BOUNCE", "COILING", "DIRECTIONAL", "UNANIMOUS"
+                ]) or
+                (len(aligned_horizons) >= 5 and alignment_score is not None and float(alignment_score) >= 80.0)
+            )
+            min_heatmap_rr = (1.50 if is_institutional_archetype else 1.35) if is_range_regime else 2.0
             if direction == "LONG" and (cand_tp1 - exec_entry_price) < (min_heatmap_rr * sl_dist):
                 cand_tp1 = format_dynamic_precision(exec_entry_price + (min_heatmap_rr * sl_dist))
             elif direction == "SHORT" and (exec_entry_price - cand_tp1) < (min_heatmap_rr * sl_dist):
@@ -1580,8 +1589,16 @@ class SignalGenerationSystem:
             entry_analysis["is_limit_pending"] = True
             entry_analysis["entry_mode"] = "RESTING_LIMIT"
 
+        if candle_metrics and candle_metrics.get("anti_chase_active"):
+            entry_analysis["is_limit_pending"] = True
+            entry_analysis["entry_mode"] = "RESTING_LIMIT"
+            # Anchor limit entry at the retest/mid-body level to prevent chasing
+            retest_price = (exec_entry_price + float(recent_low if direction == "LONG" else recent_high)) / 2.0
+            entry_analysis["optimal_entry_price"] = format_dynamic_precision(retest_price)
+            exec_entry_price = entry_analysis["optimal_entry_price"]
+
         is_passive_limit_entry = bool(entry_analysis.get("is_limit_pending", False) or entry_analysis.get("entry_mode") == "RESTING_LIMIT")
-        exec_assumption = ExecutionAssumption.STRESS if is_squeeze_trans else (ExecutionAssumption.OPTIMISTIC if is_passive_limit_entry else ExecutionAssumption.BASE)
+        exec_assumption = ExecutionAssumption.STRESS if (is_squeeze_trans or float(spread_bps) >= 35.0) else (ExecutionAssumption.OPTIMISTIC if is_passive_limit_entry else ExecutionAssumption.BASE)
         cost_spread_bps = effective_spread_bps * 0.50 if (is_passive_limit_entry and not is_squeeze_trans) else effective_spread_bps
 
         cost_breakdown = self.cost_engine.estimate_costs(
@@ -1637,6 +1654,57 @@ class SignalGenerationSystem:
                 costs=cost_breakdown
             )
             ev_result = exp_res
+
+        # Marginal Net EV Fee-Spike Resiliency Shield:
+        # If Net EV is marginal (0.00% < EV_net < 0.05%), sudden taker fee hikes or spread
+        # expansion can push it negative. Dynamically elevate the target within physical ATR limits,
+        # or designate passive resting limit entry to capture maker rebates and eliminate taker drag.
+        # If fees or basis spreads expand beyond typical bounds on low-liquidity pairs, degrade to negative EV and fail closed.
+        if 0.0 < ev_result.expected_net_return_pct < 0.05:
+            if float(spread_bps) <= 15.0 and not (vol_24h_usd is not None and 0 < float(vol_24h_usd) < 10_000_000.0 and float(spread_bps) > 10.0):
+                marginal_deficit = 0.06 - ev_result.expected_net_return_pct
+                cushion_dist = (marginal_deficit / 100.0) * exec_entry_price / max(0.25, float(path_probs.p_tp1))
+                if (gross_reward + cushion_dist) <= max_safe_tp_dist:
+                    gross_reward = gross_reward + cushion_dist
+                    if direction == "LONG":
+                        cand_tp1 = format_dynamic_precision(exec_entry_price + gross_reward)
+                    else:
+                        cand_tp1 = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - gross_reward))
+                    actual_rr = round(abs(cand_tp1 - exec_entry_price) / max(1e-9, gross_risk), 2)
+                    cand_rr = f"1:{actual_rr:.1f}"
+                    ev_result = self.expectancy_engine.evaluate(
+                        entry=exec_entry_price,
+                        sl=cand_sl,
+                        tp1=cand_tp1,
+                        tp2=cand_tp2,
+                        tp3=cand_tp3,
+                        direction=direction,
+                        path_probs=path_probs,
+                        costs=cost_breakdown
+                    )
+                else:
+                    entry_analysis["is_limit_pending"] = True
+                    entry_analysis["entry_mode"] = "RESTING_LIMIT"
+            else:
+                # Fee/Spread spike expanded beyond typical bounds on low-liquidity pair:
+                # Dynamically degrade to negative net EV and fail closed as intended
+                cost_breakdown_stressed = self.cost_engine.estimate_costs(
+                    market_type="futures",
+                    observed_spread_bps=effective_spread_bps,
+                    assumption=ExecutionAssumption.STRESS,
+                    volume_24h_usd=vol_24h_usd,
+                    fee_spike_buffer_bps=5.0
+                )
+                ev_result = self.expectancy_engine.evaluate(
+                    entry=exec_entry_price,
+                    sl=cand_sl,
+                    tp1=cand_tp1,
+                    tp2=cand_tp2,
+                    tp3=cand_tp3,
+                    direction=direction,
+                    path_probs=path_probs,
+                    costs=cost_breakdown_stressed
+                )
 
         net_reward = max(0.0, gross_reward - friction_drag)
         net_risk = gross_risk + friction_drag
@@ -1867,22 +1935,40 @@ class SignalGenerationSystem:
             has_strong_setup = bool(
                 is_ob_setup or
                 (candle_metrics and candle_metrics.get("is_sweep_reclaim")) or
-                (candle_metrics and candle_metrics.get("is_engulfing"))
+                (candle_metrics and candle_metrics.get("is_fvg_retest")) or
+                (candle_metrics and candle_metrics.get("is_vwap_bounce"))
             )
             if not has_strong_setup:
                 is_sub_threshold_illiquid = True
-                illiquidity_reason = f"${volume_24h_usd/1e6:.2f}M tail pair requires confirmed OB or Sweep Reclaim"
+                illiquidity_reason = f"${volume_24h_usd/1e6:.2f}M tail pair requires confirmed OB, FVG, or Sweep Reclaim"
             elif float(spread_bps) > 20.0:
                 is_sub_threshold_illiquid = True
                 illiquidity_reason = f"Tail pair spread {spread_bps:.1f} bps > 20.0 bps limit on ${volume_24h_usd/1e6:.2f}M volume"
 
         is_macro_structural_archetype = bool(
-            arch_strategy == "DIRECTIONAL_BREAKOUT_EXPANSION" or
+            is_ob_setup or
+            arch_strategy in ["DIRECTIONAL_BREAKOUT_EXPANSION", "COILING_BREAKOUT", "RANGE_ROTATION", "LIQUIDITY_RECLAIM"] or
             arch_type in [
+                InstitutionalArchetype.ARCHETYPE_A_SECULAR_EXPANSION.value,
                 InstitutionalArchetype.ARCHETYPE_B_COILING_BREAKOUT.value,
                 InstitutionalArchetype.ARCHETYPE_C_RANGE_ROTATION.value
             ] or
-            (archetype_info and (archetype_info.get("is_breakout_expansion") or archetype_info.get("is_range_rotation_valid")))
+            any(k in str(canonical_strategy or "").upper() for k in [
+                "DIRECTIONAL_BREAKOUT_EXPANSION", "COILING_BREAKOUT", "RANGE_ROTATION",
+                "LIQUIDITY_RECLAIM", "VWAP_BOUNCE", "BREAKER", "ORDER_BLOCK"
+            ]) or
+            (archetype_info and (
+                archetype_info.get("is_breakout_expansion") or
+                archetype_info.get("is_range_rotation_valid") or
+                archetype_info.get("trade_permitted")
+            )) or
+            bool(candle_metrics and (
+                candle_metrics.get("is_sweep_reclaim") or
+                candle_metrics.get("is_vwap_bounce") or
+                candle_metrics.get("is_fvg_retest") or
+                candle_metrics.get("is_squeeze_expansion")
+            )) or
+            bool(alignment_score >= 80.0)
         )
 
         is_radar_eligible = False
@@ -2018,6 +2104,16 @@ class SignalGenerationSystem:
             tp3_price = cand_tp3
             sl_price = cand_sl
             rr_ratio = cand_rr
+        elif meta_eval and meta_eval.get("passed_meta_gate") is False:
+            status = "HOLD_VETOED_BY_META_STRATEGY_PRIOR"
+            trade_active = False
+            grade = f"Grade C (META GATE VETO: {meta_eval.get('meta_verdict', 'BELOW_HURDLE')})"
+            conviction = round(float(np.clip(calibrated_win_p * 100.0, 10.0, 49.9)), 1)
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
         elif is_prob_inferior:
             status = "HOLD_VETOED_BY_SUB_50_WIN_PROBABILITY"
             trade_active = False
@@ -2038,10 +2134,50 @@ class SignalGenerationSystem:
             tp3_price = cand_tp3
             sl_price = cand_sl
             rr_ratio = cand_rr
-        elif not (ev_result.passes_ev_hurdle or ((is_macro_structural_archetype or (p_tp1 >= 0.58 and ev_result.expected_net_return_pct > 0.0)) and ev_result.expected_net_return_pct > 0.0 and actual_rr >= 1.50)) or ev_result.expected_net_return_pct <= 0.0:
-            status = "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY" if ev_result.expected_net_return_pct <= 0.0 else "HOLD_UNFAVORABLE_RISK_REWARD"
+        elif bool(
+            direction == "LONG" and btc_shield_state and (
+                btc_shield_state.get("regime") in ["BEARISH", "FLASH_DUMP", "DISTRIBUTION"] or
+                "DEFENSIVE" in str(btc_shield_state.get("altcoin_posture", "")).upper() or
+                btc_shield_state.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "DEFENSIVE_CASH_ONLY"]
+            )
+        ) and not (p_tp1 >= 0.58 and ev_result.expected_net_return_pct >= 0.15 and actual_rr >= 2.00):
+            status = "HOLD_VETOED_BY_MACRO_BEARISH_COUNTER_TREND"
             trade_active = False
-            grade = f"Grade C ({ev_result.decision_reason})"
+            grade = f"Grade C (COUNTER-TREND LONG IN MACRO BEAR: P(win) {p_tp1*100:.1f}% or EV +{ev_result.expected_net_return_pct:.2f}% < 0.15% threshold)"
+            conviction = float(meta_eval.get("win_probability_pct", 65.0))
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
+            is_radar_eligible = True
+        elif not (
+            ev_result.passes_ev_hurdle or
+            (bool(
+                (is_ob_setup and order_block_setup and (
+                    order_block_setup.get("is_nested_smc") or
+                    int(order_block_setup.get("zeiierman_rank", 99)) <= 2 or
+                    (int(order_block_setup.get("zeiierman_rank", 99)) <= 4 and (
+                        "BREAKER" in str(order_block_setup.get("strategy", "")).upper() or
+                        "BREAKER" in str(canonical_strategy or "").upper() or
+                        bool(candle_metrics and candle_metrics.get("is_vwap_bounce"))
+                    ))
+                )) or
+                ("RANGE_ROTATION" in str(canonical_strategy or "").upper() and actual_rr >= 1.80 and arch_headroom >= 15.0) or
+                (arch_strategy == "DIRECTIONAL_BREAKOUT_EXPANSION" and p_tp1 >= 0.55) or
+                ("LIQUIDITY_RECLAIM" in str(canonical_strategy or "").upper() and p_tp1 >= 0.55) or
+                (alignment_score >= 80.0 and ev_result.expected_net_return_pct >= 0.10) or
+                (p_tp1 >= 0.60 and ev_result.expected_net_return_pct >= 0.10)
+            ) and ev_result.expected_net_return_pct > 0.0 and actual_rr >= 1.50) or
+            (is_macro_structural_archetype and ev_result.expected_net_return_pct >= 0.10 and p_tp1 >= 0.52 and actual_rr >= 1.50) or
+            (p_tp1 >= 0.62 and ev_result.expected_net_return_pct >= 0.10 and actual_rr >= 1.50)
+        ) or ev_result.expected_net_return_pct <= 0.0:
+            status = "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY" if ev_result.expected_net_return_pct <= 0.0 else "HOLD_MARGINAL_NET_EXPECTANCY"
+            trade_active = False
+            grade = f"Grade C (NEGATIVE NET EXPECTANCY: {ev_result.expected_net_return_pct:.2f}%)" if ev_result.expected_net_return_pct <= 0.0 else (
+                f"Grade C (MARGINAL NET EXPECTANCY: +{ev_result.expected_net_return_pct:.2f}% < +0.10% without Elite Institutional Anchor)" if ev_result.expected_net_return_pct < 0.10 else
+                f"Grade C ({ev_result.decision_reason})"
+            )
             conviction = float(meta_eval.get("win_probability_pct", 65.0))
             tp1_price = cand_tp1
             tp2_price = cand_tp2
@@ -2087,11 +2223,32 @@ class SignalGenerationSystem:
 
             # Authoritative Grade Derivation matching ExpectancyEngine & V16SignalScorer
             ev_net_val = ev_result.expected_net_return_pct
+            resolved_ob_rank_check = int(order_block_setup.get("zeiierman_rank", 99)) if (is_ob_setup and order_block_setup) else 99
+            has_elite_institutional_anchor = bool(
+                (is_ob_setup and order_block_setup and (
+                    order_block_setup.get("is_nested_smc") or
+                    resolved_ob_rank_check <= 2 or
+                    (resolved_ob_rank_check <= 4 and (
+                        "BREAKER" in str(order_block_setup.get("strategy", "")).upper() or
+                        "BREAKER" in str(canonical_strategy or "").upper() or
+                        bool(candle_metrics and candle_metrics.get("is_vwap_bounce"))
+                    ))
+                )) or
+                ("RANGE_ROTATION" in str(canonical_strategy or "").upper() and actual_rr >= 1.80 and arch_headroom >= 15.0) or
+                (arch_strategy == "DIRECTIONAL_BREAKOUT_EXPANSION" and p_tp1 >= 0.55) or
+                ("LIQUIDITY_RECLAIM" in str(canonical_strategy or "").upper() and p_tp1 >= 0.55) or
+                (alignment_score >= 80.0 and ev_net_val >= 0.10) or
+                (p_tp1 >= 0.60 and ev_net_val >= 0.10)
+            )
+            is_unanimous_confluence = bool(
+                (alignment_score >= 80.0 and ev_net_val >= 0.10) or
+                (is_ob_setup and order_block_setup and order_block_setup.get("is_nested_smc"))
+            )
             if ev_net_val >= 1.00 and p_tp1 >= 0.65:
                 grade_prefix = "💎 Grade A+"
-            elif (ev_net_val >= 0.50 and p_tp1 >= 0.55) or (p_tp1 >= 0.58 and ev_net_val > 0.0):
+            elif (ev_net_val >= 0.50 and p_tp1 >= 0.55) or (p_tp1 >= 0.58 and ev_net_val >= 0.10) or (is_unanimous_confluence and p_tp1 >= 0.55 and ev_net_val > 0.0):
                 grade_prefix = "⚡ Grade A"
-            elif (ev_net_val >= 0.25 and p_tp1 >= 0.50) or (is_macro_structural_archetype and ev_net_val > 0.0 and p_tp1 >= 0.50):
+            elif (ev_net_val >= 0.25 and p_tp1 >= 0.50) or (has_elite_institutional_anchor and ev_net_val > 0.0 and p_tp1 >= 0.50) or (is_macro_structural_archetype and ev_net_val >= 0.10 and p_tp1 >= 0.52):
                 grade_prefix = "⚖️ Grade B"
             else:
                 grade_prefix = "Grade C"
@@ -2124,13 +2281,22 @@ class SignalGenerationSystem:
                 grade = f"{grade_prefix} (RANGE ROTATION: 1D Range Mean Reversion to {arch_headroom:.1f}% Boundary)"
                 arch_strategy = canonical_strategy
             elif horizon_label == "24H":
-                grade = f"{grade_prefix} (24H STRICT 7-HORIZON ALIGNMENT: 15M-15D UNANIMOUS)"
+                if alignment_score >= 80.0:
+                    grade = f"{grade_prefix} (24H STRICT 7-HORIZON ALIGNMENT: 15M-15D UNANIMOUS)"
+                else:
+                    grade = f"{grade_prefix} (24H {canonical_strategy})"
                 arch_strategy = canonical_strategy
             elif horizon_label == "1H":
-                grade = f"{grade_prefix} (1H STRICT 7-HORIZON ALIGNMENT: 5M-7D UNANIMOUS)"
+                if alignment_score >= 80.0:
+                    grade = f"{grade_prefix} (1H STRICT 7-HORIZON ALIGNMENT: 5M-7D UNANIMOUS)"
+                else:
+                    grade = f"{grade_prefix} (1H {canonical_strategy})"
                 arch_strategy = canonical_strategy
             else: # 15M
-                grade = f"{grade_prefix} (15M STRICT 6-HORIZON ALIGNMENT: 5M-24H UNANIMOUS)"
+                if alignment_score >= 80.0:
+                    grade = f"{grade_prefix} (15M STRICT 6-HORIZON ALIGNMENT: 5M-24H UNANIMOUS)"
+                else:
+                    grade = f"{grade_prefix} (15M {canonical_strategy})"
                 arch_strategy = canonical_strategy
 
             # Apply Fundamental Conviction Delta & Catalyst Boosting
@@ -2374,15 +2540,15 @@ class SignalGenerationSystem:
         chop_horizons = [tf for tf, st in trend_matrix.items() if st == "CONSOLIDATION"]
         total_horizons = len(trend_matrix)
 
-        # Quantitative Institutional Horizon Weightings (Core active trading: 15M, 1H, 4H)
-        # 15M (Trigger / Scalp), 1H (Intraday Momentum), 4H (Macro Anchor)
+        # Quantitative Institutional Horizon Weightings (Core 4 active trading models: 15M, 1H, 4H, 1D)
+        # 15M (Trigger / Scalp), 1H (Intraday Momentum), 4H (Intermediate Anchor), 1D (Macro Anchor)
         HORIZON_WEIGHTS = {
             "15m": 0.35,  # Execution Trigger / Scalp
-            "1h": 0.35,   # Intraday Context
-            "4h": 0.30,   # Macro Anchor
-            "5m": 0.08,   # Sub-horizon confirmation
-            "12h": 0.12,  # Context
-            "1d": 0.10,   # Context bonus
+            "1h": 0.30,   # Intraday Context
+            "4h": 0.20,   # Intermediate Swing Anchor
+            "1d": 0.15,   # Macro Daily Anchor
+            "5m": 0.00,   # Retired micro horizon
+            "12h": 0.00,  # Retired semi-daily horizon
             "1w": 0.00,   # Retired macro horizon
             "15d": 0.00,  # Retired macro horizon
             "1M": 0.00    # Retired macro horizon
@@ -2519,8 +2685,8 @@ class SignalGenerationSystem:
         # 1. 15M Scalp Gate (Empirical accumulation required: 15M [3.75h])
         # Desk: 15M Scalp / Active Execution. Anchor: 4H. Context: 1H.
         # -----------------------------------------------------------------
-        req_15m = [tf for tf in ["15m", "1h", "4h", "5m", "12h", "1d"] if tf in trend_matrix] or ["15m", "1h", "4h"]
-        emp_req_15m = [tf for tf in ["5m", "15m"] if tf in horizon_predictions] or ["15m"]
+        req_15m = [tf for tf in ["15m", "1h", "4h", "1d"] if tf in trend_matrix] or ["15m", "1h", "4h"]
+        emp_req_15m = [tf for tf in ["15m"] if tf in horizon_predictions] or ["15m"]
         cold_start_tfs_15m = [
             tf for tf in emp_req_15m
             if tf not in horizon_predictions or
@@ -2773,8 +2939,8 @@ class SignalGenerationSystem:
         # 2. 1H Intraday Gate (Empirical accumulation required: 1H [15h], 15M [3.75h])
         # Desk: 1H Intraday. Anchor: 4H. Trigger: 15M.
         # -----------------------------------------------------------------
-        req_1h = [tf for tf in ["15m", "1h", "4h", "5m", "12h", "1d"] if tf in trend_matrix] or ["15m", "1h", "4h"]
-        emp_req_1h = [tf for tf in (["5m", "15m", "1h"] if "5m" in horizon_predictions else ["15m", "1h"]) if tf in horizon_predictions] or ["1h"]
+        req_1h = [tf for tf in ["15m", "1h", "4h", "1d"] if tf in trend_matrix] or ["15m", "1h", "4h"]
+        emp_req_1h = [tf for tf in ["15m", "1h"] if tf in horizon_predictions] or ["1h"]
         cold_start_tfs_1h = [
             tf for tf in emp_req_1h
             if tf not in horizon_predictions or
@@ -2947,8 +3113,8 @@ class SignalGenerationSystem:
         # 3. 24H Swing Gate (Empirical accumulation required: 1D [15 days], 12H, 4H, 1H, 15M)
         # Desk: 24H Swing. Anchor: 1D/4H. Trigger: 15M.
         # -----------------------------------------------------------------
-        req_24h = [tf for tf in ["15m", "1h", "4h", "12h", "1d"] if tf in trend_matrix] or ["15m", "1h", "4h"]
-        emp_req_24h = [tf for tf in ["15m", "1h", "4h", "12h", "1d"] if tf in horizon_predictions] or ["1d"]
+        req_24h = [tf for tf in ["15m", "1h", "4h", "1d"] if tf in trend_matrix] or ["15m", "1h", "4h"]
+        emp_req_24h = [tf for tf in ["15m", "1h", "4h", "1d"] if tf in horizon_predictions] or ["1d"]
         cold_start_tfs_24h = [
             tf for tf in emp_req_24h
             if tf not in horizon_predictions or
@@ -2966,12 +3132,12 @@ class SignalGenerationSystem:
         bear_cnt_24h = sum(1 for t in trends_24h if t == "BEARISH")
 
         is_24h_bull = (
-            (len(converged_tfs_24h) >= 5 and all(trend_matrix.get(tf) == "BULLISH" for tf in converged_tfs_24h))
-            or ((trend_matrix.get("1d") == "BULLISH" or trend_matrix.get("12h") == "BULLISH") and bull_cnt_24h >= 4 and bear_cnt_24h <= 1)
+            (len(converged_tfs_24h) >= 4 and all(trend_matrix.get(tf) == "BULLISH" for tf in converged_tfs_24h))
+            or (trend_matrix.get("1d") == "BULLISH" and bull_cnt_24h >= 3 and bear_cnt_24h == 0)
         )
         is_24h_bear = (
-            (len(converged_tfs_24h) >= 5 and all(trend_matrix.get(tf) == "BEARISH" for tf in converged_tfs_24h))
-            or ((trend_matrix.get("1d") == "BEARISH" or trend_matrix.get("12h") == "BEARISH") and bear_cnt_24h >= 4 and bull_cnt_24h <= 1)
+            (len(converged_tfs_24h) >= 4 and all(trend_matrix.get(tf) == "BEARISH" for tf in converged_tfs_24h))
+            or (trend_matrix.get("1d") == "BEARISH" and bear_cnt_24h >= 3 and bull_cnt_24h == 0)
         )
 
         is_passive_24h = bool(
@@ -3160,8 +3326,8 @@ class SignalGenerationSystem:
             df_tf = dfs_9.get(tf)
             n_raw = len(df_tf) if df_tf is not None else 0
 
-            # Architecture & User Mandate: Completely remove week and month charts analysis and models
-            if tf in RETIRED_MACRO_TIMEFRAMES or tf in ["1w", "15d", "1M"]:
+            # Architecture & User Mandate: Scan strictly for active models (15M, 1H, 4H, 1D); retire all others (5M, 12H, 1W, 15D, 1M)
+            if tf in RETIRED_MACRO_TIMEFRAMES or tf not in ACTIVE_MODEL_TIMEFRAMES or tf in ["1w", "15d", "1M", "5m", "12h"]:
                 is_sparse_cold = bool(n_raw < 15)
                 horizon_predictions[tf] = {
                     "timeframe": tf,
@@ -3170,7 +3336,7 @@ class SignalGenerationSystem:
                     "is_hybrid": False,
                     "is_cold_start": is_sparse_cold,
                     "is_retired": True,
-                    "accumulation_phase": "COLD_START_INSUFFICIENT_HISTORY" if is_sparse_cold else "RETIRED_MACRO_HORIZON",
+                    "accumulation_phase": "COLD_START_INSUFFICIENT_HISTORY" if is_sparse_cold else "RETIRED_HORIZON",
                     "accumulation_progress_pct": min(100.0, round((n_raw / 15.0) * 100.0, 1)),
                     "historical_hours_accumulated": 0.0,
                     "required_hours_for_convergence": 0.0,
@@ -3178,7 +3344,7 @@ class SignalGenerationSystem:
                     "current_price": current_price,
                     "direction": "NEUTRAL",
                     "trend_state": "CONSOLIDATION",
-                    "trend_label": f"⚪ RETIRED MACRO HORIZON ({tf.upper()})" if not is_sparse_cold else f"🟡 ACCUMULATING (COLD START: N={n_raw})",
+                    "trend_label": f"⚪ RETIRED HORIZON ({tf.upper()})" if not is_sparse_cold else f"🟡 ACCUMULATING (COLD START: N={n_raw})",
                     "candle_color": "⚪ RETIRED",
                     "classifier_votes": "RETIRED",
                     "bullish_votes": 0,
@@ -3632,9 +3798,9 @@ class SignalGenerationSystem:
         # ---------------------------------------------------------------------
         # Check active Order Block Touches across Horizons
         ob_touches_by_tf = ob_scan.get("touch_setups_by_horizon", {})
-        ob_setup_15m = ob_touches_by_tf.get("15m") or ob_touches_by_tf.get("5m")
+        ob_setup_15m = ob_touches_by_tf.get("15m")
         ob_setup_1h = ob_touches_by_tf.get("1h") or ob_touches_by_tf.get("4h")
-        ob_setup_24h = ob_touches_by_tf.get("1d") or ob_touches_by_tf.get("12h")
+        ob_setup_24h = ob_touches_by_tf.get("1d")
 
         # Check active SMC Price Action Setups on 15M, 1H, and 24H charts
         has_smc_15m = False
@@ -3647,10 +3813,10 @@ class SignalGenerationSystem:
             c_s, _, m_s = EntryConfirmationEngine.validate_candle_trigger(df_15m, direction="SHORT", current_price=current_price, spread_bps=spread_bps)
             m_l_15m = m_l
             rsi_15m = float(m_l.get("rsi_14", 50.0))
-            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion") or m_l.get("is_v_bottom_reclaim")):
+            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_squeeze_expansion") or m_l.get("is_v_bottom_reclaim")):
                 has_smc_15m = True
                 smc_dir_15m = "LONG"
-            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing") or m_s.get("is_squeeze_expansion")):
+            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_squeeze_expansion")):
                 has_smc_15m = True
                 smc_dir_15m = "SHORT"
 
@@ -3664,23 +3830,23 @@ class SignalGenerationSystem:
             c_s, _, m_s = EntryConfirmationEngine.validate_candle_trigger(df_1h, direction="SHORT", current_price=current_price, spread_bps=spread_bps)
             m_l_1h = m_l
             rsi_1h = float(m_l.get("rsi_14", 50.0))
-            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion") or m_l.get("is_v_bottom_reclaim")):
+            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_squeeze_expansion") or m_l.get("is_v_bottom_reclaim")):
                 has_smc_1h = True
                 smc_dir_1h = "LONG"
-            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing") or m_s.get("is_squeeze_expansion")):
+            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_squeeze_expansion")):
                 has_smc_1h = True
                 smc_dir_1h = "SHORT"
 
         has_smc_24h = False
         smc_dir_24h = None
-        df_24h = dfs_9.get("1d") if dfs_9.get("1d") is not None else dfs_9.get("12h")
+        df_24h = dfs_9.get("1d") if dfs_9.get("1d") is not None else dfs_9.get("4h")
         if df_24h is not None and len(df_24h) >= 4:
             c_l, _, m_l = EntryConfirmationEngine.validate_candle_trigger(df_24h, direction="LONG", current_price=current_price, spread_bps=spread_bps)
             c_s, _, m_s = EntryConfirmationEngine.validate_candle_trigger(df_24h, direction="SHORT", current_price=current_price, spread_bps=spread_bps)
-            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_engulfing") or m_l.get("is_squeeze_expansion") or m_l.get("is_v_bottom_reclaim")):
+            if c_l and (m_l.get("is_sweep_reclaim") or m_l.get("is_fvg_retest") or m_l.get("is_vwap_bounce") or m_l.get("is_squeeze_expansion") or m_l.get("is_v_bottom_reclaim")):
                 has_smc_24h = True
                 smc_dir_24h = "LONG"
-            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_engulfing") or m_s.get("is_squeeze_expansion")):
+            elif c_s and (m_s.get("is_sweep_reclaim") or m_s.get("is_fvg_retest") or m_s.get("is_vwap_bounce") or m_s.get("is_squeeze_expansion")):
                 has_smc_24h = True
                 smc_dir_24h = "SHORT"
 
@@ -3781,13 +3947,25 @@ class SignalGenerationSystem:
                     q_15m["direction"] = h24_dir
 
         if q_15m.get("qualified") and target_dir_15m in ["LONG", "SHORT"]:
+            # Dynamically resolve Order Block Setup: Prioritize 15M touch, or HTF POI touch (1H, 4H, 1D, 1W) aligned with direction
+            chosen_ob_setup = ob_setup_15m if has_ob_15m else (
+                ob_setup_1h if (ob_setup_1h and ob_setup_1h.get("direction") == target_dir_15m) else (
+                    ob_setup_24h if (ob_setup_24h and ob_setup_24h.get("direction") == target_dir_15m) else (
+                        ob_touches_by_tf.get("4h") if (ob_touches_by_tf.get("4h") and ob_touches_by_tf.get("4h", {}).get("direction") == target_dir_15m) else (
+                            ob_touches_by_tf.get("1w") if (ob_touches_by_tf.get("1w") and ob_touches_by_tf.get("1w", {}).get("direction") == target_dir_15m) else (
+                                ob_setup_1h if converted_from_hz == "1H" else ob_setup_24h
+                            )
+                        )
+                    )
+                )
+            )
             sig_15m = self._build_single_horizon_signal(
                 symbol=symbol, horizon_label="15M", tf_key="15m",
                 direction=target_dir_15m, current_price=current_price,
                 dfs_9=dfs_9, horizon_prediction=horizon_predictions.get("15m"),
                 btc_shield_state=btc_shield_state, aligned_horizons=req_15m,
                 archetype_info=matrix_eval,
-                order_block_setup=ob_setup_15m if has_ob_15m else (ob_setup_1h if converted_from_hz == "1H" else ob_setup_24h),
+                order_block_setup=chosen_ob_setup,
                 volume_24h_usd=volume_24h_usd,
                 bid_price=bid_price,
                 ask_price=ask_price,
@@ -3841,7 +4019,12 @@ class SignalGenerationSystem:
                     is_boundary_or_coiling = bool(
                         is_decoupled or
                         is_ob or
-                        any(k in dec_str for k in ["ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "COILING", "EXPANSION", "BREAKOUT", "SQUEEZE_BREAKOUT", "DECOUPLED", "IDIOSYNCRATIC"])
+                        any(k in dec_str for k in [
+                            "ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "COILING", "EXPANSION",
+                            "BREAKOUT", "SQUEEZE_BREAKOUT", "DECOUPLED", "IDIOSYNCRATIC",
+                            "RANGE ROTATION", "ROTATION", "RECLAIM", "LIQUIDITY_RECLAIM",
+                            "VWAP", "ZEIIERMAN", "SMC", "UNANIMOUS", "ALIGNMENT"
+                        ])
                     )
                 else:
                     is_boundary_or_coiling = bool(
@@ -3849,7 +4032,10 @@ class SignalGenerationSystem:
                         is_ob or
                         any(k in dec_str for k in [
                             "ORDER_BLOCK", "BREAKER", "TURTLE_SOUP", "RANGE_SUPPORT",
-                            "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT", "RANGE_BOUNCE", "SQUEEZE", "DECOUPLED", "IDIOSYNCRATIC"
+                            "RANGE_RESISTANCE", "SUB_RANGE", "COILING", "EXPANSION", "BREAKOUT",
+                            "RANGE_BOUNCE", "SQUEEZE", "DECOUPLED", "IDIOSYNCRATIC",
+                            "RANGE ROTATION", "ROTATION", "RECLAIM", "LIQUIDITY_RECLAIM",
+                            "VWAP", "ZEIIERMAN", "SMC", "UNANIMOUS", "ALIGNMENT"
                         ])
                     )
                 if not is_boundary_or_coiling:

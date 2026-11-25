@@ -34,7 +34,7 @@ class ProbabilityCalibrator:
     Supports in-sample fitting, out-of-sample evaluation, and walk-forward verification.
     """
 
-    def __init__(self, method: str = "platt", slope: float = 0.88, intercept: float = -0.05):
+    def __init__(self, method: str = "platt", slope: float = 0.82, intercept: float = -0.12):
         self.method = method.lower()
         self.slope = slope
         self.intercept = intercept

@@ -1245,15 +1245,21 @@ class InstitutionalOrderBlockEngine:
                     return dfs_9[a]
             return None
 
-        # Scan all 9 horizons with fallback alias handling
-        timeframes_to_scan = ["5m", "15m", "1h", "4h", "12h", "1d", "1w", "15d", "1M"]
+        # Scan strictly active trading horizons (15M, 1H, 4H, 1D); retire unused horizons (5M, 12H, 1W, 15D, 1M)
+        try:
+            from app.engine.config import ACTIVE_MODEL_TIMEFRAMES
+            timeframes_to_scan = [tf for tf in ["15m", "1h", "4h", "1d"] if tf in ACTIVE_MODEL_TIMEFRAMES]
+        except Exception:
+            timeframes_to_scan = ["15m", "1h", "4h", "1d"]
+        if not timeframes_to_scan:
+            timeframes_to_scan = ["15m", "1h", "4h", "1d"]
         horizon_blocks: Dict[str, List[OrderBlock]] = {}
         horizon_setups: Dict[str, Dict[str, Any]] = {}
         touched_horizons: List[str] = []
 
         all_active_blocks: List[OrderBlock] = []
 
-        # 1. Detect order blocks across all timeframes
+        # 1. Detect order blocks across all active timeframes
         for tf in timeframes_to_scan:
             df = _get_df_for_tf(tf)
             if df is not None and len(df) >= 25:
@@ -1270,9 +1276,9 @@ class InstitutionalOrderBlockEngine:
                     touched_horizons.append(tf)
 
         # 2. Cross-Timeframe Nested SMC Analysis (Rank 1 Upgrades)
-        # Check if an LTF block (5m, 15m, 1h) falls inside an HTF block (4h, 12h, 1d, 1w, 15d, 1M)
-        htf_tfs = ["4h", "12h", "1d", "1w", "15d", "1M"]
-        ltf_tfs = ["5m", "15m", "1h"]
+        # Check if an LTF trigger block (15m, 1h) falls inside an HTF anchor block (4h, 1d)
+        htf_tfs = [tf for tf in ["4h", "1d"] if tf in timeframes_to_scan]
+        ltf_tfs = [tf for tf in ["15m", "1h"] if tf in timeframes_to_scan]
 
         upgraded_tfs = set()
         for ltf in ltf_tfs:

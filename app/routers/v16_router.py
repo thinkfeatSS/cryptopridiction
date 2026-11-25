@@ -24,7 +24,7 @@ from datetime import datetime, timezone, timedelta
 from app.config import settings
 from app.database import get_db
 from app.engine.scanner.filters import UniverseFilter
-from app.engine.config import is_meme_coin
+from app.engine.config import is_meme_coin, safe_atomic_replace
 from app.quant_v16.validation import safe_float, safe_ratio
 from app.quant_v16.audit import calculate_trailing_stop_evolution, classify_signal_outcome
 from app.quant_v16.thesis import normalize_horizon, HORIZON_SORT_ORDER
@@ -157,6 +157,10 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
         os.path.join("export_app_data", "trader_signals_tracker.csv"),
         os.path.join("/app/export_app_data", "trader_signals_tracker.csv"),
         os.path.join("/root/crypto/export_app_data", "trader_signals_tracker.csv"),
+        os.path.join(settings.EXPORT_DIR, "live_container_trader_signals_tracker.csv"),
+        os.path.join(".", "live_container_trader_signals_tracker.csv"),
+        os.path.join("export_app_data", "live_container_trader_signals_tracker.csv"),
+        os.path.join("/app/export_app_data", "live_container_trader_signals_tracker.csv"),
         os.path.join(settings.EXPORT_DIR, "today_trader_signals_tracker.csv"),
         os.path.join(settings.EXPORT_DIR, "latest_signals_tracker.csv"),
         os.path.join(".", "today_trader_signals_tracker.csv"),
@@ -206,9 +210,22 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
         dirn = r.get("direction", "LONG").upper()
         hz = r.get("horizon", "1H")
         entry = safe_float(r.get("entry_price"), 0.0)
+        if entry <= 0.0:
+            continue
         tp1 = safe_float(r.get("tp1_price"), entry)
         tp2 = safe_float(r.get("tp2_price"), tp1)
         tp3 = safe_float(r.get("tp3_price"), tp2)
+
+        # Enforce price geometry invariants on TP levels
+        if dirn == "LONG" and tp1 <= entry and entry > 0.0:
+            tp1 = round(entry * 1.035, 6)
+            tp2 = round(entry * 1.055, 6)
+            tp3 = round(entry * 1.085, 6)
+        elif dirn == "SHORT" and (tp1 >= entry or tp1 <= 0.0) and entry > 0.0:
+            tp1 = round(entry * 0.965, 6)
+            tp2 = round(entry * 0.945, 6)
+            tp3 = round(entry * 0.915, 6)
+
         # Stop-loss price separation: immutable initial structural vs dynamic current/trailed
         raw_sl_orig = safe_float(r.get("sl_original"), 0.0)
         raw_sl_curr = safe_float(r.get("sl_price"), 0.0)
@@ -325,12 +342,20 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
             cur_sl = cur_imm.get("sl_initial", 0.0)
             cur_tp1 = cur_imm.get("tp1_initial", 0.0)
             cur_dir = str(cur_imm.get("direction", "LONG")).upper()
-            if cur_dir == "LONG" and (cur_sl >= cur_entry or cur_entry >= cur_tp1):
-                cur_imm["sl_initial"] = sl_orig
-                need_heal = True
-            elif cur_dir == "SHORT" and (cur_sl <= cur_entry or cur_entry <= cur_tp1):
-                cur_imm["sl_initial"] = sl_orig
-                need_heal = True
+            if cur_dir == "LONG":
+                if cur_tp1 <= cur_entry and cur_entry > 0.0:
+                    cur_imm["tp1_initial"] = round(cur_entry * 1.035, 6)
+                    need_heal = True
+                if cur_sl >= cur_entry:
+                    cur_imm["sl_initial"] = sl_orig
+                    need_heal = True
+            elif cur_dir == "SHORT":
+                if (cur_tp1 >= cur_entry or cur_tp1 <= 0.0) and cur_entry > 0.0:
+                    cur_imm["tp1_initial"] = round(cur_entry * 0.965, 6)
+                    need_heal = True
+                if cur_sl <= cur_entry:
+                    cur_imm["sl_initial"] = sl_orig
+                    need_heal = True
 
             # Normalize trade_thesis_id to clustered root thesis
             if cur_imm.get("trade_thesis_id") != th_id:
@@ -775,8 +800,9 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
 
     for sid, imm in list(immut_data.items()):
         sym = imm.get("symbol", "")
-        # Remove delisted, invalid, test artifacts, or obsolete synthetic tokens immediately
-        if not UniverseFilter.is_valid_crypto_pair(sym) or sid.startswith("SIG_ACTIVE_") or sid.startswith("TEST_") or "TEST" in sid:
+        entry_init = safe_float(imm.get("entry_price_initial"), 0.0)
+        # Remove delisted, invalid, zero-entry, test artifacts, or obsolete synthetic tokens immediately
+        if not UniverseFilter.is_valid_crypto_pair(sym) or entry_init <= 0.0 or sid.startswith("SIG_ACTIVE_") or sid.startswith("TEST_") or "TEST" in sid:
             immut_data.pop(sid, None)
             dyn_data.pop(sid, None)
             modified = True
@@ -822,20 +848,26 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
             imm["status"] = "ACTIVE"
             continue
 
-        # Step C: Dynamic Evaluation Pass for active, running, or previously-expired signals:
-        # Evaluates all active signals and heals any prematurely expired/breakeven-guarded signals
-        should_eval = (
-            not is_term
-            or st in ["ACTIVE", "RUNNING", "PENDING_EVALUATION", "EXPIRED_HORIZON", "BREAKEVEN_GUARD", "STOP_LOSS_BREAKEVEN", "EXPIRED_BREAKEVEN", "LOST_EXP", "WON_EXP_PROFIT"]
-            or "EXPIRED" in out
-        )
+        # Step C: Dynamic Evaluation Pass strictly for active/running/pending unresolved signals
+        should_eval = not is_term and st in ["ACTIVE", "RUNNING", "PENDING_EVALUATION", "PENDING_LIMIT", "RESTING_LIMIT"]
 
         if should_eval:
+            hz_v = str(imm.get("horizon", "15M")).upper()
+            # Fast-path for retired legacy horizons (Monthly, 15D, Weekly, 4D, 12H) - user mandate retired horizons
+            if any(r_tf in hz_v for r_tf in ["MONTH", "30D", "15D", "WEEK", "7D", "4D", "12H"]):
+                dyn["status"] = "EXPIRED_HORIZON"
+                dyn["outcome_label"] = "⏱️ EXPIRED"
+                imm["status"] = "EXPIRED_HORIZON"
+                dyn["exit_price"] = safe_float(imm.get("entry_price_initial"), 0.0)
+                dyn["realized_return_pct"] = 0.0
+                dyn["updated_at_utc"] = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+                modified = True
+                continue
+
             entry_v = safe_float(imm.get("entry_price_initial"), 0.0)
             tp1_v = safe_float(imm.get("tp1_initial"), 0.0)
             sl_v = safe_float(imm.get("sl_initial"), 0.0)
             dir_v = str(imm.get("direction", "LONG")).upper()
-            hz_v = str(imm.get("horizon", "15M")).upper()
 
             # Dynamic timestamp healing for legacy signals stored on disk
             cur_gen_at = imm.get("signal_generated_at", "")
@@ -857,10 +889,11 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
             except Exception:
                 pass
 
-            # Fetch intra-candle extremes strictly post-entry (cached to max 1 query per 60s per signal)
+            # Fetch intra-candle extremes strictly post-entry for genuinely active signals (cached to max 1 query per 60s per signal)
             intra_h, intra_l = 0.0, 0.0
             last_kf = _SIGNAL_LAST_KLINE_FETCH.get(sid, 0.0)
-            should_fetch_kline = force_refresh or (now - last_kf) >= 60.0 or not dyn.get("peak_price_seen")
+            is_active_for_kline = not is_term and (st in ["ACTIVE", "RUNNING", "PENDING_EVALUATION", "PENDING_LIMIT", "RESTING_LIMIT"])
+            should_fetch_kline = is_active_for_kline and ((now - last_kf) >= 60.0 or not dyn.get("peak_price_seen"))
             if should_fetch_kline:
                 try:
                     from app.services.signal_service import fetch_intra_candle_extremes, evaluate_chronological_candle_outcome
@@ -898,8 +931,8 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
             hit_tp1_real = (dir_v == "LONG" and (pk_v >= tp1_v or curr_v >= tp1_v)) or (dir_v == "SHORT" and (0 < tr_v <= tp1_v or 0 < curr_v <= tp1_v))
             hit_sl_real = (dir_v == "LONG" and (0 < tr_v <= sl_v or 0 < curr_v <= sl_v)) or (dir_v == "SHORT" and (pk_v >= sl_v or curr_v >= sl_v))
 
-            if (hit_tp1_real or hit_sl_real) and gen_ts:
-                # Resolve authoritatively using chronological candle sequence!
+            if (hit_tp1_real and hit_sl_real) and gen_ts:
+                # Resolve authoritatively using chronological candle sequence when both boundaries breached!
                 try:
                     from app.services.signal_service import evaluate_chronological_candle_outcome
                     res_st, res_ex, res_ret, res_pk, res_tr, res_lab = evaluate_chronological_candle_outcome(
@@ -994,14 +1027,24 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
         rr = safe_ratio(imm.get("risk_reward"), 2.0)
 
         # Invariant: Initial snapshot geometry healing
-        if d_dir == "LONG" and s0 >= e:
-            imm["sl_initial"] = round(e - (abs(t1 - e) / max(1.2, rr)), 6)
-            s0 = imm["sl_initial"]
-            modified = True
-        elif d_dir == "SHORT" and s0 <= e:
-            imm["sl_initial"] = round(e + (abs(e - t1) / max(1.2, rr)), 6)
-            s0 = imm["sl_initial"]
-            modified = True
+        if d_dir == "LONG":
+            if t1 <= e and e > 0.0:
+                imm["tp1_initial"] = round(e * 1.035, 6)
+                t1 = imm["tp1_initial"]
+                modified = True
+            if s0 >= e:
+                imm["sl_initial"] = round(e - (abs(t1 - e) / max(1.2, rr)), 6)
+                s0 = imm["sl_initial"]
+                modified = True
+        elif d_dir == "SHORT":
+            if (t1 >= e or t1 <= 0.0) and e > 0.0:
+                imm["tp1_initial"] = round(e * 0.965, 6)
+                t1 = imm["tp1_initial"]
+                modified = True
+            if s0 <= e:
+                imm["sl_initial"] = round(e + (abs(e - t1) / max(1.2, rr)), 6)
+                s0 = imm["sl_initial"]
+                modified = True
 
         # Invariant: Strict positive Net Expectancy
         ev_net_cur = safe_float(imm.get("expected_net_return"), 0.0)
@@ -1050,13 +1093,15 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
             os.makedirs(settings.EXPORT_DIR, exist_ok=True)
             immut_p = os.path.join(settings.EXPORT_DIR, "v16_immutable_signals.json")
             dyn_p = os.path.join(settings.EXPORT_DIR, "v16_dynamic_states.json")
-            with open(immut_p + ".tmp", "w", encoding="utf-8") as f:
+            tmp_imm_p = f"{immut_p}.{time.time_ns()}.tmp"
+            with open(tmp_imm_p, "w", encoding="utf-8") as f:
                 json.dump(immut_data, f, indent=2)
-            os.replace(immut_p + ".tmp", immut_p)
+            safe_atomic_replace(tmp_imm_p, immut_p)
 
-            with open(dyn_p + ".tmp", "w", encoding="utf-8") as f:
+            tmp_dyn_p = f"{dyn_p}.{time.time_ns()}.tmp"
+            with open(tmp_dyn_p, "w", encoding="utf-8") as f:
                 json.dump(dyn_data, f, indent=2)
-            os.replace(dyn_p + ".tmp", dyn_p)
+            safe_atomic_replace(tmp_dyn_p, dyn_p)
 
             # Parity Bridge: Propagate state updates directly to CSV and MySQL
             try:
@@ -1091,26 +1136,33 @@ def _get_v16_store(force_refresh: bool = False) -> tuple[Dict[str, Any], Dict[st
                                 writer = csv.DictWriter(cf, fieldnames=fnames, extrasaction="ignore")
                                 writer.writeheader()
                                 writer.writerows(csv_rows)
-                            os.replace(tmp_c, csv_path)
+                            safe_atomic_replace(tmp_c, csv_path)
 
                 from app.database import SessionLocal
                 from app.models.signal import SignalAudit
                 with SessionLocal() as db_session:
                     db_changed = False
-                    for sid, d_state in dyn_data.items():
-                        d_st = d_state.get("status")
-                        d_out = d_state.get("outcome_label")
-                        if d_st and d_st in ["EXPIRED_HORIZON", "WON", "LOST", "CANCELLED", "CLOSED", "EXPIRED_BREAKEVEN"]:
-                            sig_rec = db_session.query(SignalAudit).filter(SignalAudit.signal_id == sid).first()
-                            if sig_rec and (sig_rec.status != d_st or sig_rec.realized_return_pct is None or sig_rec.exit_price is None):
-                                sig_rec.status = d_st
-                                sig_rec.outcome_label = d_out or d_st
-                                sig_rec.evaluated_at_utc = d_state.get("updated_at_utc") or now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
-                                if sig_rec.exit_price is None:
-                                    sig_rec.exit_price = d_state.get("exit_price") or sig_rec.entry_price
-                                if sig_rec.realized_return_pct is None:
-                                    sig_rec.realized_return_pct = safe_float(d_state.get("realized_return_pct"), 0.0)
-                                db_changed = True
+                    sids_to_check = [
+                        sid for sid, d_state in dyn_data.items()
+                        if d_state.get("status") in ["EXPIRED_HORIZON", "WON", "LOST", "CANCELLED", "CLOSED", "EXPIRED_BREAKEVEN"]
+                    ]
+                    if sids_to_check:
+                        for chunk_idx in range(0, len(sids_to_check), 500):
+                            chunk = sids_to_check[chunk_idx:chunk_idx + 500]
+                            existing_recs = db_session.query(SignalAudit).filter(SignalAudit.signal_id.in_(chunk)).all()
+                            for sig_rec in existing_recs:
+                                d_state = dyn_data.get(sig_rec.signal_id, {})
+                                d_st = d_state.get("status")
+                                d_out = d_state.get("outcome_label")
+                                if d_st and (sig_rec.status != d_st or sig_rec.realized_return_pct is None or sig_rec.exit_price is None):
+                                    sig_rec.status = d_st
+                                    sig_rec.outcome_label = d_out or d_st
+                                    sig_rec.evaluated_at_utc = d_state.get("updated_at_utc") or now_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+                                    if sig_rec.exit_price is None:
+                                        sig_rec.exit_price = d_state.get("exit_price") or sig_rec.entry_price
+                                    if sig_rec.realized_return_pct is None:
+                                        sig_rec.realized_return_pct = safe_float(d_state.get("realized_return_pct"), 0.0)
+                                    db_changed = True
                     if db_changed:
                         db_session.commit()
             except Exception:

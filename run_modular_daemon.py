@@ -54,14 +54,16 @@ def get_seconds_until_next_candle(horizon: str = None, buffer_seconds: int = Non
     buf = buffer_seconds if buffer_seconds is not None else SCAN_BUFFER_SECONDS
     now = datetime.now(timezone.utc)
 
-    if h in ("5m",):
-        step_minutes = 5
-    elif h in ("15m", "scalp"):
+    if h in ("15m", "scalp"):
         step_minutes = 15
     elif h in ("1h",):
         step_minutes = 60
+    elif h in ("4h",):
+        step_minutes = 240
+    elif h in ("1d", "24h", "macro"):
+        step_minutes = 1440
     else:
-        step_minutes = 5
+        step_minutes = 15
 
     minute = now.minute
     next_minute = ((minute // step_minutes) + 1) * step_minutes
@@ -82,7 +84,7 @@ def main():
     top_n = int(os.getenv("TOP_N_UNIVERSE", os.getenv("SCANNER_TOP_N", "100")))
     print("=" * 80)
     print("🚀 QUANT EDGE MULTI-HORIZON CONTINUOUS DAEMON (V16.1)")
-    print(f"Top {top_n} Assets | 9 Charts (5M..30D) | 5 Classifiers + 5 Regressors Voting")
+    print(f"Top {top_n} Assets | Active Models: 15M, 1H, 4H, 1D | 5 Classifiers + 5 Regressors Voting")
     print("Decoupled Paper Trading Bot Active | BTC Predictive Market Beta Shield")
     print("=" * 80)
 
@@ -134,11 +136,11 @@ def main():
             import traceback
             traceback.print_exc()
 
-        # Compute exact next candle boundary sleep (5M candle close + 3s buffer)
-        sleep_secs, next_dt = get_seconds_until_next_candle("5m", buffer_seconds=3)
+        # Compute exact next candle boundary sleep (15M candle close + buffer)
+        sleep_secs, next_dt = get_seconds_until_next_candle(SCAN_PRIMARY_TRIGGER_HORIZON, buffer_seconds=SCAN_BUFFER_SECONDS)
         next_str = next_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-        print(f"[DAEMON 💤] Cycle #{cycle_count} complete. All models 100% freshly retrained.")
-        print(f"[DAEMON ⏱️] Next scan scheduled in {sleep_secs:.1f}s at {next_str} (5M candle close + 3s buffer)...")
+        print(f"[DAEMON 💤] Cycle #{cycle_count} complete. All active models (15M, 1H, 4H, 1D) 100% freshly retrained.")
+        print(f"[DAEMON ⏱️] Next scan scheduled in {sleep_secs:.1f}s at {next_str} ({SCAN_PRIMARY_TRIGGER_HORIZON.upper()} candle close + {SCAN_BUFFER_SECONDS}s buffer)...")
 
         # Interruptible sleep until exact candle boundary + periodic 15s live signal TP/SL resolution
         end_sleep_ts = time.time() + sleep_secs

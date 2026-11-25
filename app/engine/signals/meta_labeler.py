@@ -748,12 +748,36 @@ class CoinSpecificMetaLabeler:
 
         return float(np.clip(adj, -0.05, 0.08))
 
-    IS_ACTIVE: bool = False  # Pure Signal Architecture: Secondary meta-labeler retired
+    IS_ACTIVE: bool = True  # Strategy-Prior & Calibrated Probability Gate Active
+    _STRATEGY_PRIORS_CACHE: Optional[Dict[str, Any]] = None
+    _PRIORS_LOCK = threading.Lock()
+
+    @classmethod
+    def _get_strategy_priors(cls) -> Dict[str, Any]:
+        if cls._STRATEGY_PRIORS_CACHE is not None:
+            return cls._STRATEGY_PRIORS_CACHE
+        with cls._PRIORS_LOCK:
+            if cls._STRATEGY_PRIORS_CACHE is not None:
+                return cls._STRATEGY_PRIORS_CACHE
+            priors_path = os.path.join(os.path.dirname(MODELS_DIR), "export_app_data", "v16_strategy_priors.json")
+            if not os.path.exists(priors_path):
+                priors_path = os.path.join("export_app_data", "v16_strategy_priors.json")
+            try:
+                if os.path.exists(priors_path):
+                    import json
+                    with open(priors_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        cls._STRATEGY_PRIORS_CACHE = data.get("strategies", {}) if isinstance(data, dict) else {}
+                        return cls._STRATEGY_PRIORS_CACHE
+            except Exception:
+                pass
+            cls._STRATEGY_PRIORS_CACHE = {}
+            return cls._STRATEGY_PRIORS_CACHE
 
     def evaluate_signal(self, symbol: str, signal_data: Dict[str, Any], hurdle: float = 0.50) -> Dict[str, Any]:
         """
-        Pure Signal Architecture: Secondary meta-labeler ML model is retired.
-        Derives probability directly from primary ensemble signal metrics without secondary filtering.
+        Evaluates signal quality using Primary Ensemble Probability + Empirical Strategy Priors.
+        Filters out negative-profit-factor strategies and applies conservative hurdles to marginal priors.
         """
         from app.engine.config import PROBABILITY_CALIBRATION_MODE
         effective_hurdle = hurdle
@@ -776,8 +800,25 @@ class CoinSpecificMetaLabeler:
         conv = float(signal_data.get("conviction", 65.0) or 65.0)
         prob = float(signal_data.get("win_probability") or signal_data.get("consensus_probability") or (conv / 100.0))
         prob = float(np.clip(prob, 0.15, 0.95))
+
+        # Empirical Strategy Prior Gate (Zero-I/O in-memory lookup)
+        strat_key = str(signal_data.get("canonical_strategy") or signal_data.get("strategy") or "").upper()
+        priors = self._get_strategy_priors()
+        strat_prior = priors.get(strat_key) if strat_key else None
         passed = True
         verdict = "APPROVED"
+        if strat_prior and int(strat_prior.get("resolved_count", 0) or 0) >= 30:
+            pf = float(strat_prior.get("profit_factor", 1.2) or 1.2)
+            if pf < 1.00:
+                passed = False
+                verdict = "REJECTED_NEGATIVE_PRIOR_PF"
+            elif pf < 1.15:
+                prob = float(np.clip(prob - 0.03, 0.15, 0.95))
+                effective_hurdle = max(effective_hurdle, 0.54)
+
+        if passed and prob < effective_hurdle:
+            passed = False
+            verdict = "REJECTED_BELOW_PROB_HURDLE"
 
         return {
             "symbol": symbol,

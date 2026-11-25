@@ -34,9 +34,9 @@ TIMEFRAMES_9 = [
     "1M"    # 30 Days / 1 Month (Retired from active ML models)
 ]
 
-# Active ML & Microstructure Modeling Timeframes (Week and Month models completely retired)
-ACTIVE_MODEL_TIMEFRAMES = ["15m", "1h", "4h", "5m", "1m", "12h", "1d"]
-RETIRED_MACRO_TIMEFRAMES = ["1w", "15d", "1M"]
+# Active ML & Microstructure Modeling Timeframes (User Mandate: Strictly 15M, 1H, 4H, and 1D; all others retired)
+ACTIVE_MODEL_TIMEFRAMES = ["15m", "1h", "4h", "1d"]
+RETIRED_MACRO_TIMEFRAMES = ["5m", "12h", "1w", "15d", "1M", "1m"]
 
 # Timeframe metadata: native Binance interval strings vs resampling requirements
 TIMEFRAME_META = {
@@ -530,6 +530,56 @@ PROBABILITY_CALIBRATION_MODE = os.getenv("PROBABILITY_CALIBRATION_MODE", "SAEREN
 #   "TIER0_ATR_TRAILING_BUFFER" -> Policy E: Tier-0 Guard + 0.8x ATR trailing buffer after TP1
 # Default: "PRODUCTION_TIER0_BE" (Strict backward compatibility)
 TRADE_MANAGEMENT_POLICY = os.getenv("TRADE_MANAGEMENT_POLICY", "PRODUCTION_TIER0_BE").strip().upper()
+
+
+# ==============================================================================
+# ATOMIC FILE OPERATIONS & SAFE SERIALIZATION GUARDS
+# ==============================================================================
+def safe_atomic_replace(src: str, dst: str, max_retries: int = 5, backoff_base: float = 0.02) -> None:
+    """
+    Robust atomic file replacement that handles transient Windows PermissionError (WinError 5/32)
+    and cross-process file locks with exponential backoff and reliable copy fallback.
+    """
+    import shutil
+    import time
+    for attempt in range(max_retries):
+        try:
+            os.replace(src, dst)
+            return
+        except (PermissionError, OSError):
+            if attempt == max_retries - 1:
+                try:
+                    shutil.copyfile(src, dst)
+                    if os.path.exists(src):
+                        try:
+                            os.remove(src)
+                        except Exception:
+                            pass
+                    return
+                except Exception:
+                    raise
+            time.sleep(backoff_base * (attempt + 1))
+
+
+def safe_load_json(file_path: str, default: Any = None) -> Any:
+    """
+    Safely reads JSON from disk, guarding against empty files (0 bytes), incomplete writes,
+    or non-existent paths, returning `default` without throwing unhandled exceptions.
+    """
+    import json
+    if not os.path.exists(file_path):
+        return default if default is not None else {}
+    try:
+        if os.path.getsize(file_path) == 0:
+            return default if default is not None else {}
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if not content or len(content) < 2:
+                return default if default is not None else {}
+            return json.loads(content)
+    except Exception:
+        return default if default is not None else {}
+
 
 
 

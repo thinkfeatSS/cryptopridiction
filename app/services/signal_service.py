@@ -1460,11 +1460,11 @@ class SignalService:
                                     updated = True
 
                     # Stage 2: Tier-0 Breakeven Ratchet (Lock in fees + small profit at +0.75% or 35% of TP1 distance)
-                    effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
+                    effective_t0_gate = 0.30 if is_news_shock_active else min(1.00, max(0.50, 0.40 * tp1_dist))
                     if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
                         s.status = "TIER0_PROTECTED_BREAKEVEN"
-                        soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)
-                        s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
+                        be_offset = entry_p * (0.0010 if direction == "LONG" else -0.0010)
+                        s.sl_price = round(max(sl_p, entry_p + be_offset) if direction == "LONG" else min(sl_p, entry_p + be_offset), 6)
                         sl_p = s.sl_price
                         s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
                         updated = True
@@ -1969,11 +1969,12 @@ class SignalService:
                                 sl_p = target_half_sl
                                 updated = True
 
-                effective_t0_gate = 0.30 if is_news_shock_active else min(0.75, max(0.50, 0.35 * tp1_dist))
+                effective_t0_gate = 0.30 if is_news_shock_active else min(1.00, max(0.50, 0.40 * tp1_dist))
                 if max_gain >= effective_t0_gate and s.status not in ["TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL", "TIER0_PROTECTED_BREAKEVEN"] and not is_hit_sl:
                     s.status = "TIER0_PROTECTED_BREAKEVEN"
-                    soft_be_p = (entry_p * 1.0005) if direction == "LONG" else (entry_p * 0.9995)
-                    s.sl_price = round(max(sl_p, soft_be_p) if direction == "LONG" else min(sl_p, soft_be_p), 6)
+                    # Set soft breakeven above entry to lock in risk-free state
+                    be_offset = entry_p * (0.0010 if direction == "LONG" else -0.0010)
+                    s.sl_price = round(max(sl_p, entry_p + be_offset) if direction == "LONG" else min(sl_p, entry_p + be_offset), 6)
                     sl_p = s.sl_price
                     s.outcome_label = "🛡️ PROFIT PROTECTED (SOFT BE)"
                     updated = True

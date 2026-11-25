@@ -1822,7 +1822,12 @@ class MultiHorizonDataLoader:
         with self._depth_lock:
             if raw_sym in self._top5_depth_cache:
                 cached_data, cached_ts = self._top5_depth_cache[raw_sym]
-                if (now - cached_ts) < max_age_seconds:
+                # Dynamic WebSocket Disconnect Bridge: During WebSocket reconnection or mirror failover,
+                # extend Level-5 depth cache TTL up to 15.0s (matching the 15s price freshness SLA)
+                # to guarantee uninterrupted real-time order book depth confirmation
+                is_ws_unhealthy = bool(self.ws_feed is not None and not self.ws_feed.is_healthy())
+                effective_depth_ttl = 15.0 if is_ws_unhealthy else max_age_seconds
+                if (now - cached_ts) < effective_depth_ttl:
                     return cached_data
 
         depth_result = self._fetch_raw_depth_from_exchanges(raw_sym)

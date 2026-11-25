@@ -12,10 +12,10 @@ from typing import Dict, Any, List, Optional, Tuple
 logger = logging.getLogger("paper_trading_bot")
 
 from app.config import settings
-from app.engine.config import EXPORT_DIR, is_meme_coin
+from app.engine.config import EXPORT_DIR, is_meme_coin, safe_atomic_replace, safe_load_json
 from app.engine.scanner.filters import UniverseFilter
 from app.quant_v16.entry_confirmation import format_dynamic_precision, EntryConfirmationEngine
-from app.quant_v16.validation import safe_ratio
+from app.quant_v16.validation import safe_ratio, safe_float
 from app.quant_v16.audit import calculate_trailing_stop_evolution
 
 class PaperTradingBot:
@@ -41,6 +41,7 @@ class PaperTradingBot:
         else:
             self.ledger_file = os.path.join(EXPORT_DIR, "paper_trading_ledger.json")
         self.taker_fee_rate = 0.000405 # 0.045% with 10% BNB discount
+        self.maker_fee_rate = 0.000180 # 0.020% base - 10% BNB discount (0.018%)
         self.enable_signal_expiry: bool = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
         self.enable_breakeven_guard: bool = getattr(settings, "ENABLE_BREAKEVEN_GUARD", False) or (os.getenv("ENABLE_BREAKEVEN_GUARD", "false").lower() in ("true", "1", "yes"))
         self.blackout_ceiling_ms: float = float(os.getenv("BLACKOUT_CEILING_MS", "8000.0"))
@@ -52,7 +53,7 @@ class PaperTradingBot:
         self.data = self._load_or_initialize()
 
     def _load_or_initialize(self) -> Dict[str, Any]:
-        if os.path.exists(self.ledger_file):
+        if os.path.exists(self.ledger_file) and os.path.getsize(self.ledger_file) > 0:
             try:
                 with open(self.ledger_file, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
@@ -215,7 +216,7 @@ class PaperTradingBot:
                 self.data["last_updated_utc"] = datetime.now(timezone.utc).isoformat()
                 with open(temp, "w", encoding="utf-8") as f:
                     json.dump(self.data, f, indent=2)
-                os.replace(temp, self.ledger_file)
+                safe_atomic_replace(temp, self.ledger_file)
             except Exception as e:
                 print(f"[PAPER BOT ERROR] Failed saving ledger: {e}")
             finally:
@@ -345,19 +346,56 @@ class PaperTradingBot:
             # Previous trade was profitable or breakeven -> No whipsaw chop stop-out risk
             return True, "PRIOR_TRADE_NOT_SL"
 
-        # Check recency (e.g. closed within last 8 candles / 2 hours for 15M)
+        prev_dir = str(recent_trade.get("direction", "LONG")).upper()
+        clean_prev_dir = "SHORT" if "SHORT" in prev_dir or "BEAR" in prev_dir else "LONG"
+
+        # Count consecutive stop losses in the same direction on this symbol in the last 12h
+        consecutive_dir_sls = 0
+        for t in reversed(closed_trades):
+            t_sym = str(t.get("symbol", "")).replace("/", "").replace("-", "").replace(":USDT", "").upper()
+            if t_sym == sym_clean:
+                t_out = str(t.get("outcome", "")).upper()
+                t_aud = str(t.get("audit_status", "")).upper()
+                t_ex = str(t.get("exit_reason", "")).upper()
+                t_is_sl = "LOST" in t_out or "SL_HIT" in t_out or "LOST" in t_aud or "STOP_LOSS" in t_ex
+                t_dir = "SHORT" if "SHORT" in str(t.get("direction", "")).upper() or "BEAR" in str(t.get("direction", "")).upper() else "LONG"
+                if t_dir == clean_curr_dir:
+                    if t_is_sl:
+                        t_closed = t.get("closed_at_utc") or t.get("closed_at")
+                        t_age = 0.0
+                        if t_closed:
+                            try:
+                                t_dt = datetime.fromisoformat(str(t_closed).replace("Z", "+00:00"))
+                                if t_dt.tzinfo is None:
+                                    t_dt = t_dt.replace(tzinfo=timezone.utc)
+                                t_age = (datetime.now(timezone.utc) - t_dt).total_seconds()
+                            except Exception:
+                                t_age = 0.0
+                        if t_age <= 43200.0:
+                            consecutive_dir_sls += 1
+                        else:
+                            break
+                    else:
+                        break  # Streak broken by win or breakeven
+
+        # Rule 1: Persistent Directional Drawdown Quarantine (>= 2 consecutive SLs in same direction)
+        if consecutive_dir_sls >= 2:
+            return False, f"Persistent directional drawdown quarantine: {sym_clean} suffered {consecutive_dir_sls} consecutive {clean_curr_dir} stop-losses in last 12h. Directional quarantine active."
+
+        # Check recency of the most recent SL (4 hours / 14,400s cooldown window)
         closed_at = recent_trade.get("closed_at_utc") or recent_trade.get("closed_at")
+        age_secs = 0.0
         if closed_at:
             try:
                 c_dt = datetime.fromisoformat(str(closed_at).replace("Z", "+00:00"))
                 if c_dt.tzinfo is None:
                     c_dt = c_dt.replace(tzinfo=timezone.utc)
                 age_secs = (datetime.now(timezone.utc) - c_dt).total_seconds()
-                # If the stop loss happened more than 2 hours ago (8 x 15M bars), market cycle has evolved
-                if age_secs > 7200:
-                    return True, "PRIOR_SL_OUTSIDE_WHIPSAW_WINDOW"
             except Exception:
-                pass
+                age_secs = 0.0
+
+        if age_secs > 14400.0:
+            return True, "PRIOR_SL_OUTSIDE_WHIPSAW_WINDOW"
 
         # 2. Determine active market regime
         regime = "RANGE"
@@ -376,35 +414,33 @@ class PaperTradingBot:
             or (chop_val > 52.0)
         )
 
-        prev_dir = str(recent_trade.get("direction", "LONG")).upper()
-        clean_prev_dir = "SHORT" if "SHORT" in prev_dir or "BEAR" in prev_dir else "LONG"
+        # Rule 2: Same-Direction Retrigger Guard across ALL Regimes
+        if clean_curr_dir == clean_prev_dir:
+            prev_exit_p = float(recent_trade.get("exit_price") or 0.0)
+            curr_entry_p = float(signal.get("entry_price") or signal.get("current_price") or 0.0)
+            if prev_exit_p > 0 and curr_entry_p > 0:
+                if clean_curr_dir == "LONG" and curr_entry_p <= prev_exit_p * 1.002:
+                    return False, f"Falling knife defense: Repeated LONG on {sym_clean} at {curr_entry_p:.6g} <= previous SL exit {prev_exit_p:.6g} within 4h cooldown ({age_secs/60:.0f}m ago)"
+                elif clean_curr_dir == "SHORT" and curr_entry_p >= prev_exit_p * 0.998:
+                    return False, f"Fading rocket defense: Repeated SHORT on {sym_clean} at {curr_entry_p:.6g} >= previous SL exit {prev_exit_p:.6g} within 4h cooldown ({age_secs/60:.0f}m ago)"
 
-        if is_chop_regime:
-            # Condition A: Conflicting Breakout (Direction Flip) in Chop
-            if clean_curr_dir != clean_prev_dir:
-                # In chop, opposite breakout after SL is classic whipsaw trap (false range breakout)
-                # Admitted ONLY if physical institutional breakout expansion is proven
-                has_strong_displacement = bool(
-                    signal.get("is_structural_bos")
-                    or signal.get("candle_trigger_confirmed")
-                    or adx_val >= 25.0
-                    or float(signal.get("volume_ratio", 1.0) or 1.0) >= 1.50
-                )
-                if not has_strong_displacement:
-                    return False, f"Conflicting {clean_curr_dir} breakout vetoed in {regime} regime after recent {clean_prev_dir} SL (whipsaw defense)"
+            # Re-entry after an SL in same direction requires a verified Elite Anchor
+            has_reclaim_anchor = bool(
+                signal.get("is_nested_smc") or
+                int(signal.get("zeiierman_rank") or 99) <= 2
+            )
+            if not has_reclaim_anchor:
+                return False, f"Consecutive loss cooldown: Repeated {clean_curr_dir} on {sym_clean} within 4h ({age_secs/60:.0f}m ago) requires Rank 1-2 Nested SMC reclaim anchor"
 
-            # Condition B: Same-Direction Retrigger in Chop
-            else:
-                # Same-direction re-entry in chop must establish structural Higher Low / Lower High anchor
-                prev_exit_p = float(recent_trade.get("exit_price") or 0.0)
-                curr_entry_p = float(signal.get("entry_price") or signal.get("current_price") or 0.0)
-                if prev_exit_p > 0 and curr_entry_p > 0:
-                    if clean_curr_dir == "LONG" and curr_entry_p <= prev_exit_p * 0.995:
-                        if not signal.get("is_order_block_signal") and not signal.get("candle_trigger_confirmed"):
-                            return False, f"Repeated LONG re-entry in {regime} without structural support anchor"
-                    elif clean_curr_dir == "SHORT" and curr_entry_p >= prev_exit_p * 1.005:
-                        if not signal.get("is_order_block_signal") and not signal.get("candle_trigger_confirmed"):
-                            return False, f"Repeated SHORT re-entry in {regime} without structural resistance anchor"
+        # Rule 3: Conflicting Breakout (Direction Flip) in Chop
+        elif is_chop_regime:
+            has_strong_displacement = bool(
+                signal.get("is_structural_bos")
+                or adx_val >= 25.0
+                or float(signal.get("volume_ratio", 1.0) or 1.0) >= 1.50
+            )
+            if not has_strong_displacement:
+                return False, f"Conflicting {clean_curr_dir} breakout vetoed in {regime} regime after recent {clean_prev_dir} SL (whipsaw defense)"
 
         return True, "PASS_ANTI_WHIPSAW"
 
@@ -638,7 +674,12 @@ class PaperTradingBot:
                             signal.get("order_block_setup") or
                             signal.get("candle_trigger_confirmed") or
                             any(k in str(signal.get("canonical_strategy") or signal.get("strategy") or "").upper()
-                                for k in ["COILING", "SQUEEZE", "BREAKOUT", "ORDER_BLOCK", "REVERSAL", "TURTLE_SOUP", "FVG"])
+                                for k in [
+                                    "COILING", "SQUEEZE", "BREAKOUT", "ORDER_BLOCK", "REVERSAL",
+                                    "TURTLE_SOUP", "FVG", "BREAKER", "ROTATION", "RANGE ROTATION",
+                                    "RECLAIM", "LIQUIDITY_RECLAIM", "VWAP", "ZEIIERMAN", "SMC",
+                                    "UNANIMOUS", "ALIGNMENT", "EXPANSION"
+                                ])
                         )
                         if is_boundary_harvest and allow_boundary:
                             max_slots = int(desk.get("max_slots", 50))
@@ -677,7 +718,16 @@ class PaperTradingBot:
                 r_gain = abs(tp_p - e_p) / e_p
                 r_loss = abs(e_p - sl_p) / e_p
                 gross_ev = (win_p * r_gain) - ((1.0 - win_p) * r_loss)
-                friction = 0.0015  # 0.15% round-trip taker fees + slippage
+                # Dynamic Friction Accounting:
+                # Use signal's authoritative costs_total_pct or dynamically compute from spread and liquidity
+                costs_total_raw = signal.get("costs_total_pct")
+                if costs_total_raw is not None and float(costs_total_raw) > 0.0:
+                    friction = float(costs_total_raw) / 100.0
+                else:
+                    spread_val = float(signal.get("spread_bps") or signal.get("effective_spread_bps") or 5.0)
+                    v_24h_val = float(signal.get("volume_24h_usd") or signal.get("volume_24h") or 0.0)
+                    fee_cushion = 0.00015 if (0 < v_24h_val < 25_000_000.0) else 0.0
+                    friction = (2.0 * self.taker_fee_rate) + (max(1.0, spread_val) / 10000.0) + fee_cushion
                 ev_net = round((gross_ev - friction) * 100.0, 2)
             else:
                 raw_ev = signal.get("ev_net") or signal.get("expected_net_return") or signal.get("expected_return_pct") or 0.0
@@ -718,10 +768,27 @@ class PaperTradingBot:
             sig_ev_val = float(sig_ev_raw) if (sig_ev_raw is not None and not (isinstance(sig_ev_raw, float) and math.isnan(sig_ev_raw))) else None
             effective_gate_ev = min(ev_net, sig_ev_val) if sig_ev_val is not None else ev_net
 
-            # Institutional Macro Structural Setups (Directional Breakout Expansion & Range Rotation) & Grade A
-            is_macro_structural_setup = any(k in str(quality_grade).upper() for k in ["DIRECTIONAL BREAKOUT EXPANSION", "RANGE ROTATION"])
+            # Institutional Macro Structural Setups & Proven Winning Playbooks
+            is_macro_structural_setup = any(k in str(quality_grade).upper() for k in [
+                "DIRECTIONAL BREAKOUT EXPANSION", "RANGE ROTATION", "COILING BREAKOUT",
+                "BREAKER_BLOCK", "BREAKER", "ORDER_BLOCK", "ZEIIERMAN", "SMC",
+                "LIQUIDITY_RECLAIM", "VWAP_BOUNCE", "RANGE_RESISTANCE_REJECTION",
+                "RANGE_SUPPORT", "UNANIMOUS", "STRICT", "ALIGNMENT"
+            ]) or bool(signal.get("is_order_block_signal"))
             if is_macro_structural_setup or "GRADE A" in quality_grade.upper() or "A+" in quality_grade.upper():
                 min_desk_ev = 0.00
+
+            # Fee Spike & Basis Volatility Protection:
+            # If Net EV is marginal (0.00% <= EVnet < 0.05%), prioritize resting limit maker fill
+            # to capture maker discount and eliminate taker spread crossing.
+            # If taker fees or spreads rapidly expand beyond typical bounds on low-liquidity pairs, fail closed immediately.
+            if 0.0 <= effective_gate_ev < 0.05:
+                if spread_bps > 15.0 or (0 < v_24h < 10_000_000.0 and spread_bps > 10.0):
+                    print(f"[PAPER BOT 🛑 SPREAD/FEE SPIKE GUARD] Blocked entry for {symbol}: Marginal EVnet ({effective_gate_ev:.2f}%) on low-liquidity pair (spread: {spread_bps:.1f} bps, vol: ${v_24h/1e6:.1f}M) degraded to negative EVnet. Failing closed as intended.")
+                    return False
+                signal["is_passive_limit"] = True
+                if not signal.get("entry_mode"):
+                    signal["entry_mode"] = "RESTING_LIMIT"
 
             if effective_gate_ev < min_desk_ev:
                 print(f"[PAPER BOT [QUALITY GATE]] Rejected for {symbol}: Requires EVnet >= {min_desk_ev:.2f}% (got {effective_gate_ev:.2f}%)")
@@ -853,9 +920,8 @@ class PaperTradingBot:
             leverage = int(desk.get("leverage", 3))
             position_size_usd = allocated_margin * leverage
             position_units = position_size_usd / entry_p
-            buy_fee = position_size_usd * self.taker_fee_rate
-
-            is_limit_pending = bool(signal.get("is_limit_pending", False))
+            is_limit_pending = bool(signal.get("is_limit_pending", False) or signal.get("is_passive_limit", False) or signal.get("entry_mode") == "RESTING_LIMIT")
+            buy_fee = position_size_usd * (self.maker_fee_rate if is_limit_pending else self.taker_fee_rate)
             optimal_limit = float(signal.get("optimal_entry_limit") or entry_p)
             entry_zone_min = float(signal.get("entry_zone_min") or min(entry_p, optimal_limit))
             entry_zone_max = float(signal.get("entry_zone_max") or max(entry_p, optimal_limit))
@@ -2237,11 +2303,12 @@ class PaperTradingBot:
                             if target_half_sl < float(pos.get("sl_price", 1e9)) and target_half_sl > entry_p:
                                 pos["sl_price"] = format_dynamic_precision(target_half_sl)
 
-                effective_t0_thresh = min(float(pos.get("tier0_threshold_pct", 0.75)), max(0.50, 0.35 * tp1_dist))
+                effective_t0_thresh = min(float(pos.get("tier0_threshold_pct", 1.00)), max(0.50, 0.40 * tp1_dist))
 
                 if getattr(self, "enable_breakeven_guard", False) and not pos.get("is_breakeven_locked") and not pos.get("tp1_hit") and not pos.get("tp2_hit") and (tp1_proximity_reached or pos["peak_gain_pct"] >= effective_t0_thresh):
                     pos["is_breakeven_locked"] = True
-                    pos["sl_price"] = format_dynamic_precision(entry_p * (1.0005 if direction == "LONG" else 0.9995))
+                    # Set soft breakeven with a tiny positive cushion to cover exchange taker fees
+                    pos["sl_price"] = format_dynamic_precision(entry_p * (1.0010 if direction == "LONG" else 0.9990))
                     self._update_position_trailing_evolution(pos, curr_p)
                     try:
                         print(f"[PAPER BOT 🛡️] Tier-0 Breakeven Ratchet Activated for {sym}! Stop-loss locked at Entry.")
@@ -3013,7 +3080,7 @@ class PaperTradingBot:
                         writer = csv.DictWriter(f, fieldnames=fieldnames)
                         writer.writeheader()
                         writer.writerows(updated_rows)
-                    os.replace(tmp_f, csv_path)
+                    safe_atomic_replace(tmp_f, csv_path)
 
             # 2. Update MySQL Database directly
             try:
@@ -3090,10 +3157,10 @@ class PaperTradingBot:
                         tmp_dp = f"{dyn_path}.tmp.{time.time_ns()}"
                         with open(tmp_dp, "w", encoding="utf-8") as df:
                             json.dump(dyn_data, df, indent=2)
-                        os.replace(tmp_dp, dyn_path)
+                        safe_atomic_replace(tmp_dp, dyn_path)
 
                 imm_path = os.path.join(EXPORT_DIR, "v16_immutable_signals.json")
-                if os.path.exists(imm_path):
+                if os.path.exists(imm_path) and os.path.getsize(imm_path) > 0:
                     with open(imm_path, "r", encoding="utf-8") as imf:
                         imm_data = json.load(imf)
                     imm_k = target_k if target_k in imm_data else None
@@ -3107,7 +3174,7 @@ class PaperTradingBot:
                         tmp_im = f"{imm_path}.tmp.{time.time_ns()}"
                         with open(tmp_im, "w", encoding="utf-8") as imf:
                             json.dump(imm_data, imf, indent=2)
-                        os.replace(tmp_im, imm_path)
+                        safe_atomic_replace(tmp_im, imm_path)
             except Exception:
                 pass
         except Exception as err:
@@ -3307,7 +3374,7 @@ class PaperTradingBot:
                         writer = csv.DictWriter(f, fieldnames=fieldnames)
                         writer.writeheader()
                         writer.writerows(updated_rows)
-                    os.replace(tmp_f, csv_path)
+                    safe_atomic_replace(tmp_f, csv_path)
 
             # 2. Update MySQL Database directly
             try:
@@ -3387,10 +3454,10 @@ class PaperTradingBot:
                         tmp_dp = f"{dyn_path}.tmp.{time.time_ns()}"
                         with open(tmp_dp, "w", encoding="utf-8") as df:
                             json.dump(dyn_data, df, indent=2)
-                        os.replace(tmp_dp, dyn_path)
+                        safe_atomic_replace(tmp_dp, dyn_path)
 
                 imm_path = os.path.join(EXPORT_DIR, "v16_immutable_signals.json")
-                if os.path.exists(imm_path):
+                if os.path.exists(imm_path) and os.path.getsize(imm_path) > 0:
                     with open(imm_path, "r", encoding="utf-8") as imf:
                         imm_data = json.load(imf)
                     imm_k = target_k if target_k in imm_data else None
@@ -3404,7 +3471,7 @@ class PaperTradingBot:
                         tmp_im = f"{imm_path}.tmp.{time.time_ns()}"
                         with open(tmp_im, "w", encoding="utf-8") as imf:
                             json.dump(imm_data, imf, indent=2)
-                        os.replace(tmp_im, imm_path)
+                        safe_atomic_replace(tmp_im, imm_path)
             except Exception:
                 pass
 
@@ -3510,7 +3577,7 @@ class PaperTradingBot:
                         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
                         writer.writeheader()
                         writer.writerows(updated_rows)
-                    os.replace(tmp_f, csv_path)
+                    safe_atomic_replace(tmp_f, csv_path)
 
             # 2. Update MySQL Database directly
             try:
@@ -3570,10 +3637,10 @@ class PaperTradingBot:
                         tmp_dp = f"{dyn_path}.tmp.{time.time_ns()}"
                         with open(tmp_dp, "w", encoding="utf-8") as df:
                             json.dump(dyn_data, df, indent=2)
-                        os.replace(tmp_dp, dyn_path)
+                        safe_atomic_replace(tmp_dp, dyn_path)
 
                 imm_path = os.path.join(EXPORT_DIR, "v16_immutable_signals.json")
-                if os.path.exists(imm_path):
+                if os.path.exists(imm_path) and os.path.getsize(imm_path) > 0:
                     with open(imm_path, "r", encoding="utf-8") as imf:
                         imm_data = json.load(imf)
                     imm_k = target_k if target_k in imm_data else None
@@ -3587,7 +3654,7 @@ class PaperTradingBot:
                         tmp_im = f"{imm_path}.tmp.{time.time_ns()}"
                         with open(tmp_im, "w", encoding="utf-8") as imf:
                             json.dump(imm_data, imf, indent=2)
-                        os.replace(tmp_im, imm_path)
+                        safe_atomic_replace(tmp_im, imm_path)
             except Exception:
                 pass
 

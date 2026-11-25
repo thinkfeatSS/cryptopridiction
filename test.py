@@ -347,8 +347,7 @@ CONFIG = {
         "QNT/USDT", "IMX/USDT", "KAS/USDT", "ZEC/USDT", "GTC/USDT"
     ],
     "timeframes": ["1d", "4h", "1h", "15m"],
-    # Targeted Institutional High-Edge Horizons: 15M (Scalp), 1H (Day Trade), 24H (Swing Trade)
-    # Note: 4H Day Trade horizon disabled due to empirical -22.67% PnL drag (wide stops with mid-range chop)
+    # Targeted Institutional High-Edge Horizons: 15M (Scalp), 1H (Day Trade), 4H (Swing Anchor), 24H (Swing Trade)
     "horizons": {
         "scalp": {
             "name": "⚡ Scalp (15M)",
@@ -363,6 +362,14 @@ CONFIG = {
             "anchor_tf": "1h",
             "bars": 6,
             "duration_label": "1-8 Hours Day Trade",
+            "tp_mult": 2.5,
+            "sl_mult": 1.2
+        },
+        "intermediate": {
+            "name": "⏳ Swing Anchor (4H)",
+            "anchor_tf": "4h",
+            "bars": 4,
+            "duration_label": "4-16 Hours Swing Anchor",
             "tp_mult": 2.5,
             "sl_mult": 1.2
         },
@@ -418,7 +425,7 @@ CONFIG = {
                 "max_hold_seconds": 172800  # 48-Hour Maximum Hold for 1D Swings
             }
         },
-        "allowed_horizons": ["15m", "30m", "1h", "24h", "1d", "15M", "30M", "1H", "24H", "1D", "scalp", "intraday", "day_trade", "swing", "macro"],
+        "allowed_horizons": ["15m", "30m", "1h", "4h", "24h", "1d", "15M", "30M", "1H", "4H", "24H", "1D", "scalp", "intraday", "day_trade", "intermediate", "swing", "macro"],
         "min_expected_return_pct": 0.30,    # Minimum expected return hurdle: >= 0.30%
         "min_net_profit_usd": 0.15,         # Minimum $0.15 net profit target per trade
         "min_meta_probability": 0.55,       # ML secondary meta-labeling win probability hurdle (>=55%)

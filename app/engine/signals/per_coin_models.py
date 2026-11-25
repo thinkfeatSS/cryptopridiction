@@ -18,7 +18,7 @@ warnings.filterwarnings("ignore", message=".*InconsistentVersionWarning.*")
 warnings.filterwarnings("ignore", message=".*Trying to unpickle estimator.*")
 warnings.filterwarnings("ignore", message=".*If you are loading a serialized model.*")
 
-from app.engine.config import MODELS_DIR
+from app.engine.config import MODELS_DIR, ACTIVE_MODEL_TIMEFRAMES, RETIRED_MACRO_TIMEFRAMES
 from .ensemble_classifier import FiveModelDirectionClassifier
 from .ensemble_regressor import FiveModelPriceRegressor
 
@@ -105,8 +105,14 @@ class PerCoinModelRegistry:
                         warnings.simplefilter("ignore")
                         cached_dict = joblib.load(self.consolidated_cache_path)
                     if isinstance(cached_dict, dict) and len(cached_dict) > 0:
+                        # User Mandate: Retain strictly active models (15M, 1H, 4H, 1D); strip retired timeframes
+                        filtered_dict = {
+                            k: v for k, v in cached_dict.items()
+                            if not any(k.endswith(f"_{ret_tf}") for ret_tf in RETIRED_MACRO_TIMEFRAMES)
+                            and (not ACTIVE_MODEL_TIMEFRAMES or any(k.endswith(f"_{act_tf}") for act_tf in ACTIVE_MODEL_TIMEFRAMES))
+                        }
                         with self._lock:
-                            self._cache.update(cached_dict)
+                            self._cache.update(filtered_dict)
                         loaded_count = len(self._cache)
                         consolidated_loaded = True
                 except Exception:
@@ -121,6 +127,9 @@ class PerCoinModelRegistry:
                 for f in os.listdir(coin_path):
                     if f.startswith("models_") and f.endswith(".joblib"):
                         tf = f.replace("models_", "").replace(".joblib", "")
+                        # Scan strictly for active models (15M, 1H, 4H, 1D); bypass retired models
+                        if tf in RETIRED_MACRO_TIMEFRAMES or (ACTIVE_MODEL_TIMEFRAMES and tf not in ACTIVE_MODEL_TIMEFRAMES):
+                            continue
                         cache_key = f"{coin_name}_{tf}"
                         full_path = os.path.join(coin_path, f)
                         if not consolidated_loaded or cache_key not in self._cache:

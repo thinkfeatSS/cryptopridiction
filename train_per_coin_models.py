@@ -26,7 +26,7 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-from app.engine.config import TIMEFRAMES_9, MODELS_DIR, TRAINING_CANDLE_LIMITS, TOP_N_UNIVERSE
+from app.engine.config import TIMEFRAMES_9, MODELS_DIR, TRAINING_CANDLE_LIMITS, TOP_N_UNIVERSE, ACTIVE_MODEL_TIMEFRAMES, RETIRED_MACRO_TIMEFRAMES
 from app.engine.scanner.horizon_scanner import MultiHorizonScanner
 from app.engine.signals.candle_features import CandleDynamicsFeatureExtractor
 from app.engine.signals.per_coin_models import PerCoinModelRegistry
@@ -52,8 +52,8 @@ def run_per_coin_training(limit_assets: int = TOP_N_UNIVERSE) -> Dict[str, Any]:
     target_coins = list(assets.items())[:limit_assets]
     print(f"  ✓ Ingested {len(target_coins)} coin charts for dedicated training.\n")
 
-    # Step 2: Train Classifiers and Regressors Separately for Each Coin
-    print(f"[STEP 2/3] Fitting 5 Classifiers + 5 Regressors separately for {len(target_coins)} coins across 9 timeframes...")
+    # Step 2: Train Classifiers and Regressors Separately for Each Coin (Strictly Active Models: 15M, 1H, 4H, 1D)
+    print(f"[STEP 2/3] Fitting 5 Classifiers + 5 Regressors separately for {len(target_coins)} coins across {len(ACTIVE_MODEL_TIMEFRAMES)} active timeframes ({', '.join(ACTIVE_MODEL_TIMEFRAMES)})...")
     import numpy as np
 
     trained_coins_summary = []
@@ -65,7 +65,9 @@ def run_per_coin_training(limit_assets: int = TOP_N_UNIVERSE) -> Dict[str, Any]:
         t_start_coin = time.time()
 
         trained_tfs = []
-        for tf in TIMEFRAMES_9:
+        for tf in ACTIVE_MODEL_TIMEFRAMES:
+            if tf in RETIRED_MACRO_TIMEFRAMES:
+                continue
             df_tf = dfs_9.get(tf)
             n_raw = len(df_tf) if df_tf is not None else 0
 
@@ -156,7 +158,7 @@ def run_per_coin_training(limit_assets: int = TOP_N_UNIVERSE) -> Dict[str, Any]:
             "timeframes_list": trained_tfs,
             "elapsed_s": elapsed_coin
         })
-        print(f"  [{idx:>2}/{len(target_coins)}] {sym:<12} -> Trained {len(trained_tfs)}/9 Timeframes in {elapsed_coin}s (Dir: models_export_v3/per_coin/{clean_sym}/)")
+        print(f"  [{idx:>2}/{len(target_coins)}] {sym:<12} -> Trained {len(trained_tfs)}/{len(ACTIVE_MODEL_TIMEFRAMES)} Active Timeframes in {elapsed_coin}s (Dir: models_export_v3/per_coin/{clean_sym}/)")
 
     # Step 3: Verify and Persist Primary Dedicated Model Architecture Status
     print(f"\n[STEP 3/3] Verifying Per-Coin Primary Model Integrity & Persisting Status...")

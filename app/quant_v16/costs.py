@@ -59,11 +59,13 @@ class ExecutionCostEngine:
         volume_24h_usd: Optional[float] = None,
         funding_interval_hours: float = 8.0,
         is_squeeze_transition: bool = False,
+        fee_spike_buffer_bps: Optional[float] = None,
     ) -> CostBreakdown:
         """
         Estimates total roundtrip costs under specified scenario.
         Includes EXT-02 non-linear square-root market impact slippage when position size
         and 24h volume are provided.
+        Includes dynamic fee spike volatility cushion for low-liquidity pairs.
         """
         if is_squeeze_transition:
             assumption = ExecutionAssumption.STRESS
@@ -80,6 +82,17 @@ class ExecutionCostEngine:
 
         # Entry is usually taker (market/limit chase), exit is 50% limit TP / 50% stop taker
         base_fee_pct = (taker + ((taker + maker) / 2.0)) * 100.0
+
+        # Dynamic Fee Spike Volatility Cushion for Low-Liquidity / Volatile Pairs
+        # Insulates marginal edge signals from sudden exchange taker fee spikes or spot-perp basis expansion
+        fee_spike_cushion_pct = 0.0
+        if fee_spike_buffer_bps is not None:
+            fee_spike_cushion_pct = max(0.0, float(fee_spike_buffer_bps) / 100.0)
+        elif volume_24h_usd is not None and 0 < float(volume_24h_usd) < 25_000_000.0 and not is_squeeze_transition:
+            # Low-cap altcoins (<$25M) face sudden taker fee spikes and spot-perp basis expansion.
+            # Dynamic fee buffer scales up to 1.5 bps (0.015%) to insulate marginal trades.
+            liq_scale = max(0.05, min(1.0, float(volume_24h_usd) / 25_000_000.0))
+            fee_spike_cushion_pct = round((1.0 - liq_scale) * 0.015, 4)
 
         # 2. Spread (bps to %)
         spread_bps = max(1.0, observed_spread_bps)
@@ -122,7 +135,7 @@ class ExecutionCostEngine:
             spread_mult = 2.20
             slip_mult = 2.50
 
-        calc_fee = base_fee_pct * fee_mult
+        calc_fee = (base_fee_pct * fee_mult) + fee_spike_cushion_pct
         calc_spread = (spread_bps / 100.0) * spread_mult
         calc_slippage = (slip_bps / 100.0) * slip_mult
 

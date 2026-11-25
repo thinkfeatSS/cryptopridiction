@@ -47,6 +47,10 @@ def run_suite():
         "tests.test_smc_market_structure_15m",
         "tests.test_candle_pagination_and_cache",
         "tests.test_v16_no_signal_expiry",
+        "tests.test_active_4_models_scanner",
+        "tests.test_fee_volatility_and_ws_resilience",
+        "tests.test_institutional_winning_signals",
+        "tests.test_loss_avoidance_and_winning_signals",
     ]
 
     print("=" * 80)

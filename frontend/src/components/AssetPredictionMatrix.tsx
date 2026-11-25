@@ -52,6 +52,7 @@ export const ALL_9_HORIZONS: HorizonDef[] = [
   { key: "15m", altKeys: ["15M", "scalp"], label: "15m (15 Minutes)", short: "15M", badge: "⚡ 15M", desc: "Primary Scalp & Signal Execution Horizon" },
   { key: "1h", altKeys: ["1H", "swing"], label: "1h (1 Hour)", short: "1H", badge: "⏳ 1H", desc: "Day Trade / Hourly Momentum Context" },
   { key: "4h", altKeys: ["4H"], label: "4h (4 Hours)", short: "4H", badge: "⏳ 4H", desc: "Intermediate Swing & Macro Anchor" },
+  { key: "1d", altKeys: ["24h", "24H", "1D", "macro"], label: "1d (24 Hours)", short: "1D", badge: "🌊 1D", desc: "Macro Daily Structural Anchor" },
 ];
 
 export type HorizonFilterKey =

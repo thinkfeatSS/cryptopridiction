@@ -51,7 +51,9 @@ class WebSocketFeedManager:
         "MANAUSDT", "AXSUSDT", "THETAUSDT", "EGLDUSDT", "KAVAUSDT", "FLOWUSDT", "CHZUSDT",
         "ENJUSDT", "BLURUSDT", "WLDUSDT", "SEIUSDT", "JTOUSDT", "PYTHUSDT", "JUPUSDT",
         "STRKUSDT", "ONDOUSDT", "ENAUSDT", "NOTUSDT", "IOUSDT", "ZROUSDT", "TONUSDT",
-        "TAOUSDT", "PEPEUSDT", "SHIBUSDT", "DOGEUSDT"
+        "TAOUSDT", "PEPEUSDT", "SHIBUSDT", "DOGEUSDT",
+        # Institutional Winning Setups Universe
+        "ALTUSDT", "PLUMEUSDT", "ZILUSDT", "BEAMXUSDT", "STXUSDT", "CAKEUSDT", "QNTUSDT"
     ]
 
     def __init__(self, ping_interval: float = 20.0, ping_timeout: float = 10.0):
