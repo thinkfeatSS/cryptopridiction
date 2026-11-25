@@ -346,6 +346,83 @@ class TestUnifiedTrackerPolicy(unittest.TestCase):
         self.assertNotEqual(sig.status, "LOST_SL", "Trade was prematurely stopped out at 0.009056!")
         self.assertEqual(sig.status, "ACTIVE")
 
+    def test_runaway_resting_limit_cancels_when_tp1_missed_with_expiry_disabled(self):
+        """Even when enable_signal_expiry=False, an unfilled resting limit whose price expands past TP1
+        must be cancelled via CANCELLED_CHASE_EXCEEDED rather than staying stuck forever."""
+        from app.engine.execution.paper_trading_bot import PaperTradingBot
+        from app.services.signal_service import SignalService
+
+        ledger_path = os.path.join(self.test_dir, "runaway_ledger.json")
+        bot = PaperTradingBot(ledger_file=ledger_path)
+        bot.enable_signal_expiry = False
+
+        now = datetime.now(timezone.utc)
+        pos = {
+            "trade_id": "RUNAWAY_MISS_01",
+            "symbol": "ETH/USDT",
+            "desk": "scalp",
+            "direction": "SHORT",
+            "horizon": "15M",
+            "signal_horizon": "15M",
+            "position_size_usd": 100.0,
+            "entry_price": 3000.0,
+            "optimal_entry_limit": 3000.0,
+            "admission_price": 2990.0,
+            "entry_zone_min": 2990.0,
+            "entry_zone_max": 3010.0,
+            "sl_price": 3050.0,
+            "tp1_price": 2900.0,
+            "status": "RESTING_LIMIT",
+            "is_limit_resting": True,
+            "placed_at_utc": now.isoformat(),
+            "opened_at_utc": now.isoformat(),
+        }
+        bot.data["open_positions"] = [pos]
+
+        # Price dumps straight through TP1 ($2890 < $2900) without bouncing up to $3000 limit
+        bot.on_tick(live_prices={"ETH/USDT": 2890.0})
+        self.assertEqual(len(bot.data["open_positions"]), 0, "Missed runaway resting limit must not remain in open_positions")
+        self.assertEqual(len(bot.data.get("cancelled_orders", [])), 1)
+        self.assertEqual(bot.data["cancelled_orders"][0]["cancellation_reason"], "CANCELLED_CHASE_EXCEEDED")
+
+        # Also verify SignalService marks an unfilled resting limit as EXPIRED_HORIZON when TP1 is missed
+        class MockRestingSig:
+            signal_id = "RUNAWAY_MISS_01"
+            symbol = "ETH/USDT"
+            horizon = "15M"
+            direction = "SHORT"
+            entry_price = 3000.0
+            sl_price = 3050.0
+            tp1_price = 2900.0
+            tp2_price = 2850.0
+            tp3_price = 2800.0
+            status = "RESTING_LIMIT"
+            outcome_label = "🎯 PENDING LIMIT (AWAIT BOUNCE)"
+            exit_price = None
+            realized_return_pct = None
+            peak_price_seen = 2990.0
+            trough_price_seen = 2990.0
+            created_at = now
+            date_utc = now.strftime("%Y-%m-%d")
+            time_utc = now.strftime("%H:%M:%S UTC")
+
+        ms = MockRestingSig()
+        SignalService().evaluate_active_signals([ms], live_prices={"ETH/USDT": 2890.0}, now_utc=now)
+        self.assertEqual(ms.status, "EXPIRED_HORIZON")
+        self.assertIn("MISSED ENTRY", ms.outcome_label)
+
+    def test_event_driven_cache_invalidation(self):
+        """cache_service.invalidate_signal_caches must clear executive KPI and regime keys immediately."""
+        from app.services.cache_service import cache_service
+        keys = ("api:kpi_summary", "api:daily_summary", "api:market_regime", "api:live_forecast_raw")
+        for k in keys:
+            cache_service.set_json(k, {"test": True}, ttl_seconds=60)
+            self.assertIsNotNone(cache_service.get_json(k))
+
+        cache_service.invalidate_signal_caches()
+        for k in keys:
+            self.assertIsNone(cache_service.get_json(k), f"Expected cache key {k} to be invalidated")
+
 
 if __name__ == "__main__":
     unittest.main()

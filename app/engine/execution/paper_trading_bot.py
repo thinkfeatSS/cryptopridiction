@@ -217,6 +217,12 @@ class PaperTradingBot:
                 with open(temp, "w", encoding="utf-8") as f:
                     json.dump(self.data, f, indent=2)
                 safe_atomic_replace(temp, self.ledger_file)
+                if os.path.basename(self.ledger_file) == "paper_trading_ledger.json":
+                    try:
+                        from app.services.cache_service import cache_service
+                        cache_service.invalidate_signal_caches()
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"[PAPER BOT ERROR] Failed saving ledger: {e}")
             finally:
@@ -1759,14 +1765,10 @@ class PaperTradingBot:
                             print(f"[PAPER BOT 🚀 RUNAWAY REVERSAL CONVERTED] {sym} ({direction} {norm_h}) price reversed early! Filled at ${curr_p:,.4f} with effective R:R 1:{eff_rr:.2f}")
                             remaining_positions.append(pos)
                             continue
-                        elif getattr(self, "enable_signal_expiry", False):
-                            canc_detail = "Price expanded beyond chase threshold without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.00) without limit fill"
+                        else:
+                            canc_detail = "Price expanded beyond chase threshold and reached TP1 without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.00) without limit fill"
                             canc_rec = self._create_cancellation_record(pos, "CANCELLED_CHASE_EXCEEDED", canc_detail)
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
-                            continue
-                        else:
-                            # In no-expiry mode, continue waiting for fill
-                            remaining_positions.append(pos)
                             continue
 
                     # C. Macro Regime / NTZ Shift Invalidation (Fix 1)

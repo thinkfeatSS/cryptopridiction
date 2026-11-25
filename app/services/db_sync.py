@@ -779,6 +779,13 @@ def sync_files_to_db_live(force: bool = False) -> bool:
             if portfolio_changed:
                 _PORTFOLIO_VERSION += 1
 
+            if forecast_changed or portfolio_changed or (os.path.exists(signals_csv) and _LAST_SYNC_TIMES["csv"] == csv_mtime and csv_mtime > 0):
+                try:
+                    from app.services.cache_service import cache_service
+                    cache_service.invalidate_signal_caches()
+                except Exception:
+                    pass
+
             return forecast_changed or portfolio_changed
         finally:
             db.close()

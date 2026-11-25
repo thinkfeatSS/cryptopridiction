@@ -147,6 +147,11 @@ class CacheService:
         _LOCAL_MEM_CACHE.pop(key, None)
         _LOCAL_MEM_EXPIRY.pop(key, None)
 
+    def invalidate_signal_caches(self):
+        """Event-driven invalidation of executive KPI, daily summary, and regime caches."""
+        for k in ("api:kpi_summary", "api:daily_summary", "api:market_regime", "api:live_forecast_raw"):
+            self.delete(k)
+
     def flush_all(self) -> bool:
         """Flushes all cached keys from Redis and local in-memory storage."""
         if self.is_available and self._redis:

@@ -1204,55 +1204,55 @@ class SignalService:
                     updated = True
                     continue
 
-                # Step 2.5: Check for Paper Trading Resting Limit Cancellation / Invalidation (Only if signal expiry is explicitly enabled)
-                enable_expiry = getattr(settings, "ENABLE_SIGNAL_EXPIRY", False) or (os.getenv("ENABLE_SIGNAL_EXPIRY", "false").lower() in ("true", "1", "yes"))
-                if enable_expiry:
-                    canc_match = cancelled_paper_map.get(s.signal_id)
-                    if not canc_match:
-                        fallback_canc = cancelled_paper_map.get((s_sym, norm_hz)) or cancelled_paper_map.get((s_sym.replace("/", "").replace(":USDT", ""), norm_hz))
-                        if fallback_canc:
-                            sig_time = f"{s.date_utc or ''} {s.time_utc or ''}".strip()
-                            canc_time = str(fallback_canc.get("cancelled_at_utc") or fallback_canc.get("cancelled_at") or "")
-                            if canc_time and sig_time and canc_time >= sig_time:
-                                canc_match = fallback_canc
-                            elif not sig_time:
-                                canc_match = fallback_canc
+                # Step 2.5: Check for Paper Trading Resting Limit Cancellation / Invalidation (Always sync order book cancellations)
+                canc_match = cancelled_paper_map.get(s.signal_id)
+                if not canc_match:
+                    fallback_canc = cancelled_paper_map.get((s_sym, norm_hz)) or cancelled_paper_map.get((s_sym.replace("/", "").replace(":USDT", ""), norm_hz))
+                    if fallback_canc:
+                        sig_time = f"{s.date_utc or ''} {s.time_utc or ''}".strip()
+                        canc_time = str(fallback_canc.get("cancelled_at_utc") or fallback_canc.get("cancelled_at") or "")
+                        if canc_time and sig_time and canc_time >= sig_time:
+                            canc_match = fallback_canc
+                        elif not sig_time:
+                            canc_match = fallback_canc
 
-                    if canc_match:
-                        canc_reason = str(canc_match.get("cancellation_reason", "CANCELLED"))
-                        canc_at = canc_match.get("cancelled_at_utc") or canc_match.get("cancelled_at") or now_str
-                        live_mkt_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
-                        canc_mkt_p = safe_float(canc_match.get("cancel_market_price"), 0.0)
-                        existing_curr_p = safe_float(getattr(s, "current_price", None), 0.0)
-                        limit_p = safe_float(canc_match.get("optimal_entry_limit") or s.entry_price, 0.0)
-                        ref_mkt_p = live_mkt_p if (live_mkt_p and live_mkt_p > 0) else (canc_mkt_p if canc_mkt_p > 0 else (existing_curr_p if existing_curr_p > 0 else limit_p))
-                        s.status = "EXPIRED_HORIZON"
-                        s.outcome_label = "⏱️ EXPIRED"
-                        s.exit_price = round(ref_mkt_p, 6) if ref_mkt_p > 0 else s.entry_price
-                        if ref_mkt_p > 0:
-                            s.current_price = round(ref_mkt_p, 6)
-                        s.realized_return_pct = 0.0
-                        s.evaluated_at_utc = canc_at
-                        updated = True
-                        try:
-                            from app.services.whatsapp_service import whatsapp_service
-                            sig_dict = {
-                                "signal_id": s.signal_id,
-                                "symbol": s.symbol,
-                                "horizon": s.horizon,
-                                "direction": s.direction,
-                                "entry_price": s.entry_price,
-                                "quality_grade": s.quality_grade,
-                                "meta_win_prob_pct": s.meta_win_prob_pct,
-                                "decision": getattr(s, "decision", None) or s.outcome_label,
-                                "cancellation_reason": canc_reason,
-                                "cancellation_detail": canc_match.get("cancellation_detail", ""),
-                                "outcome_label": s.outcome_label
-                            }
-                            whatsapp_service.emit_signal_outcome(sig_dict, "LIMIT_CANCELLED", float(s.exit_price or 0.0), 0.0)
-                        except Exception:
-                            pass
-                        continue
+                if canc_match:
+                    canc_reason = str(canc_match.get("cancellation_reason", "CANCELLED"))
+                    canc_at = canc_match.get("cancelled_at_utc") or canc_match.get("cancelled_at") or now_str
+                    live_mkt_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
+                    canc_mkt_p = safe_float(canc_match.get("cancel_market_price"), 0.0)
+                    existing_curr_p = safe_float(getattr(s, "current_price", None), 0.0)
+                    limit_p = safe_float(canc_match.get("optimal_entry_limit") or s.entry_price, 0.0)
+                    ref_mkt_p = live_mkt_p if (live_mkt_p and live_mkt_p > 0) else (canc_mkt_p if canc_mkt_p > 0 else (existing_curr_p if existing_curr_p > 0 else limit_p))
+                    s.status = "EXPIRED_HORIZON"
+                    s.outcome_label = "⏱️ EXPIRED (MISSED ENTRY)"
+                    s.exit_price = round(ref_mkt_p, 6) if ref_mkt_p > 0 else s.entry_price
+                    if ref_mkt_p > 0:
+                        s.current_price = round(ref_mkt_p, 6)
+                    s.realized_return_pct = 0.0
+                    s.evaluated_at_utc = canc_at
+                    if hasattr(s, "paper_trading_status"):
+                        s.paper_trading_status = canc_reason
+                    updated = True
+                    try:
+                        from app.services.whatsapp_service import whatsapp_service
+                        sig_dict = {
+                            "signal_id": s.signal_id,
+                            "symbol": s.symbol,
+                            "horizon": s.horizon,
+                            "direction": s.direction,
+                            "entry_price": s.entry_price,
+                            "quality_grade": s.quality_grade,
+                            "meta_win_prob_pct": s.meta_win_prob_pct,
+                            "decision": getattr(s, "decision", None) or s.outcome_label,
+                            "cancellation_reason": canc_reason,
+                            "cancellation_detail": canc_match.get("cancellation_detail", ""),
+                            "outcome_label": s.outcome_label
+                        }
+                        whatsapp_service.emit_signal_outcome(sig_dict, "LIMIT_CANCELLED", float(s.exit_price or 0.0), 0.0)
+                    except Exception:
+                        pass
+                    continue
 
                 curr_p = resolve_asset_price(sym, signal=s, live_prices=live_prices)
                 if not curr_p or curr_p <= 0:
@@ -1377,9 +1377,10 @@ class SignalService:
                 if is_resting_order:
                     has_filled = (direction == "LONG" and low_p <= entry_p) or (direction == "SHORT" and high_p >= entry_p)
                     if not has_filled:
-                        if is_expired:
+                        missed_tp1 = tp1_p > 0 and ((direction == "LONG" and high_p >= tp1_p) or (direction == "SHORT" and low_p <= tp1_p))
+                        if is_expired or missed_tp1:
                             s.status = "EXPIRED_HORIZON"
-                            s.outcome_label = "⏱️ EXPIRED (UNFILLED)"
+                            s.outcome_label = "⏱️ EXPIRED (MISSED ENTRY)" if missed_tp1 else "⏱️ EXPIRED (UNFILLED)"
                             s.exit_price = round(curr_p, 6) if (curr_p and curr_p > 0) else entry_p
                             if curr_p and curr_p > 0:
                                 s.current_price = round(curr_p, 6)
@@ -1720,6 +1721,11 @@ class SignalService:
             if updated:
                 db.commit()
                 self._sync_updates_to_tracker_csv(pending)
+                try:
+                    from app.services.cache_service import cache_service
+                    cache_service.invalidate_signal_caches()
+                except Exception:
+                    pass
 
                 # Synchronize resolved terminal outcomes to StrategyRegistry
                 try:
@@ -1888,9 +1894,10 @@ class SignalService:
             if is_resting_order:
                 has_filled = (direction == "LONG" and low_p <= entry_p) or (direction == "SHORT" and high_p >= entry_p)
                 if not has_filled:
-                    if is_expired:
+                    missed_tp1 = tp1_p > 0 and ((direction == "LONG" and high_p >= tp1_p) or (direction == "SHORT" and low_p <= tp1_p))
+                    if is_expired or missed_tp1:
                         s.status = "EXPIRED_HORIZON"
-                        s.outcome_label = "⏱️ EXPIRED (UNFILLED)"
+                        s.outcome_label = "⏱️ EXPIRED (MISSED ENTRY)" if missed_tp1 else "⏱️ EXPIRED (UNFILLED)"
                         s.exit_price = round(curr_p, 6) if (curr_p and curr_p > 0) else entry_p
                         if curr_p and curr_p > 0:
                             s.current_price = round(curr_p, 6)
