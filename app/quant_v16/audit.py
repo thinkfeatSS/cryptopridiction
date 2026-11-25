@@ -255,7 +255,7 @@ def classify_signal_outcome(
 
     # 2. Breakeven outcomes
     be_statuses = {
-        "WON_TIER0_BE", "WON_TP1_BE", "EXPIRED_BREAKEVEN",
+        "WON_TIER0_BE", "EXPIRED_BREAKEVEN",
         "BREAKEVEN_EXP", "TIER0_BE_HIT", "BREAKEVEN", "BREAKEVEN_GUARD",
         "STOP_LOSS_BREAKEVEN", "TIER0_GUARD"
     }
@@ -267,12 +267,13 @@ def classify_signal_outcome(
         or "GUARD" in st
         or "TP1 + BE RUNNER" in out
         or "EXPIRED (BE" in out
+        or (st == "WON_TP1_BE" and "TRAILING RUNNER" not in out and (ret_pct is None or ret_pct <= 1.5))
     ):
         return "BREAKEVEN"
 
     # 3. Won outcomes
     won_statuses = {
-        "WON_TP3", "WON_TP2_TRAIL", "WON_TP2", "WON_TP1",
+        "WON_TP3", "WON_TP2_TRAIL", "WON_TP2", "WON_TP1", "WON_TP1_TRAIL", "WON_TP1_BE",
         "WON_TP2_EXP", "WON_TP1_EXP", "WON_EXP_PROFIT", "WON_PROFIT_EXPIRED", "WON",
         "WON_PROFIT_RATCHET"
     }

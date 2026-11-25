@@ -1,5 +1,5 @@
-from .signal import SignalAudit
-from .portfolio import PaperPosition, ClosedTrade
+from .signal import SignalAudit, SignalAuditArchive
+from .portfolio import PaperPosition, ClosedTrade, ClosedTradeArchive
 from .forecast import MarketForecast
 
-__all__ = ["SignalAudit", "PaperPosition", "ClosedTrade", "MarketForecast"]
+__all__ = ["SignalAudit", "SignalAuditArchive", "PaperPosition", "ClosedTrade", "ClosedTradeArchive", "MarketForecast"]

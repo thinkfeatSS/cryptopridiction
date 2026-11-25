@@ -23,6 +23,7 @@ def get_signals(
     min_return: Optional[float] = Query(None, description="Filter by minimum target/realized return % (e.g. 3.0)"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    archive: bool = Query(False, description="Query historical pre-epoch archive records (pre-20261125 05:35 UTC)"),
     db: Session = Depends(get_db),
 ):
     """Retrieve paginated, filterable signals from MySQL database."""
@@ -39,6 +40,39 @@ def get_signals(
         min_return=min_return,
         limit=limit,
         offset=offset,
+        archive=archive,
+    )
+
+@router.get("/archive")
+def get_archived_signals(
+    symbol: Optional[str] = Query(None, description="Filter by exact crypto symbol (e.g. BTC/USDT)"),
+    search: Optional[str] = Query(None, description="Search symbol or signal ID"),
+    date: Optional[str] = Query(None, description="Filter by date UTC (YYYY-MM-DD)"),
+    outcome: Optional[str] = Query(None, description="Filter by outcome: WON, LOST, PENDING, EXPIRED"),
+    status: Optional[str] = Query(None, description="Filter by status: ACTIVE, WON, LOST, EXPIRED"),
+    grade: Optional[str] = Query(None, description="Filter by grade: A+, A, B+"),
+    horizon: Optional[str] = Query(None, description="Filter by horizon"),
+    direction: Optional[str] = Query(None, description="Filter by direction: LONG or SHORT"),
+    min_return: Optional[float] = Query(None, description="Filter by minimum target/realized return %"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Retrieve paginated, filterable immutable pre-epoch historical signals from archive table."""
+    return signal_service.get_signals_list(
+        db=db,
+        symbol=symbol,
+        search=search,
+        date=date,
+        outcome=outcome,
+        status=status,
+        grade=grade,
+        horizon=horizon,
+        direction=direction,
+        min_return=min_return,
+        limit=limit,
+        offset=offset,
+        archive=True,
     )
 
 @router.get("/by-symbol/{symbol_name:path}")

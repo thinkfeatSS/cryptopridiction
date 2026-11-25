@@ -116,3 +116,33 @@ class ClosedTrade(Base):
             "opened_at": self.opened_at,
             "closed_at": self.closed_at,
         }
+
+
+class ClosedTradeArchive(Base):
+    """Immutable Historical Archive of Pre-Epoch Closed Trades (< 2026-11-25 05:35 UTC)."""
+    __tablename__ = "closed_trades_archive_pre_20261125"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    trade_id = Column(String(128), unique=True, index=True, nullable=False)
+    symbol = Column(String(32), index=True, nullable=False)
+    horizon = Column(String(32))
+    direction = Column(String(16))
+    execution_engine = Column(String(64), default="paper")
+    entry_price = Column(Float, nullable=False)
+    raw_entry_price = Column(Float, nullable=True)
+    exit_price = Column(Float, nullable=False)
+    exit_reason = Column(String(64))
+    outcome = Column(String(16), index=True)
+    gross_pnl_usd = Column(Float, default=0.0)
+    buy_fee_usd = Column(Float, default=0.0)
+    sell_fee_usd = Column(Float, default=0.0)
+    binance_fee_usd = Column(Float, default=0.0)
+    realized_pnl_usd = Column(Float, default=0.0)
+    realized_pnl_pct = Column(Float, default=0.0)
+    duration_str = Column(String(64))
+    opened_at = Column(String(64))
+    closed_at = Column(String(64))
+
+    def to_dict(self):
+        return ClosedTrade.to_dict(self)
+

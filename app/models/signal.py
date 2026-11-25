@@ -177,3 +177,66 @@ class SignalAudit(Base):
             "pnl_pct": live_pnl if self.status == "ACTIVE" else (ret_val if ret_val is not None else 0.0),
             "live_pnl_pct": live_pnl,
         }
+
+
+class SignalAuditArchive(Base):
+    """Immutable Historical Archive of Pre-Epoch Quantitative Signals (< 2026-11-25 05:35 UTC)."""
+    __tablename__ = "signals_tracker_archive_pre_20261125"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    signal_id = Column(String(128), unique=True, index=True, nullable=False)
+    date_utc = Column(String(32), index=True)
+    time_utc = Column(String(32))
+    rank_label = Column(String(32))
+    quality_grade = Column(String(255), index=True)
+    grade_tier = Column(Integer, default=2, index=True)
+    symbol = Column(String(32), index=True, nullable=False)
+    horizon = Column(String(32), index=True)
+    direction = Column(String(16), index=True)
+    conviction_pct = Column(Float, default=50.0)
+    entry_price = Column(Float, nullable=False)
+    tp1_price = Column(Float)
+    tp2_price = Column(Float)
+    tp3_price = Column(Float)
+    sl_price = Column(Float)
+    sl_original = Column(Float, nullable=True)
+    risk_reward_ratio = Column(String(16), default="1:2.0")
+    expected_return_pct = Column(Float, default=0.0)
+    decision = Column(String(255))
+    paper_trading_status = Column(String(255))
+    predicted_window = Column(String(255))
+    predicted_close_utc = Column(String(64))
+    status = Column(String(32), default="PENDING_EVALUATION", index=True)
+    outcome_label = Column(String(255), default="PENDING ⏳", index=True)
+    peak_price_seen = Column(Float)
+    trough_price_seen = Column(Float)
+    max_potential_gain_pct = Column(Float, default=0.0)
+    exit_price = Column(Float, nullable=True)
+    realized_return_pct = Column(Float, nullable=True)
+    evaluated_at_utc = Column(String(64), nullable=True)
+    meta_win_prob = Column(Float, nullable=True)
+    meta_win_prob_pct = Column(Float, nullable=True)
+    volume_24h_usd = Column(Float, nullable=True)
+    spread_bps = Column(Float, nullable=True)
+    tf_metrics_json = Column(Text, nullable=True)
+    card_text = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index('idx_sig_arch_sym_date', 'symbol', 'date_utc'),
+        Index('idx_sig_arch_status_outcome', 'status', 'outcome_label'),
+        Index('idx_sig_arch_grade_horizon', 'grade_tier', 'horizon'),
+        Index('idx_sig_arch_date_status', 'date_utc', 'status'),
+    )
+
+    def _resolve_canonical_outcome(self) -> str:
+        try:
+            from app.quant_v16.audit import classify_signal_outcome
+            return classify_signal_outcome(self.status, self.outcome_label, self.realized_return_pct)
+        except Exception:
+            return "PENDING"
+
+    def to_dict(self):
+        return SignalAudit.to_dict(self)
+

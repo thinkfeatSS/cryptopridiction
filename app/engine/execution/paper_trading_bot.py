@@ -3214,8 +3214,8 @@ class PaperTradingBot:
                 wa_event = "TRAIL_SL_HIT"
                 tp2_hit = True
                 tp1_hit = True
-            elif "TAKE_PROFIT_1_TRAIL_SL" in exit_reason or "WON_TP1_BE" in exit_reason:
-                audit_status = "WON_TP1_BE"
+            elif "TAKE_PROFIT_1_TRAIL_SL" in exit_reason or "WON_TP1_BE" in exit_reason or "WON_TP1_TRAIL" in exit_reason:
+                audit_status = "WON_TP1_TRAIL" if ret_pct > 1.5 else "WON_TP1_BE"
                 outcome_label = f"🟢 WON (TP1 + TRAILING RUNNER {ret_pct:+.2f}%)"
                 wa_event = "TRAIL_SL_HIT"
                 tp1_hit = True
