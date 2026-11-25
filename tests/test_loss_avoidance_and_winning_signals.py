@@ -470,6 +470,67 @@ class TestLossAvoidanceAndWinningSignals(unittest.TestCase):
         self.assertFalse(sig["is_trade_active"])
         self.assertEqual(sig["signal_status"], "HOLD_VETOED_BY_MACRO_BEARISH_COUNTER_TREND")
 
+    def test_09_high_wr_playbooks_maintain_signal_frequency(self):
+        """
+        Verify that high-win-rate playbooks (RANGE_RESISTANCE_REJECTION, VWAP_BOUNCE, and
+        SHORT OB/Breaker in bearish-drift RANGE) are admitted cleanly to maintain signal frequency
+        while toxic counter-trend LONGs are filtered.
+        """
+        dfs_9 = self._create_mock_dfs(100.0, trend="FLAT")
+        entry_p = float(dfs_9["15m"]["close"].iloc[-1])
+        btc_shield = {
+            "regime": "RANGE",
+            "action": "NORMAL",
+            "altcoin_longs_allowed": True,
+            "altcoin_shorts_allowed": True,
+            "bear_trend_prob": 35.0,
+            "bull_trend_prob": 18.0,
+            "btc_24h_change_pct": -1.2,
+            "btc_4h_change_pct": -0.5,
+        }
+        ob_short = {
+            "setup_detected": True,
+            "direction": "SHORT",
+            "strategy": "ORDER_BLOCK_SHORT",
+            "zeiierman_rank": 1,
+            "zeiierman_rank_label": "💎 ZEIIERMAN RANK 1 NESTED SMC",
+            "is_nested_smc": True,
+            "in_order_block_zone": True,
+            "is_touching": True,
+            "structural_trigger_confirmed": True,
+            "entry_price": entry_p,
+            "sl_price": entry_p * 1.018,
+            "tp1_price": entry_p * 0.973,
+            "tp2_price": entry_p * 0.955,
+            "tp3_price": entry_p * 0.935,
+            "order_block_zone": [entry_p, entry_p * 1.018],
+        }
+        hz_pred = {
+            "timeframe": "15m",
+            "direction": "SHORT",
+            "prob_bearish": 0.56,
+            "prob_bullish": 0.44,
+            "predicted_target_price": entry_p * 0.973,
+            "predicted_change_pct": -2.7,
+        }
+        sig = self.sg._build_single_horizon_signal(
+            symbol="ARB/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="SHORT",
+            current_price=entry_p,
+            dfs_9=dfs_9,
+            horizon_prediction=hz_pred,
+            btc_shield_state=btc_shield,
+            aligned_horizons=["15M"],
+            order_block_setup=ob_short,
+            volume_24h_usd=20_000_000.0,
+            spread_bps=3.0,
+        )
+        self.assertIsNotNone(sig)
+        self.assertTrue(sig["is_trade_active"], f"Macro-aligned SHORT OB in bearish-drift RANGE should be active: {sig.get('signal_status')}")
+        self.assertEqual(sig["signal_status"], "ACTIVE_SIGNAL")
+
 
 if __name__ == "__main__":
     unittest.main()

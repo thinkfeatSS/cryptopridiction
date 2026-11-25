@@ -2223,9 +2223,11 @@ class SignalGenerationSystem:
                 ("RANGE_ROTATION" in str(canonical_strategy or "").upper() and actual_rr >= 1.50 and arch_headroom >= 15.0 and p_tp1 >= 0.55) or
                 (arch_strategy == "DIRECTIONAL_BREAKOUT_EXPANSION" and p_tp1 >= 0.55) or
                 ("LIQUIDITY_RECLAIM" in str(canonical_strategy or "").upper() and p_tp1 >= 0.55) or
+                (bool(candle_metrics and (candle_metrics.get("is_vwap_bounce") or str(candle_metrics.get("pattern", "")).upper() == "RANGE_RESISTANCE_REJECTION")) and p_tp1 >= 0.52 and actual_rr >= 1.40) or
+                (direction == "SHORT" and is_range_regime and str(canonical_strategy or "").upper() in ["ORDER_BLOCK_SHORT", "BREAKER_BLOCK_SHORT"] and p_tp1 >= 0.52 and ev_result.expected_net_return_pct >= 0.05) or
                 (alignment_score >= 80.0 and ev_result.expected_net_return_pct >= 0.10) or
                 (p_tp1 >= 0.60 and ev_result.expected_net_return_pct >= 0.10)
-            ) and ev_result.expected_net_return_pct > 0.0 and actual_rr >= 1.50) or
+            ) and ev_result.expected_net_return_pct > 0.0 and actual_rr >= 1.40) or
             (is_macro_structural_archetype and ev_result.expected_net_return_pct >= 0.10 and p_tp1 >= 0.54 and actual_rr >= 1.50) or
             (p_tp1 >= 0.62 and ev_result.expected_net_return_pct >= 0.10 and actual_rr >= 1.50)
         ) or ev_result.expected_net_return_pct <= 0.0:
