@@ -370,6 +370,106 @@ class TestLossAvoidanceAndWinningSignals(unittest.TestCase):
         self.assertEqual(sig["signal_status"], "ACTIVE_SIGNAL")
         self.assertIn("Grade", sig["quality_grade"])
 
+    def test_07_range_regime_reachable_tp1_not_forced_to_2_0(self):
+        """
+        Verify that in RANGE regime, TP1 uses reachable ~1.50 R:R instead of being
+        forced up to 2.00+ R:R (which caused 42.1% of lost trades to reverse from +1.0%+ MFE).
+        """
+        dfs_9 = self._create_mock_dfs(100.0, trend="FLAT")
+        btc_shield = {
+            "regime": "RANGE",
+            "action": "NORMAL",
+            "altcoin_longs_allowed": True,
+            "altcoin_shorts_allowed": True,
+            "bear_trend_prob": 20.0,
+            "bull_trend_prob": 20.0,
+        }
+        hz_pred = {
+            "timeframe": "15m",
+            "direction": "SHORT",
+            "prob_bearish": 0.62,
+            "prob_bullish": 0.38,
+            "predicted_target_price": 97.3,
+            "predicted_change_pct": -2.7,
+        }
+        sig = self.sg._build_single_horizon_signal(
+            symbol="SOL/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="SHORT",
+            current_price=100.0,
+            dfs_9=dfs_9,
+            horizon_prediction=hz_pred,
+            btc_shield_state=btc_shield,
+            aligned_horizons=["15M"],
+            volume_24h_usd=50_000_000.0,
+            spread_bps=2.0,
+        )
+        self.assertIsNotNone(sig)
+        actual_rr = float(sig.get("actual_rr", 0.0))
+        self.assertGreaterEqual(actual_rr, 1.30)
+        self.assertLess(actual_rr, 2.00, f"RANGE regime should not force R:R >= 2.00, got {actual_rr}")
+
+    def test_08_bearish_drift_range_blocks_weak_long_ob(self):
+        """
+        Verify that when BTC is in RANGE with bearish drift (bear_trend_prob > bull_trend_prob + 8),
+        weak counter-trend LONG Order Block setups are blocked rather than leaking into 21% WR losses.
+        """
+        dfs_9 = self._create_mock_dfs(100.0)
+        entry_p = float(dfs_9["15m"]["close"].iloc[-1])
+        btc_shield = {
+            "regime": "RANGE",
+            "action": "NORMAL",
+            "altcoin_longs_allowed": True,
+            "altcoin_shorts_allowed": True,
+            "bear_trend_prob": 35.0,
+            "bull_trend_prob": 18.0,
+            "btc_24h_change_pct": -1.2,
+            "btc_4h_change_pct": -0.5,
+        }
+        ob_long = {
+            "setup_detected": True,
+            "direction": "LONG",
+            "strategy": "ORDER_BLOCK_LONG",
+            "zeiierman_rank": 1,
+            "zeiierman_rank_label": "💎 ZEIIERMAN RANK 1 NESTED SMC",
+            "is_nested_smc": True,
+            "in_order_block_zone": True,
+            "is_touching": True,
+            "structural_trigger_confirmed": True,
+            "entry_price": entry_p,
+            "sl_price": entry_p * 0.982,
+            "tp1_price": entry_p * 1.027,
+            "tp2_price": entry_p * 1.045,
+            "tp3_price": entry_p * 1.065,
+            "order_block_zone": [entry_p * 0.982, entry_p],
+        }
+        hz_pred = {
+            "timeframe": "15m",
+            "direction": "LONG",
+            "prob_bullish": 0.56,
+            "prob_bearish": 0.44,
+            "predicted_target_price": entry_p * 1.027,
+            "predicted_change_pct": 2.7,
+        }
+        sig = self.sg._build_single_horizon_signal(
+            symbol="POL/USDT",
+            horizon_label="15M",
+            tf_key="15m",
+            direction="LONG",
+            current_price=entry_p,
+            dfs_9=dfs_9,
+            horizon_prediction=hz_pred,
+            btc_shield_state=btc_shield,
+            aligned_horizons=["15M"],
+            order_block_setup=ob_long,
+            volume_24h_usd=20_000_000.0,
+            spread_bps=3.0,
+        )
+        self.assertIsNotNone(sig)
+        self.assertFalse(sig["is_trade_active"])
+        self.assertEqual(sig["signal_status"], "HOLD_VETOED_BY_MACRO_BEARISH_COUNTER_TREND")
+
 
 if __name__ == "__main__":
     unittest.main()

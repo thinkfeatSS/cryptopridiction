@@ -1002,7 +1002,7 @@ class SignalGenerationSystem:
             cand_tp3 = format_dynamic_precision(order_block_setup["tp3_price"])
             cand_sl = format_dynamic_precision(order_block_setup["sl_price"])
 
-            min_ob_rr = 2.0 if is_range_regime else 2.5
+            min_ob_rr = 1.50 if is_range_regime else 2.0
             vol_cushion = max(active_atr * 0.50, 3.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
             min_ob_sl_dist = max(active_atr * 0.85, exec_entry_price * 0.0120)
             if direction == "LONG":
@@ -1096,8 +1096,8 @@ class SignalGenerationSystem:
             cand_sl = format_dynamic_precision(max(exec_entry_price * 0.001, exec_entry_price - cand_sl_dist))
             actual_sl_dist = exec_entry_price - cand_sl
 
-            # Anchor primary TP1 dynamically: Strictly enforce institutional 1:2.0 R:R
-            min_target_rr = 2.00
+            # Anchor primary TP1 dynamically: 1:1.50 in RANGE for higher hit rate, 1:2.0 in TREND
+            min_target_rr = 1.50 if is_range_regime else 2.00
             if is_range_regime:
                 range_eq = (recent_high + recent_low) / 2.0
                 eq_dist = max(0.0, range_eq - exec_entry_price)
@@ -1161,8 +1161,8 @@ class SignalGenerationSystem:
             cand_sl = format_dynamic_precision(exec_entry_price + cand_sl_dist)
             actual_sl_dist = cand_sl - exec_entry_price
 
-            # Anchor primary TP1 dynamically: Strictly enforce institutional 1:2.0 R:R
-            min_target_rr = 2.00
+            # Anchor primary TP1 dynamically: 1:1.50 in RANGE for higher hit rate, 1:2.0 in TREND
+            min_target_rr = 1.50 if is_range_regime else 2.00
             if is_range_regime:
                 range_eq = (recent_high + recent_low) / 2.0
                 eq_dist = max(0.0, exec_entry_price - range_eq)
@@ -1630,10 +1630,11 @@ class SignalGenerationSystem:
         gross_reward = abs(cand_tp1 - exec_entry_price)
         gross_risk = abs(exec_entry_price - cand_sl)
 
-        # Quantitative Hurdle Invariant: Ensure target dynamically accounts for friction so net R:R >= 2.00
-        min_net_target_rr = 2.00
+        # Quantitative Hurdle Invariant: Ensure target dynamically accounts for friction
+        # Use regime-aware R:R (1.50 in RANGE to capture high-probability range moves, 2.00 in TREND)
+        min_net_target_rr = 1.50 if is_range_regime else 2.00
         needed_gross_reward = (min_net_target_rr * gross_risk) + ((min_net_target_rr + 1.0) * friction_drag)
-        max_safe_tp_dist = active_atr * 2.80
+        max_safe_tp_dist = active_atr * (2.20 if is_range_regime else 2.80)
         if gross_reward < needed_gross_reward and needed_gross_reward <= max_safe_tp_dist:
             gross_reward = needed_gross_reward
             if direction == "LONG":
@@ -1709,6 +1710,40 @@ class SignalGenerationSystem:
         net_reward = max(0.0, gross_reward - friction_drag)
         net_risk = gross_risk + friction_drag
         effective_rr = round(net_reward / max(1e-8, net_risk), 2)
+
+        # Distance-Aware Probability Calibration:
+        # Targets stretched beyond physical horizon ATR bandwidth (feasibility_ratio > 1.05) suffer
+        # sharp real-world hit-rate decay. Adjust p_tp1 monotonically and re-evaluate expectancy.
+        if 'max_feasible_expansion' in locals() and max_feasible_expansion > 1e-8:
+            final_feasibility_ratio = abs(cand_tp1 - exec_entry_price) / max_feasible_expansion
+            if final_feasibility_ratio > 1.05:
+                dist_decay = max(0.75, 1.0 - 0.20 * (final_feasibility_ratio - 1.0))
+                p_tp1 = round(max(0.15, min(0.95, p_tp1 * dist_decay)), 4)
+                p_tp2 = round(p_tp1 * 0.65, 4)
+                p_tp3 = round(p_tp2 * 0.55, 4)
+                p_sl = round(max(0.05, 1.0 - p_tp1), 4)
+                path_probs = PathProbabilities(
+                    p_tp1=p_tp1,
+                    p_tp2=p_tp2,
+                    p_tp3=p_tp3,
+                    p_sl=p_sl,
+                    p_tp2_given_tp1=0.65,
+                    p_tp3_given_tp2=0.55,
+                    risk_reward=actual_rr
+                )
+                ev_result = self.expectancy_engine.evaluate(
+                    entry=exec_entry_price,
+                    sl=cand_sl,
+                    tp1=cand_tp1,
+                    tp2=cand_tp2,
+                    tp3=cand_tp3,
+                    direction=direction,
+                    path_probs=path_probs,
+                    costs=cost_breakdown
+                )
+                if p_tp1 < 0.50 or p_sl >= p_tp1:
+                    is_prob_inferior = True
+                    prob_inferior_reason = f"Distance-adjusted probability below 50% (P(TP1)={p_tp1*100:.1f}%, feasibility={final_feasibility_ratio:.2f}x)"
 
         # Phase 3 Feasibility Validation Gate (Target must be physically reachable within horizon)
         is_volatility_headroom_vetoed = False
@@ -2138,12 +2173,34 @@ class SignalGenerationSystem:
             direction == "LONG" and btc_shield_state and (
                 btc_shield_state.get("regime") in ["BEARISH", "FLASH_DUMP", "DISTRIBUTION"] or
                 "DEFENSIVE" in str(btc_shield_state.get("altcoin_posture", "")).upper() or
-                btc_shield_state.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "DEFENSIVE_CASH_ONLY"]
+                btc_shield_state.get("status_code") in ["BEAR_CASCADE_BLACKOUT", "DEFENSIVE_CASH_ONLY"] or
+                (
+                    str(btc_shield_state.get("regime", "")).upper() in ["RANGE", "RANGE_SQUEEZE", "NEUTRAL"] and (
+                        float(btc_shield_state.get("bear_trend_prob", 0.0) or 0.0) >= float(btc_shield_state.get("bull_trend_prob", 0.0) or 0.0) + 8.0 or
+                        float(btc_shield_state.get("btc_24h_change_pct", 0.0) or 0.0) <= -0.75 or
+                        float(btc_shield_state.get("btc_4h_change_pct", 0.0) or 0.0) <= -0.40
+                    ) and not (bool(candle_metrics and candle_metrics.get("is_vwap_bounce")) and p_tp1 >= 0.56)
+                )
             )
-        ) and not (p_tp1 >= 0.58 and ev_result.expected_net_return_pct >= 0.15 and actual_rr >= 2.00):
+        ) and not (p_tp1 >= 0.60 and ev_result.expected_net_return_pct >= 0.15 and actual_rr >= 1.50):
             status = "HOLD_VETOED_BY_MACRO_BEARISH_COUNTER_TREND"
             trade_active = False
             grade = f"Grade C (COUNTER-TREND LONG IN MACRO BEAR: P(win) {p_tp1*100:.1f}% or EV +{ev_result.expected_net_return_pct:.2f}% < 0.15% threshold)"
+            conviction = float(meta_eval.get("win_probability_pct", 65.0))
+            tp1_price = cand_tp1
+            tp2_price = cand_tp2
+            tp3_price = cand_tp3
+            sl_price = cand_sl
+            rr_ratio = cand_rr
+            is_radar_eligible = True
+        elif (
+            (str(candle_metrics.get("pattern", "") if candle_metrics else "").upper() in ["RANGE_SUPPORT_REJECTION", "FVG_RETEST_SHORT"] and not (p_tp1 >= 0.58 and ev_result.expected_net_return_pct >= 0.15)) or
+            (str(canonical_strategy or "").upper() in ["ORDER_BLOCK_LONG", "BREAKER_BLOCK_LONG"] and is_range_regime and not bool(candle_metrics and candle_metrics.get("is_vwap_bounce")) and not (p_tp1 >= 0.56 and ev_result.expected_net_return_pct >= 0.12)) or
+            ("COILING" in str(canonical_strategy or "").upper() and not (p_tp1 >= 0.56 and ev_result.expected_net_return_pct >= 0.12))
+        ):
+            status = "HOLD_MARGINAL_NET_EXPECTANCY"
+            trade_active = False
+            grade = f"Grade C (LOW-WIN-RATE PLAYBOOK FILTERED: {canonical_strategy} requires P(TP1)>=56% & EV>=+0.12%, got P={p_tp1*100:.1f}%, EV={ev_result.expected_net_return_pct:+.2f}%)"
             conviction = float(meta_eval.get("win_probability_pct", 65.0))
             tp1_price = cand_tp1
             tp2_price = cand_tp2
@@ -2162,14 +2219,14 @@ class SignalGenerationSystem:
                         "BREAKER" in str(canonical_strategy or "").upper() or
                         bool(candle_metrics and candle_metrics.get("is_vwap_bounce"))
                     ))
-                )) or
-                ("RANGE_ROTATION" in str(canonical_strategy or "").upper() and actual_rr >= 1.80 and arch_headroom >= 15.0) or
+                ) and not (direction == "LONG" and is_range_regime and not bool(candle_metrics and candle_metrics.get("is_vwap_bounce")))) or
+                ("RANGE_ROTATION" in str(canonical_strategy or "").upper() and actual_rr >= 1.50 and arch_headroom >= 15.0 and p_tp1 >= 0.55) or
                 (arch_strategy == "DIRECTIONAL_BREAKOUT_EXPANSION" and p_tp1 >= 0.55) or
                 ("LIQUIDITY_RECLAIM" in str(canonical_strategy or "").upper() and p_tp1 >= 0.55) or
                 (alignment_score >= 80.0 and ev_result.expected_net_return_pct >= 0.10) or
                 (p_tp1 >= 0.60 and ev_result.expected_net_return_pct >= 0.10)
             ) and ev_result.expected_net_return_pct > 0.0 and actual_rr >= 1.50) or
-            (is_macro_structural_archetype and ev_result.expected_net_return_pct >= 0.10 and p_tp1 >= 0.52 and actual_rr >= 1.50) or
+            (is_macro_structural_archetype and ev_result.expected_net_return_pct >= 0.10 and p_tp1 >= 0.54 and actual_rr >= 1.50) or
             (p_tp1 >= 0.62 and ev_result.expected_net_return_pct >= 0.10 and actual_rr >= 1.50)
         ) or ev_result.expected_net_return_pct <= 0.0:
             status = "HOLD_FILTERED_BY_NEGATIVE_NET_EXPECTANCY" if ev_result.expected_net_return_pct <= 0.0 else "HOLD_MARGINAL_NET_EXPECTANCY"
