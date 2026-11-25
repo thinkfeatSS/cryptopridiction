@@ -20,7 +20,7 @@ from app.config import settings
 from app.models import SignalAudit, PaperPosition, ClosedTrade, MarketForecast
 from app.services.db_sync import sync_files_to_db_live, get_sync_state, get_cached_forecast, set_cached_forecast
 from app.engine.scanner.filters import UniverseFilter
-from app.engine.config import is_meme_coin
+from app.engine.config import is_meme_coin, safe_atomic_replace
 from app.quant_v16.validation import safe_float, safe_ratio
 
 _LIVE_PRICES_CACHE: Dict[str, float] = {}
@@ -239,7 +239,7 @@ def _async_refresh_tickers(sync: bool = False):
                         tmp_file = f"{cache_file}.tmp_{os.getpid()}_{threading.get_ident()}"
                         with open(tmp_file, "w", encoding="utf-8") as f:
                             json.dump({"timestamp": _LIVE_PRICES_TS, "tickers": prices}, f)
-                        os.replace(tmp_file, cache_file)
+                        safe_atomic_replace(tmp_file, cache_file)
                     except Exception:
                         pass
         except Exception:
@@ -332,7 +332,7 @@ def fetch_live_binance_prices(max_age_seconds: float = 15.0) -> Dict[str, float]
                     tmp_file = f"{cache_file}.tmp_{os.getpid()}_{threading.get_ident()}"
                     with open(tmp_file, "w", encoding="utf-8") as f:
                         json.dump({"timestamp": _LIVE_PRICES_TS, "tickers": prices}, f)
-                    os.replace(tmp_file, cache_file)
+                    safe_atomic_replace(tmp_file, cache_file)
                 except Exception:
                     pass
                 return _LIVE_PRICES_CACHE
@@ -2306,7 +2306,7 @@ class SignalService:
                     writer.writeheader()
                     for r in rows:
                         writer.writerow(r)
-                os.replace(temp, csv_path)
+                safe_atomic_replace(temp, csv_path)
             except Exception as e:
                 logger.warning(f"[SIGNAL SERVICE ⚠️] Failed syncing updates to {csv_path}: {e}")
 
@@ -2371,7 +2371,7 @@ class SignalService:
                     tmp_dyn = f"{dyn_path}.{time.time_ns()}.tmp"
                     with open(tmp_dyn, "w", encoding="utf-8") as df:
                         json.dump(dyn_data, df, indent=2)
-                    os.replace(tmp_dyn, dyn_path)
+                    safe_atomic_replace(tmp_dyn, dyn_path)
         except Exception as e:
             logger.warning(f"[SIGNAL SERVICE ⚠️] Failed syncing updates to {dyn_path}: {e}")
 
@@ -2398,7 +2398,7 @@ class SignalService:
                     tmp_imm = f"{immut_path}.{time.time_ns()}.tmp"
                     with open(tmp_imm, "w", encoding="utf-8") as imf:
                         json.dump(immut_data, imf, indent=2)
-                    os.replace(tmp_imm, immut_path)
+                    safe_atomic_replace(tmp_imm, immut_path)
         except Exception as e:
             logger.warning(f"[SIGNAL SERVICE ⚠️] Failed syncing updates to {immut_path}: {e}")
 
@@ -2446,7 +2446,7 @@ class SignalService:
                     try:
                         with open(tmp_calib, "w", encoding="utf-8") as f:
                             json.dump(default_calibration, f, indent=2)
-                        os.replace(tmp_calib, calib_path)
+                        safe_atomic_replace(tmp_calib, calib_path)
                     finally:
                         if os.path.exists(tmp_calib):
                             try:
@@ -2571,7 +2571,7 @@ class SignalService:
             tmp_p = f"{calib_path}.{threading.get_ident()}.{time.time_ns()}.tmp"
             with open(tmp_p, "w", encoding="utf-8") as f:
                 json.dump(calibration_metrics, f, indent=2)
-            os.replace(tmp_p, calib_path)
+            safe_atomic_replace(tmp_p, calib_path)
         except Exception:
             pass
 
@@ -3030,6 +3030,7 @@ class SignalService:
             "total_closed_win_rate_pct": total_closed_wr,
             "decisive_win_rate_pct": decisive_wr,
             "total_net_profit_usd": round(net_profit, 2),
+            "realized_pnl_usd": round(net_profit, 2),
             "gross_profit_usd": round(float(ledger_data.get("gross_profit_usd", 0.0)), 2),
             "gross_loss_usd": round(float(ledger_data.get("gross_loss_usd", 0.0)), 2),
             "total_fees_paid_usd": round(float(ledger_data.get("total_fees_paid_usd", 0.0)), 2),
@@ -3098,7 +3099,7 @@ class SignalService:
             try:
                 with open(tmp_p, "w", encoding="utf-8") as f:
                     json.dump(clean_ledger, f, indent=4)
-                os.replace(tmp_p, p_path)
+                safe_atomic_replace(tmp_p, p_path)
             finally:
                 if os.path.exists(tmp_p):
                     try:

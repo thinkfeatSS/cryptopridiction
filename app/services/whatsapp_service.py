@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, List, Union, Set
 from datetime import datetime, timezone
 
 from app.config import settings
-from app.engine.config import is_meme_coin
+from app.engine.config import is_meme_coin, safe_atomic_replace
 from app.quant_v16.validation import safe_float, safe_ratio
 
 logger = logging.getLogger("whatsapp_service")
@@ -158,7 +158,7 @@ class WhatsAppService:
                 data = list(self._spool.values())
             with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
-            os.replace(tmp_file, self._spool_file)
+            safe_atomic_replace(tmp_file, self._spool_file)
         except Exception as e:
             logger.warning(f"[WHATSAPP ⚠️] Failed to persist alert spool: {e}")
 
@@ -212,7 +212,7 @@ class WhatsAppService:
             tmp_f = f"{self._dead_letter_file}.tmp_{os.getpid()}_{threading.get_ident()}"
             with open(tmp_f, "w", encoding="utf-8") as f:
                 json.dump(dead_letters, f, indent=2)
-            os.replace(tmp_f, self._dead_letter_file)
+            safe_atomic_replace(tmp_f, self._dead_letter_file)
         except Exception as e:
             logger.warning(f"[WHATSAPP ❌] Failed to record dead-letter message: {e}")
 

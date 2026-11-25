@@ -106,6 +106,7 @@ def _safe_portfolio(db: Session) -> dict:
                     "total_closed_win_rate_pct": total_closed_wr,
                     "decisive_win_rate_pct": decisive_wr,
                     "total_net_profit_usd": round(sum(c["realized_pnl_usd"] for c in closed), 2),
+                    "realized_pnl_usd": round(sum(c["realized_pnl_usd"] for c in closed), 2),
                     "profit_factor": float(data.get("profit_factor", 0.0)),
                     "sharpe_ratio": float(data.get("sharpe_ratio", 0.0)),
                     "sortino_ratio": float(data.get("sortino_ratio", 0.0)),

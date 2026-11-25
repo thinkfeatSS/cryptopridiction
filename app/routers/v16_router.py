@@ -1296,7 +1296,7 @@ def _get_v16_events(limit: int = 100) -> List[Dict[str, Any]]:
             with open(ev_p + ".tmp", "w", encoding="utf-8") as f:
                 for ev in reversed(events[:300]):
                     f.write(json.dumps(ev) + "\n")
-            os.replace(ev_p + ".tmp", ev_p)
+            safe_atomic_replace(ev_p + ".tmp", ev_p)
         except Exception:
             pass
 

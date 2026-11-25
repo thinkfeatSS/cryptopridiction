@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
 
-from app.engine.config import EXPORT_DIR, is_meme_coin
+from app.engine.config import EXPORT_DIR, is_meme_coin, safe_atomic_replace
 from app.engine.scanner.horizon_scanner import MultiHorizonScanner
 from app.engine.scanner.filters import UniverseFilter
 from app.engine.signals.signal_generator import SignalGenerationSystem
@@ -1538,7 +1538,7 @@ class UnifiedCryptoEngine:
         try:
             with open(temp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, default=str)
-            os.replace(temp, filepath)
+            safe_atomic_replace(temp, filepath)
         except Exception as e:
             logger.warning(f"[ENGINE ⚠️] Atomic write failed for {filepath}: {e}")
         finally:
@@ -1738,7 +1738,7 @@ class UnifiedCryptoEngine:
                     writer.writeheader()
                     for r in csv_all_rows:
                         writer.writerow(r)
-                os.replace(temp_csv, csv_path)
+                safe_atomic_replace(temp_csv, csv_path)
             except Exception as e:
                 logger.warning(f"[ENGINE ⚠️] Failed persisting cleaned ledger to {csv_path}: {e}")
 
@@ -1939,7 +1939,7 @@ class UnifiedCryptoEngine:
                         writer.writeheader()
                         for r in rows_to_append:
                             writer.writerow(r)
-                    os.replace(temp_init_csv, csv_path)
+                    safe_atomic_replace(temp_init_csv, csv_path)
                 finally:
                     if os.path.exists(temp_init_csv):
                         try:
@@ -2011,6 +2011,6 @@ class UnifiedCryptoEngine:
                 tmp_state = f"{state_path}.tmp.{time.time_ns()}"
                 with open(tmp_state, "w", encoding="utf-8") as sf:
                     json.dump(state_data, sf, indent=2)
-                os.replace(tmp_state, state_path)
+                safe_atomic_replace(tmp_state, state_path)
         except Exception as e:
             logger.warning(f"[ENGINE ⚠️] Failed clearing quarantine state in {state_path}: {e}")
