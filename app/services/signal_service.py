@@ -43,6 +43,28 @@ _TICKERS_24H_TS: float = 0.0
 
 _FETCHING_TICKERS = False
 _COINCAP_THROTTLED_UNTIL: float = 0.0
+
+
+def _parse_utc_dt(ts_val) -> Optional[datetime]:
+    """Parses both 'YYYY-MM-DD HH:MM:SS UTC' and ISO-8601 'YYYY-MM-DDTHH:MM:SS+00:00' into UTC datetime."""
+    if not ts_val:
+        return None
+    if isinstance(ts_val, datetime):
+        return ts_val if ts_val.tzinfo else ts_val.replace(tzinfo=timezone.utc)
+    s = str(ts_val).replace(" UTC", "").replace("Z", "+00:00").strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except Exception:
+            pass
+    return None
 _COINCAP_CONSECUTIVE_429: int = 0
 _PAPRIKA_THROTTLED_UNTIL: float = 0.0
 _PAPRIKA_CONSECUTIVE_429: int = 0
@@ -1113,12 +1135,17 @@ class SignalService:
                 if not pt_match:
                     fallback_pt = closed_paper_map.get((s_sym, norm_hz)) or closed_paper_map.get((s_sym.replace("/", "").replace(":USDT", ""), norm_hz))
                     if fallback_pt:
-                        sig_time = f"{s.date_utc or ''} {s.time_utc or ''}".strip()
-                        pt_closed_time = str(fallback_pt.get("closed_at_utc") or fallback_pt.get("closed_at") or "")
-                        if pt_closed_time and sig_time and pt_closed_time >= sig_time:
-                            pt_match = fallback_pt
-                        elif not sig_time:
-                            pt_match = fallback_pt
+                        pt_dir = str(fallback_pt.get("direction", "")).strip().upper()
+                        s_dir = str(getattr(s, "direction", "")).strip().upper()
+                        if pt_dir and s_dir and pt_dir == s_dir:
+                            sig_dt = _parse_utc_dt(f"{s.date_utc or ''} {s.time_utc or ''}")
+                            pt_closed_dt = _parse_utc_dt(fallback_pt.get("closed_at_utc") or fallback_pt.get("closed_at"))
+                            pt_opened_dt = _parse_utc_dt(fallback_pt.get("opened_at_utc") or fallback_pt.get("opened_at"))
+                            if sig_dt and pt_closed_dt and pt_closed_dt >= sig_dt:
+                                if not pt_opened_dt or pt_opened_dt >= (sig_dt - timedelta(minutes=2)):
+                                    pt_match = fallback_pt
+                            elif not sig_dt:
+                                pt_match = fallback_pt
 
                 if pt_match:
                     exit_reason = str(pt_match.get("exit_reason", ""))

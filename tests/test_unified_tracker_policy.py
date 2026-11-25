@@ -420,6 +420,16 @@ class TestUnifiedTrackerPolicy(unittest.TestCase):
         for k in keys:
             self.assertIsNone(cache_service.get_json(k), f"Expected cache key {k} to be invalidated")
 
+    def test_parse_utc_dt_prevents_iso_t_space_false_match(self):
+        """Regression test: '2026-11-25T00:05:00+00:00' is earlier than '2026-11-25 17:16:05 UTC',
+        even though ASCII 'T' > ' ' would evaluate True in naive string comparison."""
+        from app.services.signal_service import _parse_utc_dt
+        old_closed = _parse_utc_dt("2026-11-25T00:05:00+00:00")
+        new_signal = _parse_utc_dt("2026-11-25 17:16:05 UTC")
+        self.assertIsNotNone(old_closed)
+        self.assertIsNotNone(new_signal)
+        self.assertLess(old_closed, new_signal)
+
 
 if __name__ == "__main__":
     unittest.main()

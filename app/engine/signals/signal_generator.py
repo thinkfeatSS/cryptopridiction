@@ -1081,9 +1081,9 @@ class SignalGenerationSystem:
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_low = min(structural_low, float(candle_metrics["swept_price"]))
 
-            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.80% and >= 1.10x ATR)
+            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 2.20% and >= 1.40x ATR)
             if has_structural_anchor:
-                base_min_sl = max(exec_entry_price * 0.0180, active_atr * 1.10) if horizon_label == "15M" else max(exec_entry_price * 0.0200, active_atr * 1.30)
+                base_min_sl = max(exec_entry_price * 0.0220, active_atr * 1.40) if horizon_label == "15M" else max(exec_entry_price * 0.0220, active_atr * 1.40)
                 vol_cushion = max(active_atr * 0.65, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
             else:
                 base_min_sl = max(exec_entry_price * 0.0220, active_atr * 1.40) if horizon_label == "15M" else (active_atr * 1.60)
@@ -1146,9 +1146,9 @@ class SignalGenerationSystem:
             if candle_metrics and candle_metrics.get("swept_price"):
                 structural_high = max(structural_high, float(candle_metrics["swept_price"]))
 
-            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 1.80% and >= 1.10x ATR)
+            # For verified structural setups (Order Block / Liquidity Sweep), enforce realistic noise floor (>= 2.20% and >= 1.40x ATR)
             if has_structural_anchor:
-                base_min_sl = max(exec_entry_price * 0.0180, active_atr * 1.10) if horizon_label == "15M" else max(exec_entry_price * 0.0200, active_atr * 1.30)
+                base_min_sl = max(exec_entry_price * 0.0220, active_atr * 1.40) if horizon_label == "15M" else max(exec_entry_price * 0.0220, active_atr * 1.40)
                 vol_cushion = max(active_atr * 0.65, 4.0 * (float(spread_bps) / 10000.0) * exec_entry_price)
             else:
                 base_min_sl = max(exec_entry_price * 0.0220, active_atr * 1.40) if horizon_label == "15M" else (active_atr * 1.60)
@@ -2294,20 +2294,19 @@ class SignalGenerationSystem:
                     ))
                 )) or
                 ("RANGE_ROTATION" in str(canonical_strategy or "").upper() and actual_rr >= 1.80 and arch_headroom >= 15.0) or
-                (arch_strategy == "DIRECTIONAL_BREAKOUT_EXPANSION" and p_tp1 >= 0.55) or
                 ("LIQUIDITY_RECLAIM" in str(canonical_strategy or "").upper() and p_tp1 >= 0.55) or
-                (alignment_score >= 80.0 and ev_net_val >= 0.10) or
-                (p_tp1 >= 0.60 and ev_net_val >= 0.10)
+                (alignment_score >= 80.0 and ev_net_val >= 0.25) or
+                (p_tp1 >= 0.60 and ev_net_val >= 0.20)
             )
             is_unanimous_confluence = bool(
-                (alignment_score >= 80.0 and ev_net_val >= 0.10) or
+                (alignment_score >= 80.0 and ev_net_val >= 0.25) or
                 (is_ob_setup and order_block_setup and order_block_setup.get("is_nested_smc"))
             )
             if ev_net_val >= 1.00 and p_tp1 >= 0.65:
                 grade_prefix = "💎 Grade A+"
-            elif (ev_net_val >= 0.50 and p_tp1 >= 0.55) or (p_tp1 >= 0.58 and ev_net_val >= 0.10) or (is_unanimous_confluence and p_tp1 >= 0.55 and ev_net_val > 0.0):
+            elif (ev_net_val >= 0.50 and p_tp1 >= 0.55) or (p_tp1 >= 0.58 and ev_net_val >= 0.20) or (is_unanimous_confluence and p_tp1 >= 0.55 and ev_net_val >= 0.05):
                 grade_prefix = "⚡ Grade A"
-            elif (ev_net_val >= 0.25 and p_tp1 >= 0.50) or (has_elite_institutional_anchor and ev_net_val > 0.0 and p_tp1 >= 0.50) or (is_macro_structural_archetype and ev_net_val >= 0.10 and p_tp1 >= 0.52):
+            elif (ev_net_val >= 0.30 and p_tp1 >= 0.54) or (has_elite_institutional_anchor and ev_net_val >= 0.05 and p_tp1 >= 0.50):
                 grade_prefix = "⚖️ Grade B"
             else:
                 grade_prefix = "Grade C"

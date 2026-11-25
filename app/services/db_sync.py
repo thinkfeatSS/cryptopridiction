@@ -216,14 +216,24 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                 existing_active_pairs = {
                                     (str(r.get("symbol", "")).strip().upper(), str(r.get("horizon", "")).strip().upper())
                                     for r in records_to_process
-                                    if str(r.get("status", "")).strip().upper() in ["PENDING", "PENDING_EVALUATION", "ACTIVE", "TIER0_PROTECTED_BREAKEVEN"]
+                                    if str(r.get("status", "")).strip().upper() in [
+                                        "PENDING", "PENDING_EVALUATION", "ACTIVE", "RESTING_LIMIT",
+                                        "PENDING_LIMIT", "TIER0_PROTECTED_BREAKEVEN",
+                                        "TP1_LOCKED_BREAKEVEN", "TP2_LOCKED_TRAIL"
+                                    ]
                                 }
-                                # Pillar 6: Track recent signal timestamps for 45-minute cooldown deduplication
+                                # Pillar 6: Track recent signal timestamps for cooldown & exact-setup deduplication
                                 latest_pair_timestamps = {}
+                                latest_setup_timestamps = {}
                                 for r in records_to_process:
                                     r_sym = str(r.get("symbol", "")).strip().upper()
                                     r_hz = str(r.get("horizon", "")).strip().upper()
+                                    r_dir = str(r.get("direction", "")).strip().upper()
                                     r_norm_hz = "15M" if "15" in r_hz else ("24H" if ("24" in r_hz or "1D" in r_hz) else "1H")
+                                    try:
+                                        r_ep = round(float(r.get("entry_price") or 0.0), 6)
+                                    except Exception:
+                                        r_ep = 0.0
                                     d_r = str(r.get("date_utc", ""))
                                     t_r = str(r.get("time_utc", "")).replace(" UTC", "").strip()
                                     if d_r and t_r:
@@ -232,6 +242,9 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                             p_key = (r_sym, r_norm_hz)
                                             if p_key not in latest_pair_timestamps or ts_val > latest_pair_timestamps[p_key]:
                                                 latest_pair_timestamps[p_key] = ts_val
+                                            s_key = (r_sym, r_norm_hz, r_dir, r_ep)
+                                            if s_key not in latest_setup_timestamps or ts_val > latest_setup_timestamps[s_key]:
+                                                latest_setup_timestamps[s_key] = ts_val
                                         except Exception:
                                             pass
 
@@ -251,10 +264,18 @@ def sync_files_to_db_live(force: bool = False) -> bool:
                                     if (fs_sym, norm_hz) in existing_active_pairs:
                                         continue
 
-                                    # Zero Post-SL Blocking: Closed or stopped-out trades re-qualify immediately
-                                    # 30-Second Intra-Tick Guard: Prevents duplicate signal writes on the same scan cycle
+                                    # 15-Minute (900s) Pair Cooldown + 60-Minute (3600s) Identical Setup Guard
+                                    # Prevents db_sync from re-logging the same stale forecast snapshot every 30s
                                     last_pair_ts = latest_pair_timestamps.get((fs_sym, norm_hz), 0.0)
-                                    if (now_utc.timestamp() - last_pair_ts) < 30.0:
+                                    if (now_utc.timestamp() - last_pair_ts) < 900.0:
+                                        continue
+                                    fs_dir_chk = str(fs.get("dominant_direction") or fs.get("direction") or "LONG").upper()
+                                    try:
+                                        fs_ep_chk = round(float(fs.get("entry_price") or fs.get("current_price") or 0.0), 6)
+                                    except Exception:
+                                        fs_ep_chk = 0.0
+                                    last_setup_ts = latest_setup_timestamps.get((fs_sym, norm_hz, fs_dir_chk, fs_ep_chk), 0.0)
+                                    if (now_utc.timestamp() - last_setup_ts) < 3600.0:
                                         continue
 
                                     sym_clean = fs_sym.replace("/", "").replace("-", "")
