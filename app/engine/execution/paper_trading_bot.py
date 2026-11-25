@@ -1765,10 +1765,14 @@ class PaperTradingBot:
                             print(f"[PAPER BOT 🚀 RUNAWAY REVERSAL CONVERTED] {sym} ({direction} {norm_h}) price reversed early! Filled at ${curr_p:,.4f} with effective R:R 1:{eff_rr:.2f}")
                             remaining_positions.append(pos)
                             continue
-                        else:
-                            canc_detail = "Price expanded beyond chase threshold and reached TP1 without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.00) without limit fill"
+                        elif getattr(self, "enable_signal_expiry", False):
+                            canc_detail = "Price expanded beyond chase threshold without fill" if not tp_not_reached else f"Price dropped/expanded beyond chase threshold (R:R {eff_rr:.2f} < 1:1.00) without limit fill"
                             canc_rec = self._create_cancellation_record(pos, "CANCELLED_CHASE_EXCEEDED", canc_detail)
                             self._archive_cancelled_order(canc_rec, pos.get("desk"))
+                            continue
+                        else:
+                            # In no-expiry mode, continue waiting for fill
+                            remaining_positions.append(pos)
                             continue
 
                     # C. Macro Regime / NTZ Shift Invalidation (Fix 1)
